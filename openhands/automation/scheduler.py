@@ -18,9 +18,20 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
-from openhands.automation.models import Automation, AutomationRun
+from openhands.automation.git_sync import mark_git_sync_dirty
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationState,
+)
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    span,
+)
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
+from openhands.automation.utils.change_events import SYSTEM_ACTOR, set_audit_actor
 from openhands.automation.utils.run import create_pending_run
 
 
@@ -57,6 +68,7 @@ def _disable_invalid_cron_automation(
     error: BaseException,
 ) -> None:
     automation.enabled = False
+    automation.state = AutomationState.INACTIVE
     logger.error(
         "Disabling automation with invalid cron trigger: %s",
         reason,
@@ -126,6 +138,7 @@ async def _fetch_enabled_automations(
         select(Automation)
         .where(
             Automation.enabled.is_(True),
+            Automation.state == AutomationState.ACTIVE,
             Automation.deleted_at.is_(None),
             (Automation.last_polled_at.is_(None))
             | (Automation.last_polled_at < poll_threshold),
@@ -171,6 +184,7 @@ async def poll_and_schedule(
     created_runs: list[AutomationRun] = []
 
     async with session_factory() as session:
+        set_audit_actor(session, SYSTEM_ACTOR)
         automations = await _fetch_enabled_automations(
             session, batch_size, poll_threshold
         )
@@ -188,11 +202,33 @@ async def poll_and_schedule(
             for automation in automations:
                 automation.last_polled_at = now
 
-        due_automations = [a for a in automations if _is_automation_due_safely(a, now)]
+        due_automations = []
+        for automation in automations:
+            was_enabled = automation.enabled
+            if _is_automation_due_safely(automation, now):
+                due_automations.append(automation)
+            if was_enabled and not automation.enabled:
+                # _is_automation_due_safely can disable an automation as a side
+                # effect, which git sync needs to hear about too.
+                await mark_git_sync_dirty(session, automation)
 
         for automation in due_automations:
             try:
-                run = await create_pending_run(session, automation)
+                scheduler_attributes = automation_attributes(automation)
+                scheduler_attributes.update(
+                    {
+                        "automation.run.trigger_source": "cron",
+                        "automation.trigger_source": "cron",
+                    }
+                )
+                with span("automation.scheduler.fire", scheduler_attributes):
+                    run = await create_pending_run(
+                        session, automation, trigger_source="cron"
+                    )
+                    add_event(
+                        "automation.run.created",
+                        automation_attributes(automation, run),
+                    )
                 created_runs.append(run)
                 schedule_properties = {
                     "trigger_source": "cron",
@@ -200,13 +236,6 @@ async def poll_and_schedule(
                     if isinstance(automation.trigger, dict)
                     else None,
                 }
-                await capture_automation_event(
-                    "automation_run_scheduled",
-                    automation=automation,
-                    run=run,
-                    properties=schedule_properties,
-                    session=session,
-                )
                 await capture_automation_event(
                     "automation_run_created",
                     automation=automation,

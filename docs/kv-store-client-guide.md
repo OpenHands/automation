@@ -29,10 +29,15 @@ The KV store provides a Redis-like key-value interface for automations to persis
 
 | Limit | Value | Notes |
 |-------|-------|-------|
-| Max state size | 64 KB | Total size of all keys combined |
+| Max value size | 64 KB | Per individual value, not a total across keys |
+| Max keys per automation | none | Key count grows with database capacity; list keys is paginated |
 | Max key length | 255 chars | Keys are case-sensitive |
 | Reserved keys | `$` prefix | System use (e.g., `$version`) |
 | Max nesting depth | 32 levels | For nested objects/arrays |
+
+Each key is stored and limited independently, so hundreds of small values do
+not add up to a failure. A single value over 64 KB returns HTTP 413 with a
+structured `value_too_large` error carrying the `key`, `size` and `limit`.
 
 ## Authentication
 
@@ -90,13 +95,17 @@ curl -X DELETE \
 
 ```bash
 curl -H "Authorization: Bearer $AUTOMATION_KV_TOKEN" \
-  "$AUTOMATION_API_URL/v1/kv"
+  "$AUTOMATION_API_URL/v1/kv?limit=100&offset=0"
 ```
 
 **Response:**
 ```json
-{"keys": ["config", "counter", "last_run"], "count": 3}
+{"keys": ["config", "counter", "last_run"], "count": 3, "total": 3, "limit": 100, "offset": 0}
 ```
+
+Key listing is paginated (`limit` defaults to 100, max 1000; `offset` skips
+keys). `count` is this page's size and `total` is the automation's full key
+count, so page through with `offset` until `offset + count >= total`.
 
 ## Advanced Operations
 
@@ -353,7 +362,7 @@ async def increment_counter():
 ### DO ✅
 
 - **Use atomic operations** (`incr`, `push`, `pop`) when possible - they're conflict-free
-- **Keep state small** (< 64KB total, ideally < 8KB for best performance)
+- **Keep individual values small** (< 64KB each, ideally < 8KB for best performance)
 - **Design for idempotency** - operations may be retried
 - **Use batch endpoint** for multiple updates in one operation
 - **Implement proper retry logic** for concurrent event handlers
@@ -384,7 +393,7 @@ on 409 — see the example handler below.
 | 401 | Unauthorized | Check token |
 | 404 | Key not found | Handle missing key |
 | 409 | Conflict | Retry with backoff (see `Retry-After` header) |
-| 413 | Payload too large | Reduce state size |
+| 413 | Payload too large | Individual value over 64 KB; reduce that value |
 | 503 | Service unavailable | KV store not configured |
 
 ### 409 Conflict Types
@@ -442,7 +451,7 @@ If Prometheus metrics are enabled, monitor:
 - `kv_operation_duration_seconds`: Operation latency
 - `kv_lock_wait_duration_seconds`: Time waiting for row lock
 - `kv_conflict_total{reason="lock_timeout|version_mismatch"}`: Conflict rate
-- `kv_state_size_bytes`: State document size
+- `kv_state_size_bytes`: Stored size of each encrypted value
 
 High lock wait times or conflict rates indicate contention that may need architectural changes.
 

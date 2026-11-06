@@ -2,15 +2,17 @@
 
 import json
 import logging
-import re
 import uuid
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError
 from typing import Any
 
 import httpx
 from fastapi import Request
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from openhands.automation import __version__
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import get_config
 from openhands.automation.middleware import (
@@ -20,33 +22,56 @@ from openhands.automation.middleware import (
 from openhands.automation.models import (
     Automation,
     AutomationRun,
-    AutomationServiceMetadata,
+    AutomationRunAsKind,
+)
+from openhands.automation.utils.service_metadata import (
+    get_service_metadata,
+    set_service_metadata,
 )
 from openhands.automation.utils.time import ensure_utc
-from openhands.automation.utils.version import get_server_version_info
+from openhands.automation.utils.version import (
+    ServerVersionInfo,
+    get_sdk_version,
+    get_server_version_info,
+)
 
 
 logger = logging.getLogger("automation.telemetry")
+_telemetry_http_client: httpx.AsyncClient | None = None
 AUTOMATION_BACKEND_ID_PROPERTY = "automation_backend_id"
 FRONTEND_DISTINCT_ID_PROPERTY = "frontend_distinct_id"
 POSTHOG_CAPTURE_PATH = "/capture/"
 TELEMETRY_CONSENT_METADATA_KEY = "posthog_frontend_consent_by_distinct_id"
 TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
 
-API_EVENT_PREFIX = "automation_api"
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
 
 
+def get_telemetry_http_client() -> httpx.AsyncClient:
+    """Return the process-wide client used for PostHog capture requests."""
+    global _telemetry_http_client
+    if _telemetry_http_client is None:
+        _telemetry_http_client = httpx.AsyncClient(timeout=2.0)
+    return _telemetry_http_client
+
+
+async def close_telemetry_http_client() -> None:
+    """Close the shared telemetry client and clear it for future lifespans."""
+    global _telemetry_http_client
+    client = _telemetry_http_client
+    _telemetry_http_client = None
+    if client is not None:
+        await client.aclose()
+
+
 async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
-    existing = await session.scalar(
-        select(AutomationServiceMetadata.value).where(
-            AutomationServiceMetadata.key == TELEMETRY_BACKEND_DISTINCT_ID_KEY
-        )
-    )
+    existing = await get_service_metadata(session, TELEMETRY_BACKEND_DISTINCT_ID_KEY)
     if existing:
         return existing
 
     generated = f"automation-backend:{uuid.uuid4()}"
+    # DO NOTHING, not the DO UPDATE set_service_metadata does: a concurrent
+    # first caller's id may already have been handed to other callers.
     await session.execute(
         text(
             "INSERT INTO automation_service_metadata (key, value) "
@@ -55,11 +80,7 @@ async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
         {"key": TELEMETRY_BACKEND_DISTINCT_ID_KEY, "value": generated},
     )
     return (
-        await session.scalar(
-            select(AutomationServiceMetadata.value).where(
-                AutomationServiceMetadata.key == TELEMETRY_BACKEND_DISTINCT_ID_KEY
-            )
-        )
+        await get_service_metadata(session, TELEMETRY_BACKEND_DISTINCT_ID_KEY)
         or generated
     )
 
@@ -113,11 +134,7 @@ def _parse_telemetry_consent_map(raw_value: str | None) -> dict[str, bool]:
 
 
 async def _load_telemetry_consent_map(session: AsyncSession) -> dict[str, bool]:
-    raw_value = await session.scalar(
-        select(AutomationServiceMetadata.value).where(
-            AutomationServiceMetadata.key == TELEMETRY_CONSENT_METADATA_KEY
-        )
-    )
+    raw_value = await get_service_metadata(session, TELEMETRY_CONSENT_METADATA_KEY)
     return _parse_telemetry_consent_map(raw_value)
 
 
@@ -135,15 +152,7 @@ async def set_stored_telemetry_consent(
     consents = await _load_telemetry_consent_map(session)
     consents[_normalize_frontend_distinct_id(frontend_distinct_id)] = consent_granted
     serialized = json.dumps(consents, sort_keys=True)
-    await session.execute(
-        text(
-            "INSERT INTO automation_service_metadata (key, value) "
-            "VALUES (:key, :value) "
-            "ON CONFLICT (key) DO UPDATE SET "
-            "value = :value, updated_at = CURRENT_TIMESTAMP"
-        ),
-        {"key": TELEMETRY_CONSENT_METADATA_KEY, "value": serialized},
-    )
+    await set_service_metadata(session, TELEMETRY_CONSENT_METADATA_KEY, serialized)
     return has_granted_telemetry_consent(consents)
 
 
@@ -207,61 +216,6 @@ def _trusted_telemetry_context(
 def get_request_authenticated_user(request: Request) -> AuthenticatedUser | None:
     user = getattr(request.state, "authenticated_user", None)
     return user if isinstance(user, AuthenticatedUser) else None
-
-
-def _clean_event_suffix(value: str | None) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", value or "unknown").strip("_")
-    return cleaned.lower() or "unknown"
-
-
-def _route_template(request: Request) -> str:
-    route = request.scope.get("route")
-    route_path = getattr(route, "path", None)
-    if isinstance(route_path, str) and route_path:
-        return route_path
-    return request.url.path
-
-
-def _route_operation(request: Request) -> str:
-    endpoint = request.scope.get("endpoint")
-    endpoint_name = getattr(endpoint, "__name__", None)
-    if isinstance(endpoint_name, str) and endpoint_name:
-        return endpoint_name
-    route = request.scope.get("route")
-    route_name = getattr(route, "name", None)
-    return route_name if isinstance(route_name, str) else "unknown"
-
-
-def should_capture_api_route(request: Request) -> bool:
-    path = request.url.path
-    settings = get_config().service
-    base_path = settings.base_path.rstrip("/")
-
-    return path.startswith(f"{base_path}/v1")
-
-
-async def capture_api_route_event(
-    request: Request,
-    *,
-    status_code: int,
-    duration_ms: int,
-    exception_type: str | None = None,
-) -> None:
-    operation = _clean_event_suffix(_route_operation(request))
-    await capture_automation_event(
-        f"{API_EVENT_PREFIX}_{operation}",
-        request=request,
-        user=get_request_authenticated_user(request),
-        properties={
-            "http_method": request.method,
-            "route_path": _route_template(request),
-            "route_operation": operation,
-            "status_code": status_code,
-            "success": status_code < 400,
-            "duration_ms": duration_ms,
-            **({"exception_type": exception_type} if exception_type else {}),
-        },
-    )
 
 
 def _trigger_type(automation: Automation | None) -> str | None:
@@ -332,6 +286,20 @@ def _failure_kind_from_error_detail(error_detail: str | None) -> str | None:
     return "execution_error"
 
 
+@lru_cache(maxsize=1)
+def _installed_sdk_version() -> str:
+    # Only successful lookups are cached: lru_cache does not memoize exceptions.
+    return get_sdk_version()
+
+
+def _server_version_properties() -> ServerVersionInfo:
+    try:
+        sdk_version = _installed_sdk_version()
+    except PackageNotFoundError:
+        return get_server_version_info(missing_sdk_version="unknown")
+    return {"package_version": __version__, "sdk_version": sdk_version}
+
+
 def _base_properties(
     *,
     request_context: TelemetryRequestContext,
@@ -341,10 +309,16 @@ def _base_properties(
     backend_distinct_id: str,
 ) -> dict[str, Any]:
     settings = get_config().service
+    # A self-hosted (OHE) deployment runs in cloud mode but is not remote; the
+    # override labels its events correctly.
+    deployment_mode = settings.telemetry_deployment_mode or (
+        "local" if settings.is_local_mode else "cloud"
+    )
     properties: dict[str, Any] = {
-        "deployment_mode": "local" if settings.is_local_mode else "cloud",
+        "deployment_mode": deployment_mode,
+        "deployment_kind": "remote" if deployment_mode == "cloud" else "local",
         "automation_service": "openhands_automation",
-        **get_server_version_info(missing_sdk_version="unknown"),
+        **_server_version_properties(),
     }
 
     properties[AUTOMATION_BACKEND_ID_PROPERTY] = backend_distinct_id
@@ -361,6 +335,10 @@ def _base_properties(
             {
                 "automation_id": str(automation.id),
                 "automation_enabled": automation.enabled,
+                # None on a row not flushed yet: the column default is not applied.
+                "run_as_kind": (
+                    automation.run_as_kind or AutomationRunAsKind.USER
+                ).value,
                 "trigger_type": _trigger_type(automation),
                 "timeout_seconds": automation.timeout,
             }
@@ -404,6 +382,43 @@ def _base_properties(
             )
             properties["duration_ms"] = duration_ms
 
+    return properties
+
+
+def automation_created_event() -> str:
+    """Name of the automation-created event on this deployment.
+
+    Self-hosted Enterprise reports it as ``ohe_automation_created`` (OHE-3657);
+    every other deployment keeps ``automation_created``.
+    """
+    if get_config().service.telemetry_deployment_mode == "self_hosted":
+        return "ohe_automation_created"
+    return "automation_created"
+
+
+async def automation_created_properties(
+    session: AsyncSession, automation: Automation
+) -> dict[str, Any]:
+    """Properties every ``automation_created`` capture carries.
+
+    ``is_first_automation_in_org`` is true when no other automation row exists
+    in the organization, so the first creation marks activation (OHE-3657).
+    Never raises: a failed count leaves the flag out rather than failing the
+    request.
+    """
+    properties: dict[str, Any] = {"automation_name": automation.name}
+    try:
+        others = await session.scalar(
+            select(func.count())
+            .select_from(Automation)
+            .where(
+                Automation.org_id == automation.org_id,
+                Automation.id != automation.id,
+            )
+        )
+        properties["is_first_automation_in_org"] = (others or 0) == 0
+    except Exception:
+        logger.debug("Failed to count automations for telemetry", exc_info=True)
     return properties
 
 
@@ -505,9 +520,8 @@ async def _capture_automation_event(
         "properties": event_properties,
     }
 
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        response = await client.post(
-            f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
-            json=payload,
-        )
-        response.raise_for_status()
+    response = await get_telemetry_http_client().post(
+        f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
+        json=payload,
+    )
+    response.raise_for_status()

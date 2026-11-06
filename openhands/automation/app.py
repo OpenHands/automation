@@ -8,28 +8,37 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
-from openhands.automation.config import get_config, get_settings
+from openhands.automation.config import ServiceSettings, get_config, get_settings
 from openhands.automation.db import (
     create_engine,
     create_session_factory,
+    is_sqlite_url,
+    normalize_url_for_alembic,
     set_sqlite_mode,
 )
 from openhands.automation.dispatcher import dispatcher_loop
+from openhands.automation.draft_router import router as draft_router
 from openhands.automation.event_router import router as event_router
+from openhands.automation.git_sync import git_sync_loop
+from openhands.automation.git_sync.router import router as git_sync_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
 from openhands.automation.middleware import (
     ApiKeyAwareCORSMiddleware,
     TelemetryContextMiddleware,
-    api_route_telemetry_middleware,
 )
+from openhands.automation.observability import init_observability
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.streams import stream_supervisor_loop
+from openhands.automation.telemetry import (
+    close_telemetry_http_client,
+    get_telemetry_http_client,
+)
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
@@ -40,6 +49,49 @@ from openhands.automation.webhook_router import router as webhook_router
 logger = logging.getLogger("automation.app")
 
 
+def _find_migrations_path() -> Path:
+    # When installed via pip/uvx, migrations are bundled inside
+    # automation/migrations.
+    package_dir = Path(__file__).parent
+    migrations_path = package_dir / "migrations"
+    if migrations_path.is_dir():
+        return migrations_path
+    # Fallback: a source checkout keeps migrations at the repo root --
+    # two levels up from openhands/automation, not one.
+    repo_root_migrations = package_dir.parent.parent / "migrations"
+    if repo_root_migrations.is_dir():
+        return repo_root_migrations
+    msg = (
+        f"Migrations directory not found. "
+        f"Checked: {migrations_path}, {repo_root_migrations}"
+    )
+    raise RuntimeError(msg)
+
+
+async def run_migrations(settings: ServiceSettings) -> None:
+    """Run ``alembic upgrade head`` against the configured database."""
+    from alembic import command
+    from alembic.config import Config
+
+    alembic_cfg = Config()
+    alembic_cfg.set_main_option("script_location", str(_find_migrations_path()))
+    if is_sqlite_url(settings.db_url):
+        # Set the database URL for Alembic to use (sync version)
+        db_url = normalize_url_for_alembic(settings.db_url)
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+
+    logger.info("Applying database migrations")
+    try:
+        # On PostgreSQL the advisory lock in migrations/env.py can wait for
+        # another replica, so keep the synchronous upgrade off the event loop.
+        await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+    except Exception as e:
+        logger.error(f"Failed to apply database migrations: {e}")
+        msg = f"Database migration failed. Database may be inconsistent: {e}"
+        raise RuntimeError(msg) from e
+    logger.info("Database migrations applied successfully")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
@@ -48,6 +100,7 @@ async def lifespan(app: FastAPI):
 
     # Apply the repo-wide JSON structured-logging convention
     setup_all_loggers()
+    init_observability()
 
     # Silence noisy third-party loggers
     for noisy_logger in (
@@ -65,6 +118,7 @@ async def lifespan(app: FastAPI):
 
     # Create shared httpx client for auth (stored in app.state for DI)
     app.state.http_client = create_http_client()
+    get_telemetry_http_client()
 
     # Create engine and session factory, store in app.state
     engine_result = await create_engine(settings)
@@ -75,47 +129,11 @@ async def lifespan(app: FastAPI):
     # Set SQLite mode flag for scheduler/dispatcher to use
     set_sqlite_mode(engine_result.is_sqlite)
 
-    # Auto-run migrations for SQLite on startup
-    # This ensures the schema is always up-to-date for local deployments
-    # For PostgreSQL, migrations are typically run separately via `alembic upgrade head`
-    if engine_result.is_sqlite:
-        from alembic import command
-        from alembic.config import Config
-
-        from openhands.automation.db import normalize_sqlite_url_for_alembic
-
-        # Find migrations folder relative to this package.
-        # When installed via pip/uvx, migrations are bundled inside
-        # automation/migrations.
-        package_dir = Path(__file__).parent
-        migrations_path = package_dir / "migrations"
-
-        if not migrations_path.is_dir():
-            # Fallback: check if running from source (migrations at repo root)
-            repo_root_migrations = package_dir.parent / "migrations"
-            if repo_root_migrations.is_dir():
-                migrations_path = repo_root_migrations
-            else:
-                msg = (
-                    f"Migrations directory not found. "
-                    f"Checked: {migrations_path}, {repo_root_migrations}"
-                )
-                raise RuntimeError(msg)
-
-        alembic_cfg = Config()
-        alembic_cfg.set_main_option("script_location", str(migrations_path))
-        # Set the database URL for Alembic to use (sync version)
-        db_url = normalize_sqlite_url_for_alembic(settings.db_url)
-        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
-
-        # Run migrations synchronously (Alembic doesn't support async)
-        try:
-            command.upgrade(alembic_cfg, "head")
-            logger.info("SQLite database migrations applied successfully")
-        except Exception as e:
-            logger.error(f"Failed to apply SQLite migrations: {e}")
-            msg = f"SQLite migration failed. Database may be inconsistent: {e}"
-            raise RuntimeError(msg) from e
+    # SQLite always migrates on startup. PostgreSQL migrates here only when
+    # AUTOMATION_RUN_MIGRATIONS_ON_STARTUP is set; otherwise run
+    # `alembic upgrade head` separately.
+    if engine_result.is_sqlite or settings.run_migrations_on_startup:
+        await run_migrations(settings)
 
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()
@@ -149,7 +167,7 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher_task = dispatcher_task
     logger.info("Background dispatcher started")
 
-    # Watchdog: marks stale RUNNING runs as FAILED
+    # Watchdog: marks stale RUNNING runs as FAILED and runs periodic janitors
     watchdog_task = asyncio.create_task(
         watchdog_loop(
             app.state.session_factory,
@@ -160,6 +178,51 @@ async def lifespan(app: FastAPI):
     app.state.watchdog_task = watchdog_task
     logger.info("Background watchdog started")
 
+    # Git sync: mirrors each org's automations to/from its own git repo.
+    config = get_config()
+    if config.git_sync.git_sync_repo_url:
+        # Only once a repo exists: without one the loop is idle, and warning
+        # about pushing to a repo that isn't configured is noise on the start
+        # of every deployment.
+        if settings.is_local_mode:
+            logger.warning(
+                "Git sync is enabled — automation prompts and metadata will be "
+                "pushed to %s. Make sure that repo is private, since it may "
+                "contain sensitive automation content.",
+                config.git_sync.git_sync_repo_url,
+            )
+        else:
+            logger.warning(
+                "AUTOMATION_GIT_SYNC_REPO_URL is set but the service is not in "
+                "local mode; env-level repo config is ignored there. Each "
+                "organization configures its own repo from the Git Sync page."
+            )
+    # Started in every deployment, configured or not: each org's repo comes
+    # from the UI, and gating on it left the loop (and mark_git_sync_dirty)
+    # off for the process lifetime, reporting a healthy sync while exporting
+    # nothing.
+    #
+    # Started even while every org is manual-only, since this task is what
+    # notices a newly set interval. It idles without syncing until then.
+    git_sync_task = asyncio.create_task(
+        git_sync_loop(app.state.session_factory, shutdown_event=shutdown_event)
+    )
+    app.state.git_sync_task = git_sync_task
+    logger.info("Background git sync started")
+
+    # Stream sources: long-lived inbound connections (Slack Socket Mode),
+    # one supervised task each. Starts only once an app is configured.
+    streams_task = None
+    if config.streams.enabled:
+        streams_task = asyncio.create_task(
+            stream_supervisor_loop(
+                app.state.session_factory,
+                shutdown_event=shutdown_event,
+            )
+        )
+        app.state.streams_task = streams_task
+        logger.info("Background stream supervisor started")
+
     yield
 
     # Shutdown
@@ -167,11 +230,16 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    for task_name, task in [
+    shutdown_tasks: list[tuple[str, asyncio.Task]] = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
-    ]:
+        ("git_sync", git_sync_task),
+    ]
+    if streams_task is not None:
+        shutdown_tasks.append(("streams", streams_task))
+
+    for task_name, task in shutdown_tasks:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
@@ -183,6 +251,7 @@ async def lifespan(app: FastAPI):
                 pass
 
     await app.state.http_client.aclose()
+    await close_telemetry_http_client()
     await app.state.engine_result.dispose()
     logger.info("Automations service shut down")
 
@@ -206,7 +275,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.7.1",  # x-release-please-version
+        version="1.30.1",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",
@@ -215,9 +284,6 @@ def _create_app() -> FastAPI:
 
 
 app = _create_app()
-
-
-app.middleware("http")(api_route_telemetry_middleware)
 
 
 app.add_middleware(TelemetryContextMiddleware)
@@ -238,9 +304,11 @@ _base_path = get_settings().base_path
 app.include_router(uploads_router, prefix=_base_path)
 app.include_router(capabilities_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
+app.include_router(draft_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)
+app.include_router(git_sync_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
@@ -263,9 +331,8 @@ async def readiness():
     Returns 503 when the DB is unreachable so Kubernetes stops routing traffic.
     """
     try:
-        async with app.state.engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        async with app.state.engine.connect():
+            return {"status": "ready"}
     except Exception as e:
         logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(

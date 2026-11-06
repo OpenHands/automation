@@ -1,27 +1,32 @@
 """
 Webhook utility functions for event processing.
 
-Contains helpers for signature verification, webhook configuration lookup,
-and automation run creation for event-triggered automations.
+Contains helpers for webhook configuration lookup and automation run creation
+for event-triggered automations. Signature verification and the description of
+a source both live in `openhands.automation.providers`.
 """
 
-import hashlib
-import hmac
 import logging
 import uuid
-from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.config import Settings, get_settings
+from openhands.automation.config import get_settings
 from openhands.automation.db import using_sqlite
 from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     CustomWebhook,
+)
+from openhands.automation.providers import (
+    DEFAULT_VERIFIER,
+    get_provider,
+    is_builtin_source,
+    verify_signature,
 )
 from openhands.automation.schemas import EventTrigger, WebhookConfig
 
@@ -29,68 +34,16 @@ from openhands.automation.schemas import EventTrigger, WebhookConfig
 logger = logging.getLogger("automation.utils.webhook")
 
 
-# =============================================================================
-# Builtin Source Registry
-# =============================================================================
-# Registry pattern for builtin webhook sources. Each source maps to a function
-# that extracts the webhook secret from settings. Add new integrations here.
-
-BuiltinConfigFunc = Callable[[Settings], str | None]
-
-BUILTIN_SOURCES: dict[str, BuiltinConfigFunc] = {
-    "bitbucket_data_center": lambda s: s.webhook_secret or None,
-    "github": lambda s: s.webhook_secret or None,
-    "jira_dc": lambda s: s.webhook_secret or None,
-}
-
-
-def register_builtin_source(source: str, config_func: BuiltinConfigFunc) -> None:
-    """Register a new builtin webhook source.
-
-    Args:
-        source: Source name (e.g., "bitbucket")
-        config_func: Function that extracts the webhook secret from Settings
-    """
-    BUILTIN_SOURCES[source] = config_func
-
-
-def is_builtin_source(source: str) -> bool:
-    """Check if a source is a builtin integration."""
-    return source in BUILTIN_SOURCES
-
-
-# =============================================================================
-# Webhook Functions
-# =============================================================================
-
-
-def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
-    """
-    Verify HMAC-SHA256 signature.
-
-    Accepts both formats:
-    - GitHub/normalized: 'sha256=<hex>'
-    - Raw hex digest: '<hex>' (e.g., Linear)
-
-    Args:
-        payload: Raw request body bytes
-        signature: Signature from header
-        secret: The shared secret
-
-    Returns:
-        True if signature is valid
-    """
-    # Normalize: strip 'sha256=' prefix if present
-    if signature.startswith("sha256="):
-        signature = signature[7:]
-
-    computed = hmac.new(
-        secret.encode("utf-8"),
-        msg=payload,
-        digestmod=hashlib.sha256,
-    ).hexdigest()
-
-    return hmac.compare_digest(computed, signature)
+# `is_builtin_source` and `verify_signature` now live in `providers`; re-exported
+# here for callers that predate the registry.
+__all__ = [
+    "create_automation_run",
+    "get_event_automations",
+    "get_requested_event_types",
+    "get_webhook_config",
+    "is_builtin_source",
+    "verify_signature",
+]
 
 
 async def get_webhook_config(
@@ -115,14 +68,20 @@ async def get_webhook_config(
     settings = get_settings()
 
     # Check builtin sources first
-    if source in BUILTIN_SOURCES:
-        config_func = BUILTIN_SOURCES[source]
-        secret = config_func(settings)
+    provider = get_provider(source)
+    if provider is not None:
+        secret = (
+            provider.secret_from_settings(settings)
+            if provider.secret_from_settings
+            else None
+        )
         if secret:
             return WebhookConfig(
                 secret=secret,
                 is_builtin=True,
-                signature_header="X-Hub-Signature-256",  # GitHub's header
+                signature_header=provider.signature_header,
+                signature_scheme=provider.verifier,
+                event_id_header=provider.event_id_header,
             )
         return None
 
@@ -141,6 +100,10 @@ async def get_webhook_config(
             is_builtin=False,
             event_key_expr=webhook.event_key_expr,
             signature_header=webhook.signature_header,
+            # A cleared column reads as the default.
+            signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
+            # NULL means this source does not identify deliveries.
+            event_id_header=webhook.event_id_header,
         )
     return None
 
@@ -175,6 +138,7 @@ async def get_event_automations(
     base_filters = [
         Automation.org_id == org_id,
         Automation.enabled == True,  # noqa: E712
+        Automation.state == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 
@@ -194,8 +158,10 @@ async def get_event_automations(
             Automation.trigger.op("->>")("source") == literal(source),
         )
 
+    # Ordered so an event matching several automations locks their runs in the
+    # same order in every worker; otherwise two events on one subject deadlock.
     result = await session.execute(
-        select(Automation).where(*base_filters, trigger_filter)
+        select(Automation).where(*base_filters, trigger_filter).order_by(Automation.id)
     )
     automations = result.scalars().all()
 
@@ -215,6 +181,38 @@ async def get_event_automations(
     return result_pairs
 
 
+def _enabled_event_automation_filters(source: str) -> list[Any]:
+    """Filters selecting enabled, active event automations on a source."""
+    from sqlalchemy import func, literal
+
+    if using_sqlite():
+        trigger_filter = and_(
+            func.json_extract(Automation.trigger, "$.type") == literal("event"),
+            func.json_extract(Automation.trigger, "$.source") == literal(source),
+        )
+    else:
+        trigger_filter = and_(
+            Automation.trigger.op("->>")("type") == literal("event"),
+            Automation.trigger.op("->>")("source") == literal(source),
+        )
+    return [
+        Automation.enabled == True,  # noqa: E712
+        Automation.state == AutomationState.ACTIVE,
+        Automation.deleted_at.is_(None),
+        trigger_filter,
+    ]
+
+
+async def get_event_automation_org_ids(source: str, session: AsyncSession) -> list[str]:
+    """Organizations with an enabled event automation on a source."""
+    result = await session.execute(
+        select(Automation.org_id)
+        .where(*_enabled_event_automation_filters(source))
+        .distinct()
+    )
+    return sorted(str(org_id) for org_id in result.scalars().all())
+
+
 def _event_type_from_pattern(pattern: str) -> str:
     return pattern.split(".", 1)[0].strip()
 
@@ -232,26 +230,8 @@ async def get_requested_event_types(
     event type. Unsupported requested types are omitted when a supported set is
     provided.
     """
-    from sqlalchemy import func, literal
-
-    base_filters = [
-        Automation.enabled == True,  # noqa: E712
-        Automation.deleted_at.is_(None),
-    ]
-
-    if using_sqlite():
-        trigger_filter = and_(
-            func.json_extract(Automation.trigger, "$.type") == literal("event"),
-            func.json_extract(Automation.trigger, "$.source") == literal(source),
-        )
-    else:
-        trigger_filter = and_(
-            Automation.trigger.op("->>")("type") == literal("event"),
-            Automation.trigger.op("->>")("source") == literal(source),
-        )
-
     result = await session.execute(
-        select(Automation.trigger).where(*base_filters, trigger_filter)
+        select(Automation.trigger).where(*_enabled_event_automation_filters(source))
     )
 
     supported = (
@@ -281,6 +261,10 @@ async def create_automation_run(
     automation: Automation,
     session: AsyncSession,
     event_payload: dict[str, Any] | None = None,
+    subject_key: str | None = None,
+    trigger_event_id: uuid.UUID | None = None,
+    observability_parent_span_context: str | None = None,
+    observability_associations: dict[str, Any] | None = None,
 ) -> AutomationRun:
     """
     Create a PENDING automation run for an event-triggered automation.
@@ -291,6 +275,8 @@ async def create_automation_run(
         event_payload: The webhook payload that triggered this run (optional)
                        For GitHub events: model_dump() of parsed Pydantic event
                        For custom webhooks: the raw payload dict
+        subject_key: The external subject this run is about, for
+                     `continue_conversation` triggers.
 
     Returns:
         The created AutomationRun instance
@@ -299,8 +285,13 @@ async def create_automation_run(
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
+        trigger_source="event",
         event_payload=event_payload,
         telemetry_distinct_id=automation.telemetry_distinct_id,
+        subject_key=subject_key,
+        trigger_event_id=trigger_event_id,
+        observability_parent_span_context=observability_parent_span_context,
+        observability_associations=observability_associations,
     )
     session.add(run)
     return run

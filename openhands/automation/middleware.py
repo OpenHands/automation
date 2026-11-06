@@ -1,9 +1,7 @@
 """ASGI middleware for the automations service."""
 
 from dataclasses import dataclass
-from time import perf_counter
 
-from fastapi import Request
 from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -45,47 +43,20 @@ def build_telemetry_request_context(scope: Scope) -> TelemetryRequestContext:
 
 
 class TelemetryContextMiddleware:
-    """Extract best-effort frontend telemetry context from request headers."""
+    """Attach request telemetry context to request state for downstream use."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            scope.setdefault("state", {})["telemetry_context"] = (
-                build_telemetry_request_context(scope)
-            )
-        await self.app(scope, receive, send)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-
-async def api_route_telemetry_middleware(request: Request, call_next):
-    from openhands.automation.telemetry import (
-        capture_api_route_event,
-        should_capture_api_route,
-    )
-
-    should_capture = should_capture_api_route(request)
-    started_at = perf_counter()
-
-    try:
-        response = await call_next(request)
-    except Exception as exc:
-        if should_capture:
-            await capture_api_route_event(
-                request,
-                status_code=500,
-                duration_ms=int((perf_counter() - started_at) * 1000),
-                exception_type=type(exc).__name__,
-            )
-        raise
-
-    if should_capture:
-        await capture_api_route_event(
-            request,
-            status_code=response.status_code,
-            duration_ms=int((perf_counter() - started_at) * 1000),
+        scope.setdefault("state", {})["telemetry_context"] = (
+            build_telemetry_request_context(scope)
         )
-    return response
+        await self.app(scope, receive, send)
 
 
 # Header names (lowercase) that carry an explicit API key. Cookie auth is

@@ -15,83 +15,576 @@ in the ExecutionBackend (see automation/backends/).
 """
 
 import asyncio
+import io
 import json
 import logging
+import random
+import tarfile
 import uuid
+from collections.abc import Collection, Mapping
 from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from fastapi import HTTPException
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from openhands.automation.backends import get_backend
+from openhands.automation.auth import X_ORG_ID_HEADER
+from openhands.automation.backends import (
+    ConversationStart,
+    ExecutionBackend,
+    ExecutionContext,
+    StartedConversation,
+    get_backend,
+)
 from openhands.automation.config import ServiceSettings, get_config
+from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    ConversationStartError,
+    ConversationStartUnavailable,
+    DailySandboxLimitReachedError,
     PermanentDispatchError,
+    SandboxProvisioningError,
     TarballNotFoundError,
 )
-from openhands.automation.execution import execute_in_context
+from openhands.automation.execution import execute_in_context, upload_files
 from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
-    TarballUpload,
+    AutomationState,
 )
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    automation_env_metadata,
+    inject_trace_context,
+    span,
+)
+from openhands.automation.plugin_secrets import PluginSourceSecrets
+from openhands.automation.plugin_specs import (
+    PluginSpecError,
+    build_execution_payload,
+    plugin_secret_names,
+)
+from openhands.automation.preset_router import with_current_preset_runner
+from openhands.automation.subjects import conversation_id_for, service_account_id_of
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
+from openhands.automation.utils.app_server_repos import (
+    RepositorySplit,
+    split_repositories,
+)
+from openhands.automation.utils.finish_plugin import (
+    finish_plugin_dir,
+    finish_plugin_files,
+)
 from openhands.automation.utils.kv import create_kv_token
+from openhands.automation.utils.model_profiles import (
+    validate_agent_profile_allowlists_with_client,
+)
 from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
     mark_run_terminal,
+    run_is_running,
     update_bash_command_id,
+    update_run_current_phase,
+    update_run_resolved_runtime,
     update_run_timeout_at,
     update_sandbox_id,
 )
+from openhands.automation.utils.run_status_detail import (
+    RunStatusDetailKind,
+    RunStatusPhase,
+    make_run_status_detail,
+    run_status_detail_from_exception,
+)
 from openhands.automation.utils.tarball_validation import (
+    get_org_upload,
     is_http_url,
     parse_internal_upload_id,
 )
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.unhealthy import (
+    maybe_disable_unhealthy_automation_after_run,
+)
 
 
 logger = logging.getLogger("automation.dispatcher")
 
 
+_RETRYABLE_HTTP_STATUS_CODES = {408, 429}
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    return status_code in _RETRYABLE_HTTP_STATUS_CODES or status_code >= 500
+
+
+def _run_status_kind_for_http_status(status_code: int) -> RunStatusDetailKind:
+    if status_code == 429:
+        return RunStatusDetailKind.RATE_LIMITED
+    if status_code in {408, 504}:
+        return RunStatusDetailKind.TIMEOUT
+    if status_code >= 500:
+        return RunStatusDetailKind.SERVER_ERROR
+    return RunStatusDetailKind.UNKNOWN
+
+
+def _http_exception_status_detail(
+    exc: HTTPException,
+    *,
+    phase: RunStatusPhase,
+    source: str,
+    operation: str,
+) -> dict[str, Any]:
+    status_code = exc.status_code
+    return make_run_status_detail(
+        phase=phase,
+        kind=_run_status_kind_for_http_status(status_code),
+        detail=str(exc.detail),
+        transient=_is_retryable_http_status(status_code),
+        source=source,
+        operation=operation,
+        code=type(exc).__name__,
+        status_code=status_code,
+    )
+
+
+# The enterprise key mint answers 403/404 when the run-as identity can no
+# longer have a key (removed from the org, or the user is gone), and 401 when
+# the shared service key is wrong. Retrying cannot help.
+_RUN_AS_API_KEY_STATUS_CODES = frozenset({403, 404})
+_SERVICE_KEY_API_KEY_STATUS_CODES = frozenset({401})
+
+
+def _api_key_error_status_detail(
+    exc: APIKeyError, *, operation: str, error: str
+) -> dict[str, Any]:
+    """Run status detail for a failed run-as key mint.
+
+    A 403/404 concerns only this automation's run-as identity: kind ``auth``,
+    which the unhealthy-automation check counts, so the automation pauses after
+    the usual streak. A 401 is non-transient but keeps kind ``unknown`` on
+    purpose: the service key is shared, and a counted kind would pause every
+    automation when it is wrong. A 5xx, 408, 429 or a network error is
+    transient.
+    """
+    status_code = exc.status_code
+    if status_code in _RUN_AS_API_KEY_STATUS_CODES:
+        kind, transient = RunStatusDetailKind.AUTH, False
+    elif status_code in _SERVICE_KEY_API_KEY_STATUS_CODES:
+        kind, transient = RunStatusDetailKind.UNKNOWN, False
+    elif status_code is not None and _is_retryable_http_status(status_code):
+        kind, transient = _run_status_kind_for_http_status(status_code), True
+    elif isinstance(exc.__cause__, httpx.RequestError):
+        kind, transient = RunStatusDetailKind.TRANSPORT, True
+    else:
+        kind, transient = RunStatusDetailKind.UNKNOWN, False
+    return make_run_status_detail(
+        phase=RunStatusPhase.DISPATCH,
+        kind=kind,
+        detail=error,
+        transient=transient,
+        source="openhands_api",
+        operation=operation,
+        code=type(exc).__name__,
+        status_code=status_code,
+    )
+
+
+def _api_key_error_message(exc: APIKeyError, what: str) -> str:
+    """The failure message for ``exc``; permanent statuses get the likely cause."""
+    if exc.status_code in _SERVICE_KEY_API_KEY_STATUS_CODES:
+        # Enterprise answers 401 only when the shared service key is missing or
+        # wrong. That is an operator fault, not a run-as identity problem.
+        return (
+            f"Could not get an API key to {what} (HTTP 401). The service key "
+            "for the OpenHands API was rejected."
+        )
+    if exc.status_code in _RUN_AS_API_KEY_STATUS_CODES:
+        return (
+            f"Could not get an API key to {what} (HTTP {exc.status_code}). The "
+            "user or service account the automation runs as may be disabled or "
+            "no longer in the organization."
+        )
+    return f"Failed to get API key to {what}: {exc}"
+
+
+# Presets whose runner the service ships, so it can be told to attach to a
+# conversation the app server started for the run.
+_STOCK_PRESET_TYPES = frozenset({"prompt", "plugin"})
+_PLUGIN_SOURCE_KEYS = frozenset({"source", "ref", "repo_path"})
+
+
+def _conversation_tags(automation: Automation, run: AutomationRun) -> dict[str, str]:
+    """The tags the stock runners put on their conversations."""
+    return {
+        "automationtrigger": "automation",
+        "automationid": str(automation.id),
+        "automationname": automation.name[:256],
+        "automationrunid": str(run.id),
+    }
+
+
+def _conversation_start(
+    automation: Automation,
+    run: AutomationRun,
+    resolved_runtime: dict[str, Any] | None,
+    plugin_fetches: list[dict[str, Any]],
+    env_vars: dict[str, str],
+    runner_takes_repository_list: bool = False,
+    git_connections: Mapping[str, str | None] | None = None,
+) -> ConversationStart | None:
+    """What the app server needs to start this run's conversation, or None.
+
+    Only a run whose runner the service ships can attach to a conversation
+    started for it: the prompt and plugin presets, and plugin-spec runs on the
+    stock conversation runner. Custom tarballs keep creating their own.
+    A preset's repositories go to the app server only when its runner clones
+    just the ones it is told to (``AUTOMATION_RUNNER_REPOS``): an older runner
+    clones them all and would fail on the app server's checkouts. Of those,
+    only the ones on a provider and host the owner is connected to
+    (``git_connections``) go: the app server clones through that connection.
+    Without the owner's connections (None) the runner clones them all.
+    """
+    preset_type = (automation.preset_metadata or {}).get("preset_type")
+    if resolved_runtime is not None:
+        if resolved_runtime.get("runner") != "conversation":
+            return None
+        agent_profile_id = (
+            resolved_runtime.get("agent_profile_id") or automation.agent_profile_id
+        )
+        # The agent profile owns the model for plugin-spec runs.
+        llm_profile = None
+        plugins = [
+            {k: v for k, v in plugin.items() if k in _PLUGIN_SOURCE_KEYS}
+            for plugin in plugin_fetches
+        ]
+        repositories: list[dict[str, Any]] = []
+    elif preset_type in _STOCK_PRESET_TYPES:
+        preset_plugins: list[dict[str, Any]] = []
+        if preset_type == "plugin":
+            preset_plugins = (automation.preset_metadata or {}).get("plugins") or []
+            if not preset_plugins:
+                # An A/B experiment: the runner picks the variant's plugins and
+                # model itself, so only it can create that conversation.
+                return None
+        # The presets require the finish tool; the app server's start request
+        # takes that requirement as a plugin (see utils/finish_plugin.py).
+        plugins = [{"source": finish_plugin_dir(str(run.id))}, *preset_plugins]
+        agent_profile_id = automation.agent_profile_id
+        llm_profile = automation.model
+        repositories = (
+            [
+                {
+                    "repository": r.repository,
+                    "git_provider": r.git_provider,
+                    "branch": r.branch,
+                }
+                for r in _repository_split(automation, git_connections).app_server
+            ]
+            if runner_takes_repository_list and git_connections is not None
+            else []
+        )
+    else:
+        return None
+    return ConversationStart(
+        agent_profile_id=str(agent_profile_id) if agent_profile_id else None,
+        llm_profile=llm_profile or None,
+        conversation_id=env_vars.get("AUTOMATION_CONVERSATION_ID"),
+        plugins=plugins,
+        tags=_conversation_tags(automation, run),
+        repositories=repositories,
+    )
+
+
+def _repository_split(
+    automation: Automation, git_connections: Mapping[str, str | None] | None
+) -> RepositorySplit:
+    """A preset's repositories: those the app server clones, and the rest."""
+    return split_repositories(
+        (automation.preset_metadata or {}).get("repos"), git_connections or {}
+    )
+
+
+def _runner_repositories(
+    automation: Automation,
+    start: ConversationStart,
+    started: StartedConversation,
+    git_connections: Mapping[str, str | None] | None,
+) -> list[dict[str, Any]]:
+    """Repositories the runner still clones itself after the app server start.
+
+    Those the app server cannot take, plus the additional ones when it does
+    not report repositories (an app server from before it cloned several).
+    """
+    split = _repository_split(automation, git_connections)
+    runner = list(split.runner)
+    if not started.reports_repositories and len(start.repositories) > 1:
+        recorded = [
+            r
+            for r in (automation.preset_metadata or {}).get("repos") or []
+            if r not in split.runner
+        ]
+        runner.extend(recorded[1:])
+    return runner
+
+
+async def _owner_git_connections(
+    backend: ExecutionBackend,
+    client: httpx.AsyncClient,
+    ctx: ExecutionContext,
+    log_extra: dict[str, Any],
+) -> dict[str, str | None] | None:
+    """The run owner's git connections, or None when they cannot be read.
+
+    Without them no repository goes to the app server: the runner clones them
+    all, as it did before the app server cloned any.
+    """
+    try:
+        return await backend.git_connections(client, ctx)
+    except Exception as exc:
+        logger.warning(
+            "git_connections_unavailable: %s; the runner clones every repository",
+            str(exc) or type(exc).__name__,
+            extra=log_extra,
+        )
+        return None
+
+
+def _runner_takes_repository_list(tarball_source: bytes | str | None) -> bool:
+    """Whether a preset tarball's runner clones only ``AUTOMATION_RUNNER_REPOS``.
+
+    A preset tarball keeps the runner it was created with, so an automation
+    created before this support still clones every recorded repository itself.
+    """
+    if not isinstance(tarball_source, bytes):
+        return False
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tarball_source), mode="r:*") as tar:
+            member = tar.extractfile("main.py")
+            source = member.read() if member is not None else b""
+    except (tarfile.TarError, KeyError, OSError):
+        return False
+    return b"AUTOMATION_RUNNER_REPOS" in source
+
+
+def _check_launched_profile(
+    started: StartedConversation, requested: str | None
+) -> None:
+    """Fail when the app server launched from another profile, or none.
+
+    An app server that cannot resolve the profile falls back to composed
+    settings and reports no launched profile; the run must not go on as if
+    it had the one the automation selected.
+    """
+    if requested is None:
+        return
+    launched = started.agent_profile_id
+    if launched is not None and launched.lower() == requested.lower():
+        return
+    raise ConversationStartError(
+        f"Conversation {started.conversation_id} was launched from agent profile "
+        f"{launched or 'none'} instead of {requested}",
+        code="agent_profile_mismatch",
+    )
+
+
+def _conversation_start_status_detail(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, ConversationStartError):
+        if exc.status_code is not None:
+            kind = _run_status_kind_for_http_status(exc.status_code)
+        elif exc.code == "start_task_timeout":
+            kind = RunStatusDetailKind.TIMEOUT
+        else:
+            kind = RunStatusDetailKind.UNKNOWN
+        return make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=kind,
+            detail=str(exc),
+            transient=exc.transient,
+            source=(
+                "agent_server"
+                if exc.code == "finish_plugin_upload"
+                else "openhands_api"
+            ),
+            operation="start_conversation",
+            code=exc.code or type(exc).__name__,
+            status_code=exc.status_code,
+        )
+    return run_status_detail_from_exception(
+        exc,
+        phase=RunStatusPhase.DISPATCH,
+        source="openhands_api",
+        operation="start_conversation",
+    )
+
+
+def _plugin_agent_profile_requirement(
+    resolved_runtime: dict[str, Any],
+) -> dict[str, Any] | None:
+    manifest = resolved_runtime.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    runtime = manifest.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    requirement = runtime.get("agent_profile")
+    return requirement if isinstance(requirement, dict) else None
+
+
+async def _validate_plugin_run_agent_profile(
+    *,
+    client: httpx.AsyncClient,
+    backend: Any,
+    automation: Automation,
+    resolved_runtime: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    requirement = _plugin_agent_profile_requirement(resolved_runtime)
+    if requirement is None:
+        return None, None
+    if automation.agent_profile_id is None:
+        if requirement.get("required", True):
+            raise PluginSpecError(
+                "Plugin automation requires an agent profile selection"
+            )
+        return None, None
+
+    settings = get_config().service
+    api_key = await backend.get_api_key()
+    if backend.is_local_mode:
+        base_url = settings.agent_server_url.rstrip("/")
+        headers = {"X-Session-API-Key": api_key}
+    else:
+        base_url = settings.openhands_api_base_url.rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            X_ORG_ID_HEADER: str(automation.org_id),
+        }
+
+    try:
+        resolved_id, profile = await validate_agent_profile_allowlists_with_client(
+            automation.agent_profile_id,
+            None,
+            requirement.get("allowed_tools"),
+            client,
+            base_url=base_url,
+            headers=headers,
+            allowed_mcp_server_refs=requirement.get("allowed_mcp_server_refs"),
+            allowed_secret_refs=requirement.get("allowed_secret_refs"),
+            fetch_profile_detail=True,
+        )
+    except HTTPException as exc:
+        if _is_retryable_http_status(exc.status_code):
+            raise
+        raise PluginSpecError(str(exc.detail)) from exc
+    if resolved_id is None:
+        raise PluginSpecError("Plugin automation requires an agent profile selection")
+    return str(resolved_id), getattr(profile, "agent_kind", None) if profile else None
+
+
+async def _fetch_plugins_on_agent_server(
+    *,
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    plugin_fetches: list[dict[str, Any]],
+    secrets: PluginSourceSecrets | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch already-preflighted plugins on the target agent server.
+
+    A private source gets references for the secrets it names (``secrets``),
+    which the agent server resolves; the source itself is sent unexpanded.
+    """
+    fetched: list[dict[str, Any]] = []
+    headers = {"X-Session-API-Key": session_key} if session_key else {}
+    for plugin in plugin_fetches:
+        request: dict[str, Any] = {
+            key: value
+            for key, value in plugin.items()
+            if key in {"source", "ref", "repo_path"}
+        }
+        names = plugin_secret_names([plugin])
+        if names and secrets is not None:
+            request["secrets"] = secrets.fetch_request_secrets(names)
+        response = await client.post(
+            f"{agent_url.rstrip('/')}/api/plugins/fetch",
+            json=request,
+            headers=headers,
+            timeout=get_config().http.http_timeout,
+        )
+        if response.status_code >= 400:
+            try:
+                detail: Any = response.json().get("detail")
+            except Exception:
+                detail = response.text
+            code = detail.get("code") if isinstance(detail, dict) else None
+            if isinstance(detail, dict) and "message" in detail:
+                detail = f"{detail['message']} ({code})"
+            message = (
+                f"Agent server failed to fetch plugin {request.get('source')!r}: "
+                f"{detail}"
+            )
+            if _is_retryable_http_status(response.status_code):
+                raise httpx.HTTPStatusError(
+                    message, request=response.request, response=response
+                )
+            raise PluginSpecError(
+                message,
+                code=code if isinstance(code, str) else None,
+                status_code=response.status_code,
+            )
+        fetched.append(response.json())
+    return fetched
+
+
 async def _download_internal_tarball(
     upload_id: uuid.UUID,
+    org_id: uuid.UUID,
     session: AsyncSession | None,
 ) -> bytes:
     """Download a tarball from storage using the TarballUpload record.
 
+    Only an upload in ``org_id`` (the automation's org) is used; an upload in
+    another org is treated as missing.
+
     Raises:
-        TarballNotFoundError: If the tarball upload record doesn't exist.
-            This is a permanent error that should disable the automation.
+        TarballNotFoundError: If the tarball upload record doesn't exist in
+            ``org_id``, or if the record exists but its storage object is
+            missing. Both are permanent errors that should disable the
+            automation.
         ValueError: If no database session is provided.
     """
     if session is None:
         raise ValueError("Database session required to resolve oh-internal:// URLs")
 
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, org_id)
     if upload is None:
         raise TarballNotFoundError(
             f"Internal tarball upload not found: {upload_id}. "
             "The tarball may have been deleted."
         )
 
-    from openhands.automation.storage import get_file_store
+    from openhands.automation.storage import ObjectNotFoundError, get_file_store
 
     store = get_file_store()
-    return store.read(upload.storage_path)
+    try:
+        return store.read(upload.storage_path)
+    except ObjectNotFoundError as e:
+        # Only confirmed absence is permanent; transient storage errors raise
+        # plain FileNotFoundError and keep retrying on the next schedule tick.
+        raise TarballNotFoundError(
+            f"Internal tarball object missing from storage at "
+            f"{upload.storage_path!r} for upload {upload_id}. "
+            "Recreate the automation to restore it."
+        ) from e
 
 
 async def _poll_pending_runs(
@@ -111,8 +604,19 @@ async def _poll_pending_runs(
     """
     select_query = (
         select(AutomationRun)
+        .join(AutomationRun.automation)
         .options(selectinload(AutomationRun.automation))
-        .where(AutomationRun.status == AutomationRunStatus.PENDING)
+        .where(
+            AutomationRun.status == AutomationRunStatus.PENDING,
+            Automation.deleted_at.is_(None),
+            or_(
+                AutomationRun.trigger_source == "manual",
+                and_(
+                    Automation.enabled.is_(True),
+                    Automation.state == AutomationState.ACTIVE,
+                ),
+            ),
+        )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
@@ -151,11 +655,89 @@ def _build_event_payload(
         "automation_id": str(automation.id),
         "automation_name": automation.name,
     }
-    if run.event_payload:
-        payload["event"] = run.event_payload
+    # Events that arrived on this subject while the run was still queued are
+    # parked on the payload. Lift them into a field of our own, so the script
+    # still reads the provider's payload exactly as it arrived.
+    event = dict(run.event_payload or {})
+    follow_up_turns = event.pop(COALESCED_TURNS_KEY, None)
+    if event:
+        payload["event"] = event
+    if follow_up_turns:
+        payload["follow_up_turns"] = follow_up_turns
     if automation.model:
         payload["model"] = automation.model
     return payload
+
+
+def _provisioning_deadline_seconds(run_timeout_seconds: int) -> int:
+    """Watchdog budget for a run whose entrypoint has not started yet."""
+    sandbox_cfg = get_config().sandbox
+    return (
+        sandbox_cfg.sandbox_ready_timeout
+        + run_timeout_seconds
+        + sandbox_cfg.run_timeout_margin
+    )
+
+
+async def _acquire_execution_context(
+    run: AutomationRun,
+    backend: ExecutionBackend,
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    run_timeout_seconds: int,
+    log_ctx: dict[str, Any],
+) -> ExecutionContext | None:
+    """Get an execution context, retrying sandboxes that fail to start.
+
+    Only ``SandboxProvisioningError`` is retried: no automation code has run
+    and the failed sandbox is already deleted. Before each retry the run must
+    still be RUNNING; the same guarded write moves the watchdog deadline past
+    the next attempt. Returns None if the run was cancelled or reaped while
+    provisioning, after releasing any sandbox it got.
+    """
+    sandbox_cfg = get_config().sandbox
+    max_attempts = sandbox_cfg.sandbox_provision_max_attempts
+    attempt = 1
+    while True:
+        try:
+            ctx = await backend.get_execution_context(client)
+            break
+        except SandboxProvisioningError as exc:
+            exc.attempts = attempt
+            if attempt >= max_attempts:
+                raise
+            delay = (
+                sandbox_cfg.sandbox_provision_retry_delay
+                * 2 ** (attempt - 1)
+                * random.uniform(0.5, 1.5)
+            )
+            deadline = utcnow() + timedelta(
+                seconds=delay + _provisioning_deadline_seconds(run_timeout_seconds)
+            )
+            if not await update_run_timeout_at(session_factory, run.id, deadline):
+                logger.info(
+                    "Run no longer RUNNING; not retrying sandbox", extra=log_ctx
+                )
+                return None
+            logger.warning(
+                "Sandbox failed to start (attempt %d/%d), retrying in %.0fs: %s",
+                attempt,
+                max_attempts,
+                delay,
+                exc,
+                extra=log_ctx,
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
+
+    if not await run_is_running(session_factory, run.id):
+        logger.info(
+            "Run no longer RUNNING after provisioning; releasing sandbox",
+            extra=log_ctx,
+        )
+        await backend.release_context(client, ctx)
+        return None
+    return ctx
 
 
 async def _execute_run(
@@ -170,8 +752,10 @@ async def _execute_run(
     1. Build env vars and calculate timeout
     2. Get execution context (creates sandbox in Cloud, returns config in local)
     3. Prepare tarball source
-    4. Execute in context (upload tarball, start entrypoint)
-    5. Store sandbox_id for watchdog verification (if applicable)
+    4. Start the run's conversation through the app server (cloud mode,
+       stock runners), so the run gets the owner's agent profile, MCP and secrets
+    5. Execute in context (upload tarball, start entrypoint)
+    6. Store sandbox_id for watchdog verification (if applicable)
 
     The SDK inside the execution environment fires the completion callback on exit.
     The watchdog will verify status if the callback is missed.
@@ -187,9 +771,37 @@ async def _execute_run(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
-    async def _fail(error: str, disable: bool = False) -> None:
+    async def _fail(
+        error: str,
+        disable: bool = False,
+        status_detail: dict | None = None,
+    ) -> None:
         """Mark run as failed and optionally disable the automation."""
-        await mark_run_terminal(session_factory, run, AutomationRunStatus.FAILED, error)
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            error,
+            status_detail=status_detail,
+        )
+        automation_disabled = disable
+        if disable:
+            automation_disabled = await disable_automation(
+                session_factory,
+                automation.id,
+                error,
+                disabled_detail={"status_detail": status_detail}
+                if status_detail is not None
+                else None,
+                run_id=run.id,
+            )
+        else:
+            # Evaluate whether the automation has failed consecutively and may never
+            # succeed
+            automation_disabled = await maybe_disable_unhealthy_automation_after_run(
+                session_factory,
+                automation.id,
+            )
         await capture_automation_event(
             "automation_run_failed",
             automation=automation,
@@ -198,27 +810,168 @@ async def _execute_run(
             properties={
                 "trigger_source": "dispatcher",
                 "failure_kind": "dispatch_error",
-                "automation_disabled": disable,
+                "automation_disabled": automation_disabled,
             },
         )
-        if disable:
-            await disable_automation(session_factory, automation.id, error)
 
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
     effective_timeout = resolve_automation_timeout_seconds(automation.timeout)
 
-    # 2. Get execution context - if this fails, nothing to clean up
+    # 2. Preflight plugin automations before creating a sandbox. The agent server
+    # performs the real fetch after it is ready, but this catches bad sources,
+    # refs, manifests, and required plugins without consuming sandbox capacity.
+    work_dir = backend.get_work_dir(run_id)
+    entrypoint = automation.entrypoint
+    plugin_env: dict[str, str] = {}
+    resolved_runtime: dict[str, Any] | None = None
+    plugin_fetches: list[dict[str, Any]] = []
+    tarball_source: bytes | str | None = None
+
+    async def preflight_secrets(names: Collection[str]) -> Mapping[str, Any]:
+        # Private sources resolve their ${NAME} placeholders for the identity
+        # the automation runs as.
+        if not names:
+            return {}
+        return (await backend.plugin_source_secrets(client, names)).preflight
+
+    try:
+        if automation.plugin_spec:
+            (
+                tarball_source,
+                plugin_env,
+                resolved_runtime,
+                plugin_fetches,
+            ) = await build_execution_payload(
+                plugin_spec=automation.plugin_spec,
+                agent_profile_id=str(automation.agent_profile_id)
+                if automation.agent_profile_id
+                else None,
+                agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
+                llm_profile_name=automation.model,
+                work_dir=work_dir,
+                allow_local_sources=backend.is_local_mode,
+                secrets=preflight_secrets,
+            )
+            profile_id, profile_kind = await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=automation,
+                resolved_runtime=resolved_runtime,
+            )
+            if profile_id:
+                plugin_env["AUTOMATION_AGENT_PROFILE_ID"] = profile_id
+                resolved_runtime["agent_profile_id"] = profile_id
+            if profile_kind:
+                plugin_env["AUTOMATION_AGENT_PROFILE_KIND"] = profile_kind
+                resolved_runtime["agent_profile_kind"] = profile_kind
+            entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
+    except HTTPException as exc:
+        logger.warning(
+            "Transient plugin preflight error: %s",
+            exc.detail,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        await _fail(
+            str(exc.detail),
+            status_detail=_http_exception_status_detail(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="openhands_api",
+                operation="validate_agent_profile",
+            ),
+        )
+        return
+    except PluginSpecError as exc:
+        status_code = getattr(exc, "status_code", None)
+        if status_code is not None and _is_retryable_http_status(status_code):
+            logger.warning(
+                "Transient plugin preflight error: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(),
+            )
+            await _fail(
+                str(exc),
+                status_detail=make_run_status_detail(
+                    phase=RunStatusPhase.DISPATCH,
+                    kind=_run_status_kind_for_http_status(status_code),
+                    detail=str(exc),
+                    transient=True,
+                    source="automation_service",
+                    operation="preflight_plugin",
+                    code=getattr(exc, "code", None) or type(exc).__name__,
+                    status_code=status_code,
+                ),
+            )
+            return
+        logger.error(
+            "Permanent dispatch error, disabling automation: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="preflight_plugin",
+                code=getattr(exc, "code", None) or type(exc).__name__,
+                status_code=status_code,
+            ),
+        )
+        return
+    except APIKeyError as exc:
+        # The agent-profile check mints the owner's key (e.g. the owner left
+        # the org). Fail through _fail so the unhealthy check and failure
+        # telemetry run, the same as the non-plugin dispatch path.
+        logger.error(
+            "Plugin preflight could not get the API key: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        error = _api_key_error_message(exc, "run the plugin preflight")
+        await _fail(
+            error,
+            status_detail=_api_key_error_status_detail(
+                exc, operation="preflight_plugin", error=error
+            ),
+        )
+        return
+
+    # 3. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
     try:
-        ctx = await backend.get_execution_context(client)
+        ctx = await _acquire_execution_context(
+            run, backend, client, session_factory, effective_timeout, _log_ctx()
+        )
     except ConcurrencyLimitReachedError as exc:
         logger.warning(
             "Run skipped — organization concurrency limit reached: %s",
             exc,
             extra=_log_ctx(),
         )
-        await mark_run_terminal(session_factory, run, AutomationRunStatus.SKIPPED)
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=RunStatusDetailKind.CONCURRENCY_LIMIT,
+            detail=str(exc),
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.SKIPPED,
+            status_detail=status_detail,
+        )
         await capture_automation_event(
             "automation_run_skipped",
             automation=automation,
@@ -230,9 +983,91 @@ async def _execute_run(
             },
         )
         return
-    except Exception:
+    except DailySandboxLimitReachedError as exc:
+        logger.warning(
+            "Run skipped — daily sandbox limit reached: %s",
+            exc,
+            extra=_log_ctx(),
+        )
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=RunStatusDetailKind.DAILY_SANDBOX_LIMIT,
+            detail=str(exc),
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.SKIPPED,
+            status_detail=status_detail,
+        )
+        await capture_automation_event(
+            "automation_run_skipped",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "skip_reason": "daily_sandbox_limit",
+            },
+        )
+        return
+    except SandboxProvisioningError as exc:
+        logger.warning(
+            "Sandbox failed to start after %d attempt(s): %s",
+            exc.attempts,
+            exc,
+            extra=_log_ctx(sandbox_id=exc.sandbox_id),
+        )
+        await _fail(
+            f"{exc} (attempts: {exc.attempts})",
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.ENVIRONMENT_UNAVAILABLE,
+                detail=str(exc),
+                transient=True,
+                source="sandbox_api",
+                operation="get_execution_context",
+                code=exc.code,
+                extra={
+                    "sandbox_status": exc.status,
+                    "sandbox_status_detail": exc.reason,
+                    "attempts": exc.attempts,
+                },
+            ),
+        )
+        return
+    except APIKeyError as exc:
+        logger.error(
+            "Could not get the run-as API key: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        error = _api_key_error_message(exc, "create the sandbox")
+        await _fail(
+            error,
+            status_detail=_api_key_error_status_detail(
+                exc, operation="get_execution_context", error=error
+            ),
+        )
+        return
+    except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
-        await _fail("Failed to get execution context")
+        source = "agent_server" if backend.is_local_mode else "sandbox_api"
+        await _fail(
+            "Failed to get execution context",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source=source,
+                operation="get_execution_context",
+            ),
+        )
+        return
+    if ctx is None:
         return
 
     logger.info(
@@ -241,22 +1076,55 @@ async def _execute_run(
         extra=_log_ctx(sandbox_id=ctx.sandbox_id),
     )
 
-    # 3. Build env vars (must be after get_execution_context for cloud mode API key)
+    # 4. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
+    env_vars.update(automation_env_metadata(automation, run))
+    inject_trace_context(env_vars)
+    if lmnr_span_context := env_vars.get("LMNR_SPAN_CONTEXT"):
+        env_vars["OPENHANDS_OBSERVABILITY_PARENT_SPAN_CONTEXT"] = lmnr_span_context
+
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
-    env_vars["AUTOMATION_RUN_ID"] = run_id
-    env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
-    env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
+    env_vars["AUTOMATION_PHASE_URL"] = (
+        f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
+    )
     env_vars["AUTOMATION_API_URL"] = settings.resolved_base_url
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
+    if automation.agent_profile_id:
+        env_vars["AUTOMATION_AGENT_PROFILE_ID"] = str(automation.agent_profile_id)
+    # A subject-owning run must create its conversation under the id
+    # `continue_conversation` addresses later, or every follow-up 404s and
+    # silently starts a fresh thread.
+    if run.subject_key:
+        trigger_source = (automation.trigger or {}).get("source")
+        if trigger_source:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = conversation_id_for(
+                automation.org_id,
+                automation.id,
+                trigger_source,
+                run.subject_key,
+                service_account_id_of(automation),
+            )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
+        # Cloud mode does not inject this in build_env_vars() (unlike local
+        # mode), so fill it in here from the execution context: it lets
+        # fire_callback() helpers sign the completion POST. It is the same
+        # per-user key already exported as OPENHANDS_API_KEY, which
+        # authenticates against /v1/runs/{id}/complete.
+        # AGENT_SERVER_URL is never exported here: scripts stored in existing
+        # automations (catalog bundles, scripts written from the
+        # openhands-automation skill, preset runners from 1.27.0 and earlier)
+        # read it as "running on a local Agent Canvas" and would then take
+        # their secrets, LLM and conversations from the sandbox's own
+        # agent-server, which has none of the user's.
+        if ctx.api_key:
+            env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", ctx.api_key)
 
     # Inject a KV token whenever the service has a KV secret configured.
     # The KV store is always available to automations — there is no per-
@@ -270,10 +1138,42 @@ async def _execute_run(
             run_id=run.id,
         )
 
-    # 4. Prepare tarball source
+    # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.
     try:
-        tarball_source: bytes | str
-        if is_http_url(tarball_path):
+        if automation.plugin_spec:
+            assert isinstance(tarball_source, bytes)
+            env_vars.update(plugin_env)
+            # Fresh references: a cloud reference is short-lived, and the
+            # sandbox can take minutes to start after the preflight.
+            secret_names = plugin_secret_names(plugin_fetches)
+            fetch_secrets = (
+                await backend.plugin_source_secrets(client, secret_names)
+                if secret_names
+                else None
+            )
+            fetched_plugins = await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url=ctx.agent_url,
+                session_key=ctx.session_key,
+                plugin_fetches=plugin_fetches,
+                secrets=fetch_secrets,
+            )
+            if fetched_plugins:
+                env_vars["AUTOMATION_PLUGIN_ROOT"] = fetched_plugins[0]["path"]
+            if resolved_runtime is not None:
+                resolved_runtime["fetched_plugins"] = fetched_plugins
+                if fetched_plugins:
+                    resolved_runtime["plugin_path"] = fetched_plugins[0]["path"]
+                await update_run_resolved_runtime(
+                    session_factory, run.id, resolved_runtime
+                )
+            logger.info(
+                "Plugin automation payload built (%d bytes) and %d plugin(s) fetched",
+                len(tarball_source),
+                len(fetched_plugins),
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+        elif is_http_url(tarball_path):
             tarball_source = tarball_path
             logger.info(
                 "HTTP URL tarball, will download in environment",
@@ -284,12 +1184,49 @@ async def _execute_run(
             if upload_id is None:
                 raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
             async with session_factory() as session:
-                tarball_source = await _download_internal_tarball(upload_id, session)
+                stored_tarball = await _download_internal_tarball(
+                    upload_id, automation.org_id, session
+                )
+            # A preset keeps the runner it was created with; run today's.
+            tarball_source = with_current_preset_runner(stored_tarball)
             logger.info(
-                "Internal tarball downloaded (%d bytes)",
-                len(tarball_source),
+                "Internal tarball downloaded (%d bytes)%s",
+                len(stored_tarball),
+                ""
+                if tarball_source is stored_tarball
+                else ", preset runner replaced with the current one",
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
+    except PluginSpecError as exc:
+        status_code = exc.status_code
+        transient = status_code is not None and _is_retryable_http_status(status_code)
+        logger.log(
+            logging.WARNING if transient else logging.ERROR,
+            "%s plugin fetch error%s: %s",
+            "Transient" if transient else "Permanent",
+            "" if transient else ", disabling automation",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await backend.release_context(client, ctx)
+        await _fail(
+            str(exc),
+            disable=not transient,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=_run_status_kind_for_http_status(status_code)
+                if transient and status_code is not None
+                else RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=transient,
+                source="automation_service",
+                operation="fetch_plugin",
+                code=exc.code or type(exc).__name__,
+                status_code=status_code,
+            ),
+        )
+        return
     except PermanentDispatchError as exc:
         logger.error(
             "Permanent dispatch error, disabling automation: %s",
@@ -298,7 +1235,37 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="prepare_tarball",
+                code=type(exc).__name__,
+            ),
+        )
+        return
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Transient plugin fetch error: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await backend.release_context(client, ctx)
+        await _fail(
+            str(exc),
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="agent_server",
+                operation="fetch_plugin",
+            ),
+        )
         return
     except (APIKeyError, ValueError) as exc:
         logger.error(
@@ -308,17 +1275,107 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc))
+        await _fail(
+            str(exc),
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="prepare_tarball",
+                code=type(exc).__name__,
+            ),
+        )
         return
 
-    # 5. Execute in context
-    work_dir = backend.get_work_dir(run_id)
+    # 6. Start the run's conversation through the profile owner. On OpenHands
+    # Cloud/Enterprise the agent profile, MCP servers and secrets live on the
+    # app server; a conversation the runner creates on the sandbox's own agent
+    # server gets none of them. The stock runners attach to the one started here.
+    runner_takes_repository_list = _runner_takes_repository_list(tarball_source)
+    git_connections = None
+    if (
+        runner_takes_repository_list
+        and not backend.is_local_mode
+        and (automation.preset_metadata or {}).get("repos")
+    ):
+        git_connections = await _owner_git_connections(
+            backend, client, ctx, _log_ctx(sandbox_id=ctx.sandbox_id)
+        )
+    conversation_start = _conversation_start(
+        automation,
+        run,
+        resolved_runtime,
+        plugin_fetches,
+        env_vars,
+        runner_takes_repository_list=runner_takes_repository_list,
+        git_connections=git_connections,
+    )
+    if conversation_start is not None:
+        started: StartedConversation | None = None
+        try:
+            finish_dir = finish_plugin_dir(run_id)
+            if not backend.is_local_mode and any(
+                p.get("source") == finish_dir for p in conversation_start.plugins
+            ):
+                try:
+                    await upload_files(
+                        ctx.agent_url, ctx.session_key, finish_plugin_files(run_id)
+                    )
+                except Exception as exc:
+                    raise ConversationStartError(
+                        f"Could not write the finish-required plugin: {exc}",
+                        transient=True,
+                        code="finish_plugin_upload",
+                    ) from exc
+            started = await backend.start_conversation(client, ctx, conversation_start)
+            if started is not None:
+                _check_launched_profile(started, conversation_start.agent_profile_id)
+        except ConversationStartUnavailable as exc:
+            # An app server without this contract: the runner creates the
+            # conversation as before, without the owner's agent profile.
+            logger.warning(
+                "conversation_start_fallback: %s",
+                exc,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            started = None
+        except Exception as exc:
+            logger.warning(
+                "Failed to start the run's conversation: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            await backend.release_context(client, ctx)
+            await _fail(
+                str(exc) or "Failed to start the run's conversation",
+                status_detail=_conversation_start_status_detail(exc),
+            )
+            return
+        if started is not None:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = started.conversation_id
+            env_vars["AUTOMATION_CONVERSATION_STARTED"] = "app_server"
+            if conversation_start.repositories:
+                env_vars["AUTOMATION_RUNNER_REPOS"] = json.dumps(
+                    _runner_repositories(
+                        automation, conversation_start, started, git_connections
+                    )
+                )
+            logger.info(
+                "Conversation %s started by the OpenHands API from agent profile %s",
+                started.conversation_id,
+                started.agent_profile_id or "(owner's active profile)",
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+
+    # 7. Execute in context
     try:
         result = await execute_in_context(
-            client=client,
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
-            entrypoint=automation.entrypoint,
+            entrypoint=entrypoint,
             tarball_source=tarball_source,
             work_dir=work_dir,
             env_vars=env_vars,
@@ -334,18 +1391,51 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.EXECUTION,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="execute_in_context",
+                code=type(exc).__name__,
+            ),
+        )
         return
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Background execution failed", extra=_log_ctx(sandbox_id=ctx.sandbox_id)
         )
         await backend.release_context(client, ctx)
-        await _fail("Internal error")
+        source = "agent_server" if backend.is_local_mode else "sandbox_api"
+        await _fail(
+            "Internal error",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.EXECUTION,
+                source=source,
+                operation="execute_in_context",
+            ),
+        )
         return
 
-    # 6. Handle result
+    # 8. Handle result
     if result.success:
+        add_event(
+            "automation.entrypoint.start",
+            automation_attributes(
+                automation,
+                run,
+                **{
+                    "automation.sandbox_id": ctx.sandbox_id,
+                    "automation.bash_command_id": result.bash_command_id,
+                },
+            ),
+        )
+        await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
         if result.bash_command_id:
@@ -374,11 +1464,22 @@ async def _execute_run(
         )
         return
 
+    error = result.error or "Execution failed"
     logger.warning(
         "Execution failed: %s", result.error, extra=_log_ctx(sandbox_id=ctx.sandbox_id)
     )
     await backend.release_context(client, ctx)
-    await _fail(result.error or "Execution failed")
+    await _fail(
+        error,
+        status_detail=make_run_status_detail(
+            phase=RunStatusPhase.EXECUTION,
+            kind=RunStatusDetailKind.EXECUTION_ERROR,
+            detail=error,
+            transient=False,
+            source="agent_server" if backend.is_local_mode else "sandbox_api",
+            operation="execute_in_context",
+        ),
+    )
 
 
 async def dispatch_pending_runs(
@@ -421,17 +1522,15 @@ async def dispatch_pending_runs(
                 # runs that die during provisioning. Once the bash command
                 # actually starts, _execute_run resets timeout_at to
                 # bash-start + run budget + margin (phase 2).
-                sandbox_cfg = get_config().sandbox
-                provisioning_deadline = (
-                    sandbox_cfg.sandbox_ready_timeout
-                    + run_timeout_seconds
-                    + sandbox_cfg.run_timeout_margin
+                provisioning_deadline = _provisioning_deadline_seconds(
+                    run_timeout_seconds
                 )
                 await mark_run_status(
                     session,
                     run,
                     AutomationRunStatus.RUNNING,
                     max_duration=timedelta(seconds=provisioning_deadline),
+                    current_phase="Preparing environment",
                 )
                 dispatched_runs.append(run)
             except Exception:
@@ -447,13 +1546,6 @@ async def dispatch_pending_runs(
         await session.commit()
 
         for run in dispatched_runs:
-            await capture_automation_event(
-                "automation_run_dispatched",
-                automation=run.automation,
-                run=run,
-                properties={"trigger_source": "dispatcher"},
-                session_factory=session_factory,
-            )
             asyncio.create_task(
                 _execute_run_safe(run, settings, session_factory, client),
                 name=f"execute-run-{run.id}",
@@ -478,11 +1570,25 @@ async def _execute_run_safe(
     automation_id = str(run.automation_id) if run.automation_id else None
     extra = log_extra(run_id=run_id, automation_id=automation_id)
     try:
-        await _execute_run(run, settings, session_factory, client)
-    except Exception:
+        with span(
+            "automation.run.dispatch",
+            automation_attributes(run.automation, run),
+            parent_span_context=getattr(run, "observability_parent_span_context", None),
+        ):
+            await _execute_run(run, settings, session_factory, client)
+    except Exception as exc:
         logger.exception("Background execution failed", extra=extra)
         await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "Internal error",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="automation_service",
+                operation="execute_run_task",
+            ),
         )
 
 

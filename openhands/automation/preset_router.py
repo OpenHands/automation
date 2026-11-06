@@ -15,30 +15,81 @@ import logging
 import os
 import tarfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+)
+from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.db import get_session, using_sqlite
-from openhands.automation.models import Automation, TarballUpload, UploadStatus
-from openhands.automation.schemas import AutomationResponse, Trigger
-from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.db import get_session
+from openhands.automation.git_sync import mark_git_sync_dirty
+from openhands.automation.models import (
+    Automation,
+    AutomationRunAsKind,
+    TarballUpload,
+    UploadStatus,
+)
+from openhands.automation.observability_associations import (
+    validate_observability_associations as validate_observability_association_exprs,
+)
+from openhands.automation.plugin_secrets import preflight_secret_lookup
+from openhands.automation.plugin_specs import (
+    PluginSecretLookup,
+    PluginSpecError,
+    no_plugin_secrets,
+    pin_plugin_refs,
+)
+from openhands.automation.schemas import (
+    RUN_AS_USER_ID_DESCRIPTION,
+    AutomationResponse,
+    PublicAutomationState,
+    TemplateProvenance,
+    Trigger,
+    normalize_automation_state_enabled,
+    reject_public_draft_state,
+)
+from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
 from openhands.automation.telemetry import (
+    automation_created_event,
+    automation_created_properties,
     capture_automation_event,
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.run_as import (
+    require_automation_creator,
+    resolve_run_as,
+)
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
+    build_upload_storage_path,
+    get_org_upload,
     parse_internal_upload_id,
+)
+from openhands.automation.utils.templates import (
+    TEMPLATE_EXISTS_RESPONSE,
+    find_existing_template_automation,
 )
 from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
@@ -55,6 +106,7 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
 # Preset files directories
 PRESETS_DIR = Path(__file__).parent / "presets"
+SHARED_FINISH_TOOL_HOOK = PRESETS_DIR / "finish_tool_hook.py"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 
@@ -85,6 +137,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
+            "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -99,6 +152,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
+            "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
@@ -114,57 +168,17 @@ async def _bytes_to_async_iter(data: bytes) -> AsyncIterator[bytes]:
     yield data
 
 
-# Cap on the serialized size of template provenance config, so an opaque
-# payload cannot bloat the preset_metadata JSON column.
-MAX_TEMPLATE_CONFIG_BYTES = 16_384
-
-
-class TemplateProvenance(BaseModel):
-    """Opaque provenance of the extension-owned template an automation came from.
-
-    The service stores this verbatim under ``preset_metadata["template"]`` and
-    never validates it against any catalog — template definitions are owned by
-    OpenHands/extensions. Must not contain secrets.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: str = Field(
-        ...,
-        min_length=1,
-        max_length=100,
-        description="Identifier of the extension template (catalog entry id).",
-    )
-    version: str = Field(
-        ...,
-        min_length=1,
-        max_length=50,
-        description="Version of the template at creation time.",
-    )
-    config: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Non-secret configuration the user submitted when enabling the "
-            "template (e.g. setup form values)."
-        ),
-    )
-
-    @field_validator("config")
-    @classmethod
-    def validate_config_size(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
-        if v is not None and len(json.dumps(v)) > MAX_TEMPLATE_CONFIG_BYTES:
-            raise ValueError(
-                f"config must serialize to at most {MAX_TEMPLATE_CONFIG_BYTES} bytes"
-            )
-        return v
-
-
 class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
 
     model_config = ConfigDict(extra="forbid")
 
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
+
     name: str = Field(..., min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=2000)
     prompt: str = Field(
         ...,
         min_length=1,
@@ -186,6 +200,14 @@ class CreatePromptAutomationRequest(BaseModel):
         description=(
             "Trigger configuration. Either a cron trigger (type: 'cron') "
             "or an event trigger (type: 'event') for webhook-based automation."
+        ),
+    )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
         ),
     )
     timeout: int | None = Field(
@@ -221,16 +243,36 @@ class CreatePromptAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
+    state: PublicAutomationState | None = Field(
+        default=None,
+        description=(
+            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
+        ),
+    )
+
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
 
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
+
     @model_validator(mode="before")
     @classmethod
     def normalize_repos(cls, data: Any) -> Any:
         """Normalize repos to always be a list if provided."""
+        data = normalize_automation_state_enabled(data)
         if isinstance(data, dict) and "repos" in data and data["repos"] is not None:
             repos = data["repos"]
             if isinstance(repos, (str, dict)):
@@ -274,43 +316,51 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(
+            tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
+        )
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
         # Add repos config if repos specified (SDK workspace handles cloning)
         if repos:
-            repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
-                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+                tar, "repos_config.json", repos_config_json(dump_repos(repos))
             )
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
 
 
-def _build_storage_path(
-    org_id: uuid.UUID, user_id: uuid.UUID, upload_id: uuid.UUID
-) -> str:
-    """Build the storage path for an upload.
-
-    Path format: uploads/{org_id}/{user_id}/{upload_id}.tar
-    Note: The 'automation/' prefix is added by the FileStore implementation.
-    """
-    return f"uploads/{org_id}/{user_id}/{upload_id}.tar"
+def dump_repos(repos: list[RepoSource] | None) -> list[dict[str, Any]]:
+    """Repositories as presets record them in ``preset_metadata.repos``."""
+    return [r.model_dump(exclude_none=True) for r in repos or []]
 
 
-def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes | None:
-    """Return a copy of a preset tarball with ``prompt.txt`` swapped for ``new_prompt``.
+def repos_config_json(repos: list[dict[str, Any]]) -> str:
+    """The ``repos_config.json`` a preset tarball carries, from ``dump_repos``."""
+    return json.dumps(repos, indent=2)
 
-    Every other member (``main.py``, ``setup.sh``, ``plugins_config.json``,
-    ``repos_config.json``, ...) is copied through unchanged, so plugin and repo
-    configuration are preserved and the working template is untouched.
+
+# Alias kept for existing call sites; canonical impl now in tarball_validation.
+_build_storage_path = build_upload_storage_path
+
+
+def _replace_files_in_tarball(
+    tarball_bytes: bytes, files: Mapping[str, str | None]
+) -> bytes | None:
+    """Return a copy of a preset tarball with the named files replaced.
+
+    A ``None`` value removes that file, and a name the archive lacks is added.
+    Every other member (``main.py``, ``setup.sh``, ``plugins_config.json``, ...)
+    is copied through unchanged, so the working template is untouched.
 
     Returns ``None`` if the archive has no ``prompt.txt`` member — i.e. it is not a
     regenerable preset tarball — so the caller can leave the tarball as-is.
     """
     out_buffer = io.BytesIO()
     found = False
+    replaced: set[str] = set()
     with (
         tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as src,
         tarfile.open(fileobj=out_buffer, mode="w:gz") as dst,
@@ -318,9 +368,13 @@ def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes |
         for member in src.getmembers():
             if member.name == "prompt.txt":
                 found = True
-                _add_file_to_tar(
-                    dst, "prompt.txt", new_prompt, mode=member.mode or 0o644
-                )
+            if member.name in files:
+                replaced.add(member.name)
+                content = files[member.name]
+                if content is not None:
+                    _add_file_to_tar(
+                        dst, member.name, content, mode=member.mode or 0o644
+                    )
                 continue
             if member.isfile():
                 extracted = src.extractfile(member)
@@ -332,6 +386,9 @@ def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes |
                 dst.addfile(info, io.BytesIO(data))
             else:
                 dst.addfile(member)
+        for name, content in files.items():
+            if name not in replaced and content is not None:
+                _add_file_to_tar(dst, name, content)
 
     if not found:
         return None
@@ -340,45 +397,105 @@ def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes |
     return out_buffer.read()
 
 
-async def regenerate_preset_prompt_tarball(
+# Every preset runner, back to the first release, opens with one of these lines.
+_PRESET_RUNNER_KINDS = (
+    (b'"""Prompt-based automation script', "prompt"),
+    (b'"""Plugin-based automation script', "plugin"),
+)
+
+
+def with_current_preset_runner(tarball_bytes: bytes) -> bytes:
+    """Return a preset tarball with the current runner, else the tarball unchanged.
+
+    A preset tarball bakes the service's runner (``main.py``, ``setup.sh`` and
+    ``finish_tool_hook.py``) next to the user's content (``prompt.txt`` and the
+    repository or plugin configuration) when the automation is created. The
+    runner has to match the service that dispatches it, so every run gets the
+    current one; the stored tarball is not rewritten. A tarball that is not a
+    preset (no ``prompt.txt``, or a ``main.py`` that is not a preset runner) is
+    returned as is.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = set(tar.getnames())
+            if "prompt.txt" not in names or "main.py" not in names:
+                return tarball_bytes
+            member = tar.extractfile("main.py")
+            head = member.read(64) if member is not None else b""
+    except (tarfile.TarError, OSError, EOFError):
+        return tarball_bytes
+    kind = next(
+        (kind for prefix, kind in _PRESET_RUNNER_KINDS if head.startswith(prefix)),
+        None,
+    )
+    if kind is None:
+        return tarball_bytes
+    files = (
+        _load_prompt_preset_files() if kind == "prompt" else _load_plugin_preset_files()
+    )
+    return _replace_files_in_tarball(tarball_bytes, files) or tarball_bytes
+
+
+def _delete_storage_object_best_effort(
+    file_store: FileStore, storage_path: str
+) -> None:
+    """Best-effort post-commit removal of a superseded tarball object."""
+    try:
+        file_store.delete(storage_path)
+    except ObjectNotFoundError:
+        pass  # already gone -- nothing to clean up
+    except Exception:
+        logger.exception("Failed to delete superseded tarball at %s", storage_path)
+
+
+_PRESET_FILE_LABELS = {"prompt.txt": "Prompt", "repos_config.json": "Repositories"}
+
+
+async def regenerate_preset_tarball(
     automation: Automation,
-    new_prompt: str,
+    files: Mapping[str, str | None],
     session: AsyncSession,
+    background_tasks: BackgroundTasks,
 ) -> str | None:
-    """Rebuild a preset automation's tarball with an updated prompt.
+    """Rebuild a preset automation's tarball with updated files.
 
-    Preset automations bake the prompt into ``prompt.txt`` inside the tarball the
-    dispatcher executes; the stored ``prompt`` column is metadata only. When the
-    prompt is edited the tarball must be rewritten too, otherwise dispatching keeps
-    running the original prompt.
+    Preset automations bake the prompt into ``prompt.txt`` and their repositories
+    into ``repos_config.json`` inside the tarball the dispatcher executes; the
+    stored ``prompt`` column and ``preset_metadata`` are a record only. When either
+    is edited the tarball must be rewritten too, otherwise dispatching keeps running
+    the original files.
 
-    Reads the automation's current internal-upload tarball, swaps in ``new_prompt``
-    (leaving all other files untouched), uploads the result as a new internal upload,
-    and returns its ``oh-internal://`` URL for the caller to store on ``tarball_path``.
+    Reads the automation's current internal-upload tarball, replaces ``files``
+    (``None`` removes a file; all other files are untouched), uploads the result as
+    a new internal upload, and returns its ``oh-internal://`` URL for the caller to
+    store on ``tarball_path``.
+    The superseded upload is soft-deleted in the current transaction; its storage
+    object is removed via ``background_tasks`` only after the transaction commits.
 
     Returns ``None`` — leaving the tarball unchanged — when the automation is not a
     regenerable preset: its ``tarball_path`` is an external URL, the referenced upload
-    is missing, or the archive contains no ``prompt.txt``. The file store is resolved
-    lazily so that updates to non-preset automations never construct one.
+    is missing or outside the automation's org, or the archive contains no
+    ``prompt.txt``. The file store is resolved lazily so that updates to non-preset
+    automations never construct one.
     """
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
 
     file_store = get_file_store()
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    source_upload = result.scalars().first()
+    source_upload = await get_org_upload(session, upload_id, automation.org_id)
     if source_upload is None:
         return None
 
     try:
         current_tarball = file_store.read(source_upload.storage_path)
-    except FileNotFoundError:
+    except ObjectNotFoundError:
+        # Only confirmed absence means "not regenerable"; a transient storage
+        # error must propagate (rolling back the edit) rather than silently
+        # leaving the old files baked into the tarball.
         return None
 
-    new_tarball = _replace_prompt_in_tarball(current_tarball, new_prompt)
+    new_tarball = _replace_files_in_tarball(current_tarball, files)
     if new_tarball is None:
         return None
 
@@ -386,12 +503,15 @@ async def regenerate_preset_prompt_tarball(
     storage_path = _build_storage_path(
         automation.org_id, automation.user_id, new_upload_id
     )
+    changed = " and ".join(
+        _PRESET_FILE_LABELS.get(name, name) for name in sorted(files)
+    )
     upload = TarballUpload(
         id=new_upload_id,
         user_id=automation.user_id,
         org_id=automation.org_id,
         name=f"prompt-automation-{_safe_truncate(automation.name, 50)}-edit",
-        description=f"Prompt updated for: {_safe_truncate(automation.name, 100)}",
+        description=f"{changed} updated for: {_safe_truncate(automation.name, 100)}",
         status=UploadStatus.UPLOADING,
         storage_path=storage_path,
     )
@@ -418,46 +538,33 @@ async def regenerate_preset_prompt_tarball(
             detail=f"Failed to upload regenerated tarball: {e!s}",
         )
 
-    # The old tarball is now superseded. Remove its file and soft-delete the
-    # upload record so repeated prompt edits don't accumulate orphaned storage.
-    # Only soft-delete once the file is confirmed gone: if the delete fails the
-    # record stays live so the still-present file remains discoverable for a
-    # later retry/cleanup instead of becoming a hidden orphan (file on disk,
-    # record marked deleted).
-    old_object_delete_succeeded = False
-    old_object_already_missing = False
-    try:
-        file_store.delete(source_upload.storage_path)
-        old_object_delete_succeeded = True
-    except FileNotFoundError:
-        old_object_already_missing = True
-    except Exception as e:
-        logger.exception(
-            "Failed to delete superseded tarball at %s: %s",
-            source_upload.storage_path,
-            e,
-        )
-    file_removed = old_object_delete_succeeded or old_object_already_missing
-    if file_removed:
-        source_upload.deleted_at = utcnow()
+    # The old tarball is now superseded. Soft-delete its record inside this
+    # transaction, but remove its storage object only after the commit, via a
+    # background task (which runs only for a successful response, after the
+    # function-scoped session has committed -- see update_automation). Deleting
+    # before the commit destroyed the object irreversibly while a rollback
+    # reverted this soft-delete and the tarball_path update, stranding a live
+    # record pointing at a missing object. Worst case now -- a crash between
+    # commit and task -- leaks an orphaned object whose record is already
+    # soft-deleted, which is the recoverable direction.
+    source_upload.deleted_at = utcnow()
+    background_tasks.add_task(
+        _delete_storage_object_best_effort, file_store, source_upload.storage_path
+    )
 
     logger.info(
         "Regenerated preset tarball: automation_id=%s, old_upload_id=%s, "
-        "new_upload_id=%s, old_object_delete_succeeded=%s, "
-        "old_object_already_missing=%s",
+        "new_upload_id=%s",
         automation.id,
         source_upload.id,
         new_upload_id,
-        old_object_delete_succeeded,
-        old_object_already_missing,
         extra={
             "automation_id": str(automation.id),
             "old_upload_id": str(source_upload.id),
             "old_storage_path": source_upload.storage_path,
             "new_upload_id": str(new_upload_id),
             "new_storage_path": storage_path,
-            "old_object_delete_succeeded": old_object_delete_succeeded,
-            "old_object_already_missing": old_object_already_missing,
+            "files": sorted(files),
         },
     )
 
@@ -465,64 +572,15 @@ async def regenerate_preset_prompt_tarball(
     return build_internal_url(new_upload_id)
 
 
-async def _find_existing_template_automation(
-    session: AsyncSession,
-    user: AuthenticatedUser,
-    template_id: str,
-) -> Automation | None:
-    """Find the caller's live automation created from the given template.
-
-    Cross-database JSON extraction mirrors ``get_event_automations``: SQLite
-    uses ``json_extract``, PostgreSQL uses the ``->`` / ``->>`` operators. Rows
-    without template provenance yield NULL and are excluded on both databases.
-
-    Two concurrent creates can both miss the existing row (there is no
-    cross-database unique index on a JSON path); the earliest-created row wins
-    subsequent lookups.
-    """
-    if using_sqlite():
-        template_filter = func.json_extract(
-            Automation.preset_metadata, "$.template.id"
-        ) == literal(template_id)
-    else:
-        template_filter = Automation.preset_metadata.op("->")("template").op("->>")(
-            "id"
-        ) == literal(template_id)
-
-    result = await session.execute(
-        select(Automation)
-        .where(
-            Automation.user_id == user.user_id,
-            Automation.org_id == user.org_id,
-            Automation.deleted_at.is_(None),
-            template_filter,
-        )
-        .order_by(Automation.created_at.asc())
-        .limit(1)
-    )
-    return result.scalars().first()
-
-
-_TEMPLATE_EXISTS_RESPONSE: dict[int | str, dict[str, Any]] = {
-    200: {
-        "model": AutomationResponse,
-        "description": (
-            "An automation created from this template already exists for this "
-            "user; it is returned unchanged."
-        ),
-    },
-}
-
-
 @router.post(
-    "/prompt", status_code=status.HTTP_201_CREATED, responses=_TEMPLATE_EXISTS_RESPONSE
+    "/prompt", status_code=status.HTTP_201_CREATED, responses=TEMPLATE_EXISTS_RESPONSE
 )
 async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(authenticate_request),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(require_automation_creator),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
     """Create an automation from a prompt.
@@ -542,27 +600,29 @@ async def create_automation_from_prompt(
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
-        existing = await _find_existing_template_automation(
-            session, user, body.template.id
+        existing = await find_existing_template_automation(
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     model = resolve_model_profile_for_user(body.model, user)
+    state = model_automation_state(body.state, body.enabled)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
-    storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
+    storage_path = _build_storage_path(user.org_id, run_as.user_id, upload_id)
 
     # Create upload record with safe UTF-8 truncation
     truncated_prompt = _safe_truncate(body.prompt, 100)
     upload = TarballUpload(
         id=upload_id,
-        user_id=user.user_id,
+        user_id=run_as.user_id,
         org_id=user.org_id,
         name=f"prompt-automation-{_safe_truncate(body.name, 50)}",
         description=f"Auto-generated from prompt: {truncated_prompt}...",
@@ -601,25 +661,30 @@ async def create_automation_from_prompt(
         "prompt": body.prompt,
     }
     if body.repos:
-        preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+        preset_metadata["repos"] = dump_repos(body.repos)
     if body.template is not None:
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
         automation = Automation(
-            user_id=user.user_id,
+            user_id=run_as.user_id,
+            run_as_kind=run_as.kind,
+            created_by_user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
+            description=body.description,
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
             trigger=body.trigger.model_dump(),
+            observability_associations=body.observability_associations,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=body.enabled,
+            enabled=automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,
@@ -627,6 +692,7 @@ async def create_automation_from_prompt(
         session.add(automation)
         await session.flush()
         await session.refresh(automation)
+        await mark_git_sync_dirty(session, automation)
     except Exception as e:
         # Clean up orphaned upload on automation creation failure
         try:
@@ -650,8 +716,9 @@ async def create_automation_from_prompt(
     if body.template is not None:
         creation_properties["template_id"] = body.template.id
         creation_properties["template_version"] = body.template.version
+    creation_properties.update(await automation_created_properties(session, automation))
     await capture_automation_event(
-        "automation_created",
+        automation_created_event(),
         request=request,
         user=user,
         automation=automation,
@@ -695,7 +762,12 @@ class CreatePluginAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
+
     name: str = Field(..., min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=2000)
     plugins: list[PluginSource] | None = Field(
         default=None,
         description="Plugin(s) to load. Mutually exclusive with 'variants'.",
@@ -740,6 +812,14 @@ class CreatePluginAutomationRequest(BaseModel):
             "or an event trigger (type: 'event') for webhook-based automation."
         ),
     )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
+    )
     timeout: int | None = Field(
         default=None,
         description=build_automation_timeout_description(include_default=True),
@@ -773,16 +853,36 @@ class CreatePluginAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
+    state: PublicAutomationState | None = Field(
+        default=None,
+        description=(
+            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
+        ),
+    )
+
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
 
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
+
     @model_validator(mode="before")
     @classmethod
     def normalize_plugins_and_repos(cls, data: dict) -> dict:  # type: ignore[type-arg]
         """Normalize plugins and repos to always be lists."""
+        data = normalize_automation_state_enabled(data)
         if isinstance(data, dict):
             # Normalize plugins
             if "plugins" in data and data["plugins"] is not None:
@@ -851,6 +951,49 @@ def _resolve_experiment_variant_models(
     ]
 
 
+async def _pin_preset_plugin_refs(
+    body: CreatePluginAutomationRequest,
+    secrets: PluginSecretLookup = no_plugin_secrets,
+) -> CreatePluginAutomationRequest:
+    """Return ``body`` with every plugin ref (variants too) pinned to its commit.
+
+    The generated tarball stores the refs as given, so an automation that runs
+    as a service account stores SHAs (see ``pin_plugin_refs``). A private
+    source is read with ``secrets``, those of the service account.
+
+    Raises:
+        HTTPException: 422 when a ref cannot be resolved to a commit SHA.
+    """
+    allow_local_sources = get_config().service.is_local_mode
+
+    async def pin(plugins: list[PluginSource]) -> list[PluginSource]:
+        pinned = await pin_plugin_refs(
+            [p.model_dump(exclude_none=True) for p in plugins],
+            allow_local_sources=allow_local_sources,
+            secrets=secrets,
+        )
+        return [PluginSource.model_validate(item) for item in pinned]
+
+    try:
+        return body.model_copy(
+            update={
+                "plugins": await pin(body.plugins)
+                if body.plugins is not None
+                else None,
+                "variants": [
+                    v.model_copy(update={"plugins": await pin(v.plugins)})
+                    for v in body.variants
+                ]
+                if body.variants is not None
+                else None,
+            }
+        )
+    except PluginSpecError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
 def _generate_plugin_tarball(
     plugins: list[PluginSource] | None,
     prompt: str,
@@ -870,6 +1013,9 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(
+            tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
+        )
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -899,9 +1045,8 @@ def _generate_plugin_tarball(
             )
 
         if repos:
-            repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
-                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+                tar, "repos_config.json", repos_config_json(dump_repos(repos))
             )
 
     tarball_buffer.seek(0)
@@ -914,14 +1059,14 @@ def _format_plugin_sources_for_description(plugins: list[PluginSource]) -> str:
 
 
 @router.post(
-    "/plugin", status_code=status.HTTP_201_CREATED, responses=_TEMPLATE_EXISTS_RESPONSE
+    "/plugin", status_code=status.HTTP_201_CREATED, responses=TEMPLATE_EXISTS_RESPONSE
 )
 async def create_automation_from_plugin(
     body: CreatePluginAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(authenticate_request),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(require_automation_creator),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
     """Create an automation using plugins.
@@ -948,14 +1093,23 @@ async def create_automation_from_plugin(
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
-        existing = await _find_existing_template_automation(
-            session, user, body.template.id
+        existing = await find_existing_template_automation(
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
+    if run_as.kind == AutomationRunAsKind.SERVICE:
+        body = await _pin_preset_plugin_refs(
+            body,
+            preflight_secret_lookup(
+                get_http_client(request), user_id=run_as.user_id, org_id=user.org_id
+            ),
+        )
     model = resolve_model_profile_for_user(body.model, user)
+    state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
     )
@@ -971,7 +1125,7 @@ async def create_automation_from_plugin(
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
-    storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
+    storage_path = _build_storage_path(user.org_id, run_as.user_id, upload_id)
 
     # Create upload record
     if body.variants is not None:
@@ -987,7 +1141,7 @@ async def create_automation_from_plugin(
 
     upload = TarballUpload(
         id=upload_id,
-        user_id=user.user_id,
+        user_id=run_as.user_id,
         org_id=user.org_id,
         name=f"plugin-automation-{_safe_truncate(body.name, 50)}",
         description=description,
@@ -1030,25 +1184,30 @@ async def create_automation_from_plugin(
             p.model_dump(exclude_none=True) for p in body.plugins
         ]
     if body.repos:
-        preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+        preset_metadata["repos"] = dump_repos(body.repos)
     if body.template is not None:
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
         automation = Automation(
-            user_id=user.user_id,
+            user_id=run_as.user_id,
+            run_as_kind=run_as.kind,
+            created_by_user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
+            description=body.description,
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
             trigger=body.trigger.model_dump(),
+            observability_associations=body.observability_associations,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=body.enabled,
+            enabled=automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,
@@ -1056,6 +1215,7 @@ async def create_automation_from_plugin(
         session.add(automation)
         await session.flush()
         await session.refresh(automation)
+        await mark_git_sync_dirty(session, automation)
     except Exception as e:
         # Clean up orphaned upload on automation creation failure
         try:
@@ -1086,8 +1246,9 @@ async def create_automation_from_plugin(
     if body.template is not None:
         creation_properties["template_id"] = body.template.id
         creation_properties["template_version"] = body.template.version
+    creation_properties.update(await automation_created_properties(session, automation))
     await capture_automation_event(
-        "automation_created",
+        automation_created_event(),
         request=request,
         user=user,
         automation=automation,

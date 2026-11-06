@@ -4,7 +4,8 @@ Supports three authentication methods (checked in order):
 1. API key via Authorization: Bearer header
 2. API key via X-Session-API-Key header (matches agent-server convention,
    useful behind reverse proxies that overwrite the Authorization header)
-3. Cookie: keycloak_auth cookie from the OpenHands web UI
+3. Cookie: the OpenHands web UI session cookie, either the new OAuth v2
+   ``openhands_auth`` JWT cookie or the legacy ``keycloak_auth`` cookie
 
 All methods validate against the OpenHands API GET /api/v1/users/me endpoint
 to get the user and organization identity.
@@ -38,7 +39,15 @@ logger = logging.getLogger("automation.auth")
 
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
-SESSION_COOKIE_NAME = "keycloak_auth"
+
+# Session cookies accepted from the OpenHands web UI. ``openhands_auth`` is
+# the OAuth v2 JWT cookie issued to new logins; ``keycloak_auth`` is the
+# legacy chunked cookie that existing sessions still carry. Both are checked,
+# new first, so a client mid-migration that holds the old cookie keeps working
+# while new logins authenticate with the new one. ``keycloak_auth`` alone is
+# chunked, but we reassemble either name defensively.
+SESSION_COOKIE_NAMES = ("openhands_auth", "keycloak_auth")
+X_ORG_ID_HEADER = "X-Org-Id"
 # Keep parity with OpenHands' cookie chunking helper: 8 * 3000 bytes is
 # comfortably above expected session token sizes while staying bounded.
 MAX_SESSION_COOKIE_CHUNKS = 8
@@ -185,9 +194,27 @@ def clear_auth_cache() -> None:
     _get_auth_cache().clear()
 
 
-def _credential_cache_key(credential: str) -> str:
-    """Hash a credential for use as a cache key (never store raw credential)."""
-    return hashlib.sha256(credential.encode()).hexdigest()
+def _credential_cache_key(
+    credential: str, auth_method: AuthMethod, x_org_id: str | None
+) -> str:
+    """Hash auth scope for use as a cache key (never store raw credentials)."""
+    cache_material = "\0".join((auth_method.value, x_org_id or "", credential))
+    return hashlib.sha256(cache_material.encode()).hexdigest()
+
+
+def _extract_x_org_id(request: Request) -> str | None:
+    """Extract and normalize the optional organization scope header."""
+    header_value = request.headers.get(X_ORG_ID_HEADER, "").strip()
+    if not header_value:
+        return None
+
+    try:
+        return str(uuid.UUID(header_value))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid X-Org-Id header (must be a UUID)",
+        ) from exc
 
 
 def _is_rate_limited(response: httpx.Response) -> bool:
@@ -276,7 +303,7 @@ def _get_local_user() -> AuthenticatedUser:
         org_id=local_org_id,
         email="local@localhost",
         role="admin",
-        permissions=["manage_automations"],
+        permissions=["view_automations", "manage_automations"],
         auth_method=AuthMethod.LOCAL_API_KEY,
         api_key=None,
     )
@@ -291,8 +318,12 @@ def require_permission(permission: str):
     """
 
     async def _check(
+        request: Request,
         user: "AuthenticatedUser" = Depends(authenticate_request),
     ) -> "AuthenticatedUser":
+        # The audit hook reads the actor from here. authenticate_request stores
+        # it too, but a caller may override that dependency.
+        _store_authenticated_user(request, user)
         if permission not in user.permissions:
             logger.warning(
                 "Permission denied: user %s missing permission %s",
@@ -329,31 +360,38 @@ def _extract_api_key(request: Request) -> str | None:
     return session_key or None
 
 
-def _extract_session_cookie(request: Request) -> str | None:
-    """Read OpenHands' possibly chunked session cookie.
+def _extract_session_cookie(request: Request) -> tuple[str, str] | None:
+    """Read OpenHands' session cookie and return ``(name, value)``.
 
-    OpenHands splits large keycloak_auth values across keycloak_auth,
-    keycloak_auth_1, keycloak_auth_2, etc. Automation validates by forwarding
-    the reassembled token back to OpenHands /api/v1/users/me.
+    Accepts the new ``openhands_auth`` JWT cookie and the legacy
+    ``keycloak_auth`` cookie, preferring the new one. OpenHands splits large
+    ``keycloak_auth`` values across ``keycloak_auth``, ``keycloak_auth_1``,
+    etc.; the chunks are reassembled here and the whole ``name=value`` pair is
+    forwarded to OpenHands ``/api/v1/users/me`` so upstream sees the cookie
+    under its original name.
     """
-    first = request.cookies.get(SESSION_COOKIE_NAME)
-    if not first:
-        return None
+    for name in SESSION_COOKIE_NAMES:
+        first = request.cookies.get(name)
+        if not first:
+            continue
 
-    parts = [first]
-    for index in range(1, MAX_SESSION_COOKIE_CHUNKS):
-        part = request.cookies.get(f"{SESSION_COOKIE_NAME}_{index}")
-        if part is None:
-            break
-        parts.append(part)
-    return "".join(parts)
+        parts = [first]
+        for index in range(1, MAX_SESSION_COOKIE_CHUNKS):
+            part = request.cookies.get(f"{name}_{index}")
+            if part is None:
+                break
+            parts.append(part)
+        return name, "".join(parts)
+    return None
 
 
 def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
     """Extract a credential and its auth method from the request.
 
-    Priority: Authorization: Bearer → X-Session-API-Key → keycloak_auth cookie.
-    Raises 401 if nothing usable is found.
+    Priority: Authorization: Bearer → X-Session-API-Key → session cookie
+    (``openhands_auth`` or ``keycloak_auth``). For cookie auth the credential
+    is the full ``name=value`` pair so the original cookie name reaches
+    upstream. Raises 401 if nothing usable is found.
     """
     api_key = _extract_api_key(request)
     if api_key:
@@ -361,13 +399,35 @@ def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
 
     cookie = _extract_session_cookie(request)
     if cookie:
-        return cookie, AuthMethod.COOKIE
+        name, value = cookie
+        return f"{name}={value}", AuthMethod.COOKIE
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required: provide Bearer token, "
-        "X-Session-API-Key header, or keycloak_auth cookie",
+        "X-Session-API-Key header, or session cookie",
     )
+
+
+def _upstream_headers(
+    credential: str, auth_method: AuthMethod, x_org_id: str | None
+) -> dict[str, str]:
+    headers = (
+        {"Authorization": f"Bearer {credential}"}
+        if auth_method == AuthMethod.API_KEY
+        # For cookie auth ``credential`` is already ``name=value``; preserve
+        # the caller's cookie name so upstream parses it correctly.
+        else {"Cookie": credential}
+    )
+    if x_org_id:
+        headers[X_ORG_ID_HEADER] = x_org_id
+    return headers
+
+
+def upstream_auth_headers(request: Request) -> dict[str, str]:
+    """Headers that carry the caller's own credential to the OpenHands API."""
+    credential, auth_method = _extract_credential(request)
+    return _upstream_headers(credential, auth_method, _extract_x_org_id(request))
 
 
 def _parse_users_me(
@@ -446,9 +506,10 @@ async def authenticate_request(
 
     # --- Resolve credential (API key or cookie) ---
     credential, auth_method = _extract_credential(request)
+    x_org_id = _extract_x_org_id(request)
 
     # --- Cache lookup ---
-    cache_key = _credential_cache_key(credential)
+    cache_key = _credential_cache_key(credential, auth_method, x_org_id)
     auth_cache = _get_auth_cache()
     cached_user = auth_cache.get(cache_key)
     if cached_user is not None:
@@ -457,11 +518,7 @@ async def authenticate_request(
 
     # --- Validate against OpenHands API ---
     logger.debug("Auth cache miss, validating with OpenHands API")
-    outbound_headers = (
-        {"Authorization": f"Bearer {credential}"}
-        if auth_method == AuthMethod.API_KEY
-        else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
-    )
+    outbound_headers = _upstream_headers(credential, auth_method, x_org_id)
 
     try:
         resp = await _make_auth_request_with_retry(

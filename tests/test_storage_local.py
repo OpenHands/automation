@@ -12,7 +12,11 @@ from unittest.mock import patch
 import pytest
 
 from openhands.automation.config import StorageSettings, clear_config_cache
-from openhands.automation.storage import LocalFileStore, get_file_store
+from openhands.automation.storage import (
+    LocalFileStore,
+    ObjectNotFoundError,
+    get_file_store,
+)
 from openhands.automation.storage.google_cloud import (
     BUCKET_PREFIX,
     FileSizeLimitExceeded,
@@ -97,10 +101,10 @@ class TestLocalFileStore:
         assert isinstance(result, bytes)
 
     def test_read_not_found(self, tmp_path: Path):
-        """Read raises FileNotFoundError when file doesn't exist."""
+        """Read raises ObjectNotFoundError when file doesn't exist."""
         store = LocalFileStore(tmp_path)
 
-        with pytest.raises(FileNotFoundError, match="File not found"):
+        with pytest.raises(ObjectNotFoundError, match="File not found"):
             store.read("nonexistent.txt")
 
     def test_list_files(self, tmp_path: Path):

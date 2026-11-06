@@ -6,33 +6,32 @@ acceptable, so a bad configuration is caught before an automation exists.
 Neither endpoint writes.
 """
 
-import fnmatch
 import logging
-import uuid
 from zoneinfo import available_timezones
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ValidationError
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
+from openhands.automation.draft_schemas import (
+    FINAL_DRAFT_MODELS,
+    normalize_draft_body,
+)
 from openhands.automation.event_schemas import parse_event
-from openhands.automation.event_schemas.github import (
-    get_supported_event_patterns,
-    get_supported_event_types,
+from openhands.automation.event_schemas.catalog import (
+    SOURCE_LABELS,
+    pattern_can_match,
+    supported_event_patterns,
 )
 from openhands.automation.filter_eval import FilterFunctions
-from openhands.automation.models import CustomWebhook
-from openhands.automation.preset_router import (
-    CreatePluginAutomationRequest,
-    CreatePromptAutomationRequest,
-)
+from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
+    CreateAutomationRequest,
     CronCapabilities,
     CronTrigger,
     DraftValidationError,
@@ -44,31 +43,42 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
-from openhands.automation.utils.model_profiles import validate_model_profile_for_user
-from openhands.automation.utils.webhook import BUILTIN_SOURCES, get_webhook_config
+from openhands.automation.utils.event_sources import (
+    configured_stream_sources,
+    custom_event_sources,
+    get_event_source_delivery,
+)
+from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
+    validate_agent_profile_combination,
+    validate_model_profile_for_user,
+)
+from openhands.workspace import GitProvider
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Capabilities"])
 
-DraftModel = CreatePromptAutomationRequest | CreatePluginAutomationRequest
-
-# Draft models keyed by the endpoint they would be posted to. Validating with
-# the model creation itself uses is what keeps preflight from drifting.
-_DRAFT_MODELS: dict[str, type[DraftModel]] = {
-    "/v1/preset/prompt": CreatePromptAutomationRequest,
-    "/v1/preset/plugin": CreatePluginAutomationRequest,
-}
+_require_view_automations = require_permission("view_automations")
 
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
+    "automationDescription",
+    "automationDrafts",
     "conversationDispatch",
+    # Can run a client-supplied tarball, so an entry may ship a script bundle.
+    "customTarball",
     "mcpTools",
     "presetPlugin",
     "presetPrompt",
     "repoClone",
+    # A preset's repositories can be changed with PATCH after creation.
+    "repoUpdate",
+    # An automation can run as a service account, and its run-as kind is
+    # reported; admins may edit and enable those.
+    "serviceAccountRunAs",
 )
 
 # Tags Pydantic inserts into an error location for the trigger union.
@@ -77,8 +87,8 @@ _TRIGGER_TAGS = frozenset({"cron", "event"})
 
 @router.get("/capabilities", response_model_exclude_none=True)
 async def get_capabilities(
-    user: AuthenticatedUser = Depends(authenticate_request),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> CapabilitiesResponse:
     """Describe what this deployment supports, before anything is configured.
 
@@ -97,17 +107,24 @@ async def get_capabilities(
             trigger_kinds=[],
             event_sources=[],
             event_types=[],
+            event_types_by_source={},
             triggers=TriggerCapabilities(),
             features=[],
+            repo_providers=[],
         )
 
-    builtin_sources = sorted(BUILTIN_SOURCES) if config.service.webhook_secret else []
-    event_sources = sorted(
-        {*builtin_sources, *await _custom_sources(user.org_id, session)}
-    )
+    webhook_sources = {
+        *(builtin_sources() if config.service.webhook_secret else []),
+        *await custom_event_sources(user.org_id, session),
+    }
+    event_sources = sorted({*webhook_sources, *configured_stream_sources(user.org_id)})
 
-    features = [*_STATIC_FEATURES]
-    if event_sources:
+    # Not a packaged-code feature: the id is passed through to the run, whose
+    # conversation server resolves it - the Agent Server locally, the OpenHands
+    # app server in cloud, which has to be a version that serves
+    # /api/agent-profiles.
+    features = [*_STATIC_FEATURES, "agentProfiles"]
+    if webhook_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
         features.append("kvStore")
@@ -118,8 +135,15 @@ async def get_capabilities(
         trigger_kinds=["cron", "event"] if event_sources else ["cron"],
         event_sources=event_sources,
         event_types=(
-            get_supported_event_patterns() if "github" in builtin_sources else []
+            supported_event_patterns("github") or []
+            if "github" in event_sources
+            else []
         ),
+        event_types_by_source={
+            source: patterns
+            for source in event_sources
+            if (patterns := supported_event_patterns(source)) is not None
+        },
         triggers=TriggerCapabilities(
             cron=CronCapabilities(
                 min_interval_seconds=_cron_interval_floor(),
@@ -134,14 +158,18 @@ async def get_capabilities(
             ),
         ),
         features=sorted(features),
+        # The SDK packaged into a run decides which providers' tokens it can
+        # clone with, so a setup form can offer exactly those repositories.
+        repo_providers=sorted(provider.value for provider in GitProvider),
     )
 
 
 @router.post("/validate")
 async def validate_draft(
     body: ValidateDraftRequest,
-    user: AuthenticatedUser = Depends(authenticate_request),
-    session: AsyncSession = Depends(get_session),
+    request: Request,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ValidateDraftResponse:
     """Validate a draft automation without creating it.
 
@@ -153,10 +181,30 @@ async def validate_draft(
         "Validating draft for %s (automation_id=%s)", body.endpoint, body.automation_id
     )
 
+    # A saved draft has no agent profile, so the draft shape does not know the
+    # field. Creation does, and preflight answers for creation: the profile
+    # skips the shape and is checked by the model creation itself uses.
+    shape = {k: v for k, v in body.draft.items() if k != "agent_profile_id"}
     try:
-        draft = _DRAFT_MODELS[body.endpoint].model_validate(body.draft)
+        normalized_draft = normalize_draft_body(body.endpoint, shape)
+        if "agent_profile_id" in body.draft:
+            normalized_draft["agent_profile_id"] = body.draft["agent_profile_id"]
+        draft = FINAL_DRAFT_MODELS[body.endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))
+
+    # Asked first, before this request touches the database, and reported last.
+    # A failure to ask must not cost the caller the verdicts below: preflight is
+    # advisory and creation repeats the check, so the profile is left unjudged.
+    profile_error: DraftValidationError | None = None
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            await ensure_agent_profile_exists(draft.agent_profile_id, request, user)
+        except HTTPException as e:
+            if e.status_code == 422:
+                profile_error = _agent_profile_error(e)
+            else:
+                logger.warning("Preflight could not check the agent profile: %s", e)
 
     errors: list[DraftValidationError] = []
     sample_event_matched: bool | None = None
@@ -172,19 +220,25 @@ async def validate_draft(
             )
         )
 
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            validate_agent_profile_combination(draft.agent_profile_id, draft.model)
+        except HTTPException as e:
+            errors.append(_agent_profile_error(e))
+
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
-        webhook = await get_webhook_config(trigger.source, user.org_id, session)
-        if webhook is None:
+        delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
+        if delivery is None:
             errors.append(
                 DraftValidationError(
                     field="trigger.source",
                     code="event_source_not_configured",
                     message=(
-                        f"No webhook is configured to deliver '{trigger.source}' "
-                        "events to this deployment."
+                        f"No event delivery is configured for '{trigger.source}' "
+                        "events in this deployment."
                     ),
                 )
             )
@@ -195,7 +249,7 @@ async def validate_draft(
                     event = parse_event(
                         trigger.source,
                         body.sample_event,
-                        event_key_expr=webhook.event_key_expr,
+                        event_key_expr=delivery.event_key_expr,
                     )
                 except ValueError as e:
                     errors.append(
@@ -210,6 +264,9 @@ async def validate_draft(
                         trigger, trigger.source, event.event_key, body.sample_event
                     )
 
+    if profile_error is not None:
+        errors.append(profile_error)
+
     return ValidateDraftResponse(
         valid=not errors,
         errors=errors,
@@ -217,18 +274,12 @@ async def validate_draft(
     )
 
 
-async def _custom_sources(org_id: uuid.UUID, session: AsyncSession) -> list[str]:
-    """Custom webhook sources this organization has enabled.
-
-    These carry their own per-webhook secret, so they work whether or not the
-    service-level webhook secret for built-in sources is configured.
-    """
-    result = await session.execute(
-        select(CustomWebhook.source)
-        .where(CustomWebhook.org_id == org_id, CustomWebhook.enabled.is_(True))
-        .distinct()
+def _agent_profile_error(error: HTTPException) -> DraftValidationError:
+    return DraftValidationError(
+        field="agent_profile_id",
+        code="invalid_agent_profile",
+        message=str(error.detail),
     )
-    return list(result.scalars().all())
 
 
 def _cron_interval_floor() -> int:
@@ -259,23 +310,15 @@ def _event_type_errors(trigger: EventTrigger) -> list[DraftValidationError]:
     Only sources publishing a known catalog can be checked. A custom webhook's
     event keys are whatever its own expression extracts, so anything matches.
     """
-    if trigger.source != "github":
-        return []
-
-    supported = get_supported_event_types()
+    label = SOURCE_LABELS.get(trigger.source, trigger.source)
     return [
         DraftValidationError(
             field="trigger.on",
             code="event_type_not_delivered",
-            message=f"This deployment cannot parse '{pattern}' events from GitHub.",
+            message=f"This deployment cannot parse '{pattern}' events from {label}.",
         )
         for pattern in trigger.event_patterns
-        if not any(
-            # Compare event types with the pattern's own wildcards, the way the
-            # trigger matcher compares a delivered event key.
-            fnmatch.fnmatch(event_type, pattern.split(".", 1)[0])
-            for event_type in supported
-        )
+        if pattern_can_match(trigger.source, pattern) is False
     ]
 
 

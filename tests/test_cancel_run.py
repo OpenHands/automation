@@ -106,8 +106,8 @@ async def test_cancel_nonexistent_run_returns_404(async_client, async_session):
     assert resp.status_code == 404
 
 
-async def test_cancel_other_users_run_returns_403(async_client, async_session):
-    """Cancelling another user's run should return 403."""
+async def test_cancel_other_orgs_run_returns_403(async_client, async_session):
+    """Cancelling a run from another org should return 403."""
     automation = Automation(
         user_id=OTHER_USER_ID,
         org_id=OTHER_ORG_ID,
@@ -129,3 +129,30 @@ async def test_cancel_other_users_run_returns_403(async_client, async_session):
 
     resp = await async_client.post(f"/api/automation/v1/runs/{run.id}/cancel")
     assert resp.status_code == 403
+
+
+async def test_cancel_same_org_other_users_run(async_client, async_session):
+    """Cancelling a run owned by another member of the same org should succeed."""
+    automation = Automation(
+        user_id=OTHER_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="Teammate Automation",
+        trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+        tarball_path="https://example.com/code.tar.gz",
+        entrypoint="python main.py",
+    )
+    async_session.add(automation)
+    await async_session.flush()
+
+    run = AutomationRun(
+        id=uuid.uuid4(),
+        automation_id=automation.id,
+        status=AutomationRunStatus.RUNNING,
+        started_at=utcnow(),
+    )
+    async_session.add(run)
+    await async_session.flush()
+
+    resp = await async_client.post(f"/api/automation/v1/runs/{run.id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "CANCELLED"

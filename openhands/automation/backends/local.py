@@ -5,17 +5,26 @@ Uses a pre-configured local agent server instead of creating Cloud sandboxes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from collections.abc import Collection
+from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import httpx
 
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
+from openhands.automation.plugin_secrets import (
+    PluginSourceSecrets,
+    local_plugin_source_secrets,
+)
 from openhands.automation.utils.agent_server import (
     VerificationResult,
     verify_run_on_agent_server,
 )
+from openhands.automation.utils.workspace import DeleteOutcome, delete_workspace
 
 
 if TYPE_CHECKING:
@@ -38,12 +47,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOCAL_WORKSPACE_BASE = "~/.openhands/workspaces"
 
 
+def resolve_local_workspace_base(
+    workspace_base: str | os.PathLike[str] | None,
+) -> str:
+    """Resolve the workspace base used by every local backend consumer."""
+    return os.path.expanduser(os.fspath(workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE))
+
+
+def local_runs_root(workspace_base: str | os.PathLike[str] | None) -> Path:
+    """Return the workspace root that contains isolated automation runs."""
+    return Path(resolve_local_workspace_base(workspace_base)) / "automation-runs"
+
+
 class LocalAgentServerBackend(ExecutionBackend):
     """Execution backend for local/self-hosted deployments.
 
-    Uses a persistent, pre-configured agent server. No sandbox creation
-    or cleanup is performed — the agent server is assumed to be running
-    and managed externally.
+    Uses a persistent, pre-configured agent server: no sandbox is created or
+    deleted, and the server itself is assumed to be running and managed
+    externally. The one resource a run owns here is its isolated workspace
+    directory, which is removed once the run reaches a terminal state.
 
     This is suitable for:
     - Local development
@@ -124,14 +146,30 @@ class LocalAgentServerBackend(ExecutionBackend):
         """Return the pre-configured API key."""
         return self.api_key
 
+    async def plugin_source_secrets(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+        names: Collection[str],
+    ) -> PluginSourceSecrets:
+        """References into the agent server's secret store."""
+        return local_plugin_source_secrets(
+            names,
+            agent_server_url=self.agent_server_url,
+            api_key=self.api_key,
+            sandbox_agent_server_url=self.sandbox_agent_server_url,
+        )
+
     def build_env_vars(self) -> dict[str, str]:
         """Build local mode environment variables.
 
         Provides the env vars needed for local mode:
+        - AUTOMATION_RUN_MODE: ``local``; the presets pick their workspace from
+          this
         - AGENT_SERVER_URL: URL of the local agent server — from the
-          *sandbox's* point of view. Defaults to ``agent_server_url`` (the
-          URL the backend uses) but can be overridden via
-          ``sandbox_agent_server_url`` for container-split setups.
+          *sandbox's* point of view; cloud runs never get it. Defaults to
+          ``agent_server_url`` (the URL the backend uses) but can be
+          overridden via ``sandbox_agent_server_url`` for container-split
+          setups.
         - SESSION_API_KEY: API key for authenticating with the agent server
         - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
         - AUTOMATION_CALLBACK_API_KEY: API key for callback auth to automation service
@@ -145,6 +183,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         # Use run-specific workspace directory for isolation
         run_workspace = self.get_work_dir(str(self._run.id))
         env_vars = {
+            "AUTOMATION_RUN_MODE": "local",
             "AGENT_SERVER_URL": self.sandbox_agent_server_url or self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
             "WORKSPACE_BASE": run_workspace,
@@ -181,12 +220,30 @@ class LocalAgentServerBackend(ExecutionBackend):
             bash_command_id=self._run.bash_command_id,
         )
 
-    async def cleanup_after_verification(
-        self,
-        run_id: str,  # noqa: ARG002
-    ) -> None:
-        """No-op — local agent server is persistent."""
-        logger.debug("Local mode: skipping cleanup (persistent server)")
+    async def cleanup_after_verification(self, run_id: str) -> None:
+        """Remove this run's isolated workspace directory.
+
+        The agent server itself is persistent and is left untouched; what a
+        local run owns is the directory ``get_work_dir`` handed it, which holds
+        the extracted tarball and the uv environment the run built there.
+        Deletion is guarded against a runs root or run directory that is a
+        link, and against anything resolving outside that root.
+        """
+        try:
+            parsed_run_id = UUID(run_id)
+        except ValueError:
+            logger.warning("Refusing workspace cleanup for non-UUID run %s", run_id)
+            return
+
+        result = await asyncio.to_thread(
+            delete_workspace, local_runs_root(self.workspace_base), parsed_run_id
+        )
+        if result.outcome is DeleteOutcome.DELETED:
+            logger.info(
+                "Removed workspace for run %s (%d bytes freed)",
+                run_id,
+                result.bytes_freed,
+            )
 
     def get_work_dir(self, run_id: str) -> str:
         """Get an isolated working directory for this run.
@@ -197,10 +254,6 @@ class LocalAgentServerBackend(ExecutionBackend):
         Returns:
             Path like ~/.openhands/workspaces/automation-runs/{run_id}/
         """
-        # Use configured workspace_base or default
-        base = self.workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE
-        # Expand ~ to home directory
-        base = os.path.expanduser(base)
-        work_dir = os.path.join(base, "automation-runs", run_id)
+        work_dir = local_runs_root(self.workspace_base) / run_id
         logger.debug(f"Local mode work directory: {work_dir}")
-        return work_dir
+        return os.fspath(work_dir)

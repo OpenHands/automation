@@ -1,0 +1,56 @@
+"""Add integration_events: one row per accepted delivery.
+
+Revision ID: 019
+Revises: 018
+Create Date: 2026-08-24
+"""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+
+revision: str = "019"
+down_revision: str = "018"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "integration_events",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("org_id", sa.Uuid(), nullable=False),
+        sa.Column("source", sa.String(length=255), nullable=False),
+        sa.Column("provider_event_id", sa.String(length=255), nullable=True),
+        sa.Column("event_key", sa.String(length=255), nullable=False),
+        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("matched_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "received_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_integration_events_dedupe",
+        "integration_events",
+        ["org_id", "source", "provider_event_id"],
+        unique=True,
+        postgresql_where=sa.text("provider_event_id IS NOT NULL"),
+        sqlite_where=sa.text("provider_event_id IS NOT NULL"),
+    )
+    op.create_index(
+        "ix_integration_events_received_at",
+        "integration_events",
+        ["received_at"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_integration_events_received_at", "integration_events")
+    op.drop_index("ix_integration_events_dedupe", "integration_events")
+    op.drop_table("integration_events")

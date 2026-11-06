@@ -1,3 +1,4 @@
+import importlib.metadata
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
@@ -17,6 +18,7 @@ from openhands.automation.middleware import (
 from openhands.automation.models import (
     Automation,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationServiceMetadata,
     Base,
@@ -24,7 +26,10 @@ from openhands.automation.models import (
 from openhands.automation.schemas import TelemetryConsentRequest
 from openhands.automation.telemetry_router import set_telemetry_consent
 from openhands.automation.utils.run import create_pending_run
-from openhands.automation.utils.version import get_server_version_info
+from openhands.automation.utils.version import (
+    SDK_PACKAGE_NAME,
+    get_server_version_info,
+)
 from openhands.automation.utils.webhook import create_automation_run
 
 
@@ -35,9 +40,11 @@ class _Response:
 
 class _MockAsyncClient:
     posts: ClassVar[list[tuple[str, dict]]] = []
+    instances: ClassVar[list["_MockAsyncClient"]] = []
 
     def __init__(self, *args, **kwargs) -> None:
-        pass
+        self.is_closed = False
+        self.instances.append(self)
 
     async def __aenter__(self):
         return self
@@ -48,6 +55,9 @@ class _MockAsyncClient:
     async def post(self, url: str, json: dict) -> _Response:
         self.posts.append((url, json))
         return _Response()
+
+    async def aclose(self) -> None:
+        self.is_closed = True
 
 
 def _automation(telemetry_distinct_id: str | None = None) -> Automation:
@@ -141,6 +151,26 @@ def test_base_properties_includes_derived_failure_kind(monkeypatch):
     assert "secret path" not in str(properties.values())
 
 
+def test_base_properties_report_run_as_kind(monkeypatch):
+    monkeypatch.setattr(
+        telemetry,
+        "get_server_version_info",
+        lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
+    )
+    automation = _automation()
+    automation.run_as_kind = AutomationRunAsKind.SERVICE
+
+    properties = telemetry._base_properties(
+        request_context=TelemetryRequestContext(),
+        user=None,
+        automation=automation,
+        run=None,
+        backend_distinct_id="automation-backend:test",
+    )
+
+    assert properties["run_as_kind"] == "service"
+
+
 @pytest.mark.asyncio
 async def test_capture_contains_property_building_errors(monkeypatch):
     monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
@@ -172,8 +202,40 @@ def _reset_config(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     clear_config_cache()
     _MockAsyncClient.posts.clear()
+    _MockAsyncClient.instances.clear()
+    monkeypatch.setattr(telemetry, "_telemetry_http_client", None)
     yield
     clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_capture_reuses_shared_http_client(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    await telemetry.capture_automation_event("automation_created")
+    await telemetry.capture_automation_event("automation_event_received")
+
+    assert len(_MockAsyncClient.instances) == 1
+    assert len(_MockAsyncClient.posts) == 2
+
+
+@pytest.mark.asyncio
+async def test_close_telemetry_http_client_allows_clean_restart(monkeypatch):
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+    first_client = telemetry.get_telemetry_http_client()
+
+    await telemetry.close_telemetry_http_client()
+
+    assert first_client.is_closed is True
+    second_client = telemetry.get_telemetry_http_client()
+    assert second_client is not first_client
 
 
 @pytest.mark.asyncio
@@ -224,6 +286,7 @@ async def test_local_capture_uses_canvas_distinct_id(monkeypatch):
     assert properties["automation_id"] == str(automation.id)
     assert properties["run_id"] == str(run.id)
     assert properties["deployment_mode"] == "local"
+    assert properties["deployment_kind"] == "local"
     assert "cloud_user_id" not in properties
     assert "cloud_org_id" not in properties
     assert "org_id" not in properties
@@ -257,6 +320,7 @@ async def test_cloud_capture_uses_user_id_and_org_properties(monkeypatch):
     assert payload["distinct_id"] == str(automation.user_id)
     properties = payload["properties"]
     assert properties["deployment_mode"] == "cloud"
+    assert properties["deployment_kind"] == "remote"
     assert properties["cloud_user_id"] == str(automation.user_id)
     assert properties["cloud_org_id"] == str(automation.org_id)
     assert properties["$groups"] == {"org": str(automation.org_id)}
@@ -321,6 +385,7 @@ async def test_cloud_capture_does_not_require_frontend_distinct_id(monkeypatch):
     _, payload = _MockAsyncClient.posts[0]
     assert payload["distinct_id"] == str(automation.user_id)
     assert payload["properties"]["deployment_mode"] == "cloud"
+    assert payload["properties"]["deployment_kind"] == "remote"
 
 
 @pytest.mark.asyncio
@@ -349,7 +414,7 @@ async def test_local_capture_uses_stored_consent_without_request_id(monkeypatch)
         run.telemetry_distinct_id = "ph-fe-consented"
 
         await telemetry.capture_automation_event(
-            "automation_run_dispatched",
+            "automation_run_created",
             automation=automation,
             run=run,
             session_factory=session_factory,
@@ -357,9 +422,10 @@ async def test_local_capture_uses_stored_consent_without_request_id(monkeypatch)
 
         assert len(_MockAsyncClient.posts) == 1
         _, payload = _MockAsyncClient.posts[0]
-        assert payload["event"] == "automation_run_dispatched"
+        assert payload["event"] == "automation_run_created"
         assert payload["distinct_id"] == "ph-fe-consented"
         assert payload["properties"]["deployment_mode"] == "local"
+        assert payload["properties"]["deployment_kind"] == "local"
         assert "frontend_distinct_id" not in payload["properties"]
     finally:
         await engine.dispose()
@@ -462,7 +528,7 @@ async def test_telemetry_consent_route_stores_consent_and_emits_link_event(
             org_id=uuid.uuid4(),
             email="local@example.com",
             role="admin",
-            permissions=["manage_automations"],
+            permissions=["view_automations", "manage_automations"],
             auth_method=AuthMethod.LOCAL_API_KEY,
         )
 
@@ -486,6 +552,7 @@ async def test_telemetry_consent_route_stores_consent_and_emits_link_event(
         assert properties["frontend_distinct_id"] == "ph-fe-link"
         assert properties["client_source"] == "agent_canvas"
         assert properties["client_version"] == "1.2.3"
+        assert properties["deployment_kind"] == "local"
     finally:
         await engine.dispose()
 
@@ -511,7 +578,7 @@ async def test_telemetry_consent_route_rejects_cloud_mode(monkeypatch):
             org_id=uuid.uuid4(),
             email="cloud@example.com",
             role="admin",
-            permissions=["manage_automations"],
+            permissions=["view_automations", "manage_automations"],
             auth_method=AuthMethod.API_KEY,
         )
 
@@ -588,131 +655,6 @@ def _request(path: str, *, endpoint_name: str = "list_automations"):
     )
 
 
-def test_should_capture_api_route_for_v1_routes_only():
-    assert telemetry.should_capture_api_route(_request("/api/automation/v1"))
-    assert not telemetry.should_capture_api_route(_request("/health"))
-    assert not telemetry.should_capture_api_route(_request("/api/automation/health"))
-    assert not telemetry.should_capture_api_route(_request("/ready"))
-    assert not telemetry.should_capture_api_route(_request("/api/automation/ready"))
-    assert not telemetry.should_capture_api_route(_request("/server_info"))
-    assert not telemetry.should_capture_api_route(
-        _request("/api/automation/server_info")
-    )
-    assert not telemetry.should_capture_api_route(_request("/sdk-version"))
-    assert not telemetry.should_capture_api_route(
-        _request("/api/automation/sdk-version")
-    )
-    assert not telemetry.should_capture_api_route(_request("/docs"))
-    assert not telemetry.should_capture_api_route(_request("/automations"))
-
-
-@pytest.mark.asyncio
-async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
-    monkeypatch,
-):
-    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
-    clear_config_cache()
-    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
-
-    async def backend_id(**kwargs):
-        return "automation-backend:api"
-
-    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
-
-    request = _request("/api/automation/v1/123", endpoint_name="get_automation")
-    request.state.telemetry_context = TelemetryRequestContext(
-        frontend_distinct_id="untrusted-browser-id",
-        client_source="agent_canvas",
-    )
-    user = AuthenticatedUser(
-        user_id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
-        email="user@example.com",
-        role="admin",
-        permissions=["manage_automations"],
-        auth_method=AuthMethod.API_KEY,
-    )
-    request.state.authenticated_user = user
-
-    await telemetry.capture_api_route_event(
-        request,
-        status_code=200,
-        duration_ms=12,
-    )
-
-    _, payload = _MockAsyncClient.posts[0]
-    assert payload["event"] == "automation_api_get_automation"
-    properties = payload["properties"]
-    assert properties["http_method"] == "GET"
-    assert properties["route_path"] == "/api/automation/v1/{automation_id}"
-    assert properties["route_operation"] == "get_automation"
-    assert properties["status_code"] == 200
-    _assert_server_version_properties(properties)
-
-    assert properties["deployment_mode"] == "cloud"
-    assert payload["distinct_id"] == str(user.user_id)
-    assert properties["cloud_user_id"] == str(user.user_id)
-    assert properties["cloud_org_id"] == str(user.org_id)
-    assert properties["$groups"] == {"org": str(user.org_id)}
-    assert "frontend_distinct_id" not in properties
-    assert properties["client_source"] == "agent_canvas"
-    assert "org_id" not in properties
-    assert properties["success"] is True
-    assert properties["duration_ms"] == 12
-
-
-@pytest.mark.asyncio
-async def test_capture_api_route_event_in_local_mode_omits_cloud_identity(
-    monkeypatch,
-):
-    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
-    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
-    clear_config_cache()
-    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
-
-    async def backend_id(**kwargs):
-        return "automation-backend:local-api"
-
-    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
-
-    async def stored_consent(**kwargs):
-        return True
-
-    monkeypatch.setattr(telemetry, "get_stored_telemetry_consent", stored_consent)
-
-    request = _request("/api/automation/v1/123", endpoint_name="get_automation")
-    request.state.telemetry_context = TelemetryRequestContext(
-        frontend_distinct_id="ph-fe-local"
-    )
-    request.state.authenticated_user = AuthenticatedUser(
-        user_id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
-        email="local@example.com",
-        role="admin",
-        permissions=["manage_automations"],
-        auth_method=AuthMethod.LOCAL_API_KEY,
-    )
-
-    await telemetry.capture_api_route_event(
-        request,
-        status_code=200,
-        duration_ms=12,
-    )
-
-    _, payload = _MockAsyncClient.posts[0]
-    properties = payload["properties"]
-    assert payload["distinct_id"] == "ph-fe-local"
-    assert properties["deployment_mode"] == "local"
-    assert properties["automation_backend_id"] == "automation-backend:local-api"
-    assert "cloud_user_id" not in properties
-    assert "cloud_org_id" not in properties
-    assert "org_id" not in properties
-    assert "$groups" not in properties
-
-    assert properties["success"] is True
-    assert properties["duration_ms"] == 12
-
-
 @pytest.mark.asyncio
 async def test_local_capture_falls_back_to_backend_id_without_canvas_actor(
     monkeypatch,
@@ -732,7 +674,7 @@ async def test_local_capture_falls_back_to_backend_id_without_canvas_actor(
 
     monkeypatch.setattr(telemetry, "get_stored_telemetry_consent", stored_consent)
 
-    await telemetry.capture_automation_event("automation_event_received")
+    await telemetry.capture_automation_event("automation_event_matched")
 
     _, payload = _MockAsyncClient.posts[0]
     assert payload["distinct_id"] == "automation-backend:local-api"
@@ -772,3 +714,64 @@ async def test_backend_distinct_id_is_db_backed_and_stable():
         assert stored == first
     finally:
         await engine.dispose()
+
+
+def test_server_version_properties_cache_package_metadata_lookup(monkeypatch):
+    calls = 0
+
+    def package_version(name: str) -> str:
+        nonlocal calls
+        calls += 1
+        assert name == SDK_PACKAGE_NAME
+        return "1.2.3"
+
+    monkeypatch.setattr(importlib.metadata, "version", package_version)
+    telemetry._installed_sdk_version.cache_clear()
+    try:
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+        assert calls == 1
+    finally:
+        telemetry._installed_sdk_version.cache_clear()
+
+
+def test_server_version_properties_do_not_cache_missing_sdk(monkeypatch):
+    def missing_package_version(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing_package_version)
+    telemetry._installed_sdk_version.cache_clear()
+    try:
+        assert telemetry._server_version_properties()["sdk_version"] == "unknown"
+
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.2.3")
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+    finally:
+        telemetry._installed_sdk_version.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_override_labels_cloud_mode_events_as_local(
+    monkeypatch, request
+):
+    request.addfinalizer(clear_config_cache)
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    monkeypatch.setenv("AUTOMATION_TELEMETRY_DEPLOYMENT_MODE", "self_hosted")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:ohe"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+    automation = _automation()
+
+    await telemetry.capture_automation_event(
+        "automation_created", automation=automation
+    )
+
+    _, payload = _MockAsyncClient.posts[-1]
+    properties = payload["properties"]
+    assert properties["deployment_mode"] == "self_hosted"
+    assert properties["deployment_kind"] == "local"
+    assert properties["cloud_user_id"] == str(automation.user_id)

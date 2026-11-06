@@ -16,8 +16,14 @@ import pytest
 from testcontainers.minio import MinioContainer
 
 from openhands.automation.config import StorageSettings
-from openhands.automation.storage import S3FileStore
+from openhands.automation.storage import ObjectNotFoundError, S3FileStore
 from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
+
+
+MINIO_IMAGE = (
+    "cgr.dev/chainguard/minio"
+    "@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1"
+)
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +33,7 @@ def minio_container():
     This fixture is module-scoped for efficiency - the container is
     reused across all tests in the module.
     """
-    with MinioContainer() as minio:
+    with MinioContainer(image=MINIO_IMAGE) as minio:
         yield minio
 
 
@@ -107,8 +113,8 @@ class TestS3FileStoreIntegration:
         assert result == b"new content"
 
     def test_read_nonexistent_file(self, s3_store):
-        """Reading non-existent file raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError):
+        """Reading non-existent file raises ObjectNotFoundError."""
+        with pytest.raises(ObjectNotFoundError):
             s3_store.read("test/nonexistent.txt")
 
     def test_delete_file(self, s3_store):
@@ -122,8 +128,8 @@ class TestS3FileStoreIntegration:
             s3_store.read(test_path)
 
     def test_delete_nonexistent_file(self, s3_store):
-        """Deleting non-existent file raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError):
+        """Deleting non-existent file raises ObjectNotFoundError."""
+        with pytest.raises(ObjectNotFoundError):
             s3_store.delete("test/never_existed.txt")
 
     def test_list_files(self, s3_store):

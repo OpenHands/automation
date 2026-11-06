@@ -17,6 +17,7 @@ from openhands.automation.storage import (
     FileStore,
     GoogleCloudFileStore,
     LocalFileStore,
+    ObjectNotFoundError,
     S3FileStore,
     get_file_store,
 )
@@ -231,6 +232,44 @@ class TestGoogleCloudFileStore:
             # Verify the path is prefixed
             mock_bucket.blob.assert_called_once_with("automation/test/path.txt")
             mock_blob.delete.assert_called_once()
+
+    def test_read_not_found(self):
+        """Read raises ObjectNotFoundError when the blob doesn't exist."""
+        from google.cloud.exceptions import NotFound
+
+        settings = make_gcs_settings()
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
+            mock_client = MagicMock()
+            mock_bucket = MagicMock()
+            mock_blob = MagicMock()
+
+            mock_storage.Client.return_value = mock_client
+            mock_client.bucket.return_value = mock_bucket
+            mock_bucket.blob.return_value = mock_blob
+            mock_blob.download_as_bytes.side_effect = NotFound("blob missing")
+
+            store = GoogleCloudFileStore(settings)
+            with pytest.raises(ObjectNotFoundError, match="File not found"):
+                store.read("test/nonexistent.txt")
+
+    def test_delete_not_found(self):
+        """Delete raises ObjectNotFoundError when the blob doesn't exist."""
+        from google.cloud.exceptions import NotFound
+
+        settings = make_gcs_settings()
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
+            mock_client = MagicMock()
+            mock_bucket = MagicMock()
+            mock_blob = MagicMock()
+
+            mock_storage.Client.return_value = mock_client
+            mock_client.bucket.return_value = mock_bucket
+            mock_bucket.blob.return_value = mock_blob
+            mock_blob.delete.side_effect = NotFound("blob missing")
+
+            store = GoogleCloudFileStore(settings)
+            with pytest.raises(ObjectNotFoundError, match="File not found"):
+                store.delete("test/nonexistent.txt")
 
     def test_emulator_creates_bucket(self):
         """When using emulator, bucket is created if it doesn't exist."""
