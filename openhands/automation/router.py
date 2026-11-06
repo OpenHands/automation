@@ -269,7 +269,9 @@ async def create_automation(
 
     # After the template lookup, so a repeat enable stays one query and does
     # not depend on the OpenHands API, and before the rest of the transaction.
-    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
 
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
 
@@ -1023,7 +1025,9 @@ async def update_automation(
             # Only a newly selected profile is looked up: an update that sends
             # the current one back must not start failing because the profile
             # was deleted since, or the OpenHands API is down.
-            await ensure_agent_profile_exists(selected_profile, request, user)
+            await ensure_agent_profile_exists(
+                selected_profile, request, user, runs_as_user_id=auto.user_id
+            )
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:

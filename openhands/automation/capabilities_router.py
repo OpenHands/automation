@@ -196,7 +196,12 @@ async def validate_draft(
     # advisory and creation repeats the check, so the profile is left unjudged.
     profile_error: DraftValidationError | None = None
     try:
-        await ensure_agent_profile_exists(draft.agent_profile_id, request, user)
+        await ensure_agent_profile_exists(
+            draft.agent_profile_id,
+            request,
+            user,
+            runs_as_user_id=draft.run_as_user_id,
+        )
     except HTTPException as e:
         if e.status_code == 422:
             profile_error = _agent_profile_error(e)

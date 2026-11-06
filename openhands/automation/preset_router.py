@@ -620,7 +620,9 @@ async def create_automation_from_prompt(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     model = (
         None
@@ -1130,7 +1132,9 @@ async def create_automation_from_plugin(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     if run_as.kind == AutomationRunAsKind.SERVICE:
         body = await _pin_preset_plugin_refs(

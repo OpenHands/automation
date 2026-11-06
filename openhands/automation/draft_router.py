@@ -274,7 +274,12 @@ async def _validate_draft_body(
 
     try:
         validate_agent_profile_combination(draft.agent_profile_id, draft.model)
-        await ensure_agent_profile_exists(draft.agent_profile_id, request, user)
+        await ensure_agent_profile_exists(
+            draft.agent_profile_id,
+            request,
+            user,
+            runs_as_user_id=draft.run_as_user_id,
+        )
     except HTTPException as e:
         if e.status_code == 422:
             errors.append(
