@@ -20,7 +20,8 @@ Routes: `POST /api/automation/v1/preset/prompt`, `POST /api/automation/v1/preset
 - `F06.prompt-create`: a minimal prompt preset answers 201 with `preset_metadata {preset_type: prompt, prompt}`, `prompt`, `setup_script_path: setup.sh`, `entrypoint: .venv/bin/python main.py`, `timeout: 600`, an `oh-internal://uploads/<id>` tarball path, and a `COMPLETED` upload named `prompt-automation-<name>`.
 - `F06.prompt-tarball`: the generated tarball (a gzip archive served as `application/x-tar`) holds exactly `finish_tool_hook.py`, `main.py`, `prompt.txt` and `setup.sh`; `prompt.txt` is the prompt verbatim and `setup.sh` is mode 0755.
 - `F06.repos`: `repos` (a list, a single object or a string) is normalized, stored in `preset_metadata.repos` and written to `repos_config.json`; `http://` URLs become `https://`; a short `owner/repo` needs `provider`; other schemes answer 422.
-- `F06.prompt-validation`: an empty or missing `prompt`, a missing `trigger`, `agent_profile_id` (presets have no profile support), an unknown field and `state: DRAFT` answer 422; `state: INACTIVE` creates an inactive automation.
+- `F06.prompt-validation`: an empty or missing `prompt`, a missing `trigger`, an unknown field and `state: DRAFT` answer 422; `state: INACTIVE` creates an inactive automation.
+- `F06.preset-agent-profile`: prompt and plugin presets take an optional `agent_profile_id`. It is stored with `model: null`; with a `model` it answers 422 `An agent profile already specifies the model`, with plugin `variants` 422 `'agent_profile_id' cannot be used with 'variants'.`, and an id the caller's organization does not have answers 422 in cloud mode. A local run starts its conversation from the profile on the agent server; a cloud run passes it to the app server.
 - `F06.template-shared`: a preset create whose `template.id` an earlier raw create used answers 200 with that raw automation (one lookup across endpoints) and generates no tarball.
 - `F06.patch-prompt`: PATCH `prompt` on a preset writes a new upload whose `prompt.txt` is the new prompt and whose other members are byte-identical, updates `preset_metadata.prompt`, and soft-deletes the old upload; an unchanged prompt keeps the tarball.
 - `F06.plugin-create`: a plugin preset answers 201 with `preset_metadata {preset_type: plugin, prompt, plugins}` and a tarball that adds `plugins_config.json`; a single plugin object is normalized to a list.
@@ -100,12 +101,17 @@ Preconditions:
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv","prompt":"","trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 422 --check detail.0.loc.1 eq prompt --check detail.0.type eq string_too_short --save F06.prompt-validation/empty-prompt
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv","trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 422 --check detail.0.type eq missing --check detail.0.loc.1 eq prompt
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv","prompt":"hi"}' --expect 422 --check detail.0.type eq missing --check detail.0.loc.1 eq trigger
-  control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"agent_profile_id":"11111111-1111-4111-8111-111111111111"}' --expect 422 --check detail.0.type eq extra_forbidden --check detail.0.loc.1 eq agent_profile_id
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz"}' --expect 422 --check detail.0.type eq extra_forbidden
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"state":"DRAFT"}' --expect 422 --check detail.0.msg contains 'state=DRAFT is reserved'
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"timeout":1801}' --expect 422 --check detail.0.msg contains 'must not exceed 1800 seconds'
   control-automation state sql "SELECT count(*) AS n FROM automations" --check rows.0.n eq "$N0"
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-pv-inactive","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"state":"INACTIVE","timeout":120,"model":"qa-model"}' --expect 201 --check state eq INACTIVE --check enabled eq false --check timeout eq 120 --check model eq qa-model
+  ```
+- **Agent profile on a preset (`F06.preset-agent-profile`).** Stored without a model; a model or A/B variants alongside it are refused. Local mode does not look the id up.
+  ```sh
+  control-automation api POST /v1/preset/prompt --json '{"name":"qa-pap","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"agent_profile_id":"11111111-1111-4111-8111-111111111111"}' --expect 201 --check agent_profile_id eq 11111111-1111-4111-8111-111111111111 --check model eq null --save F06.preset-agent-profile/create
+  control-automation api POST /v1/preset/prompt --json '{"name":"qa-pap","prompt":"hi","model":"qa-model","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"agent_profile_id":"11111111-1111-4111-8111-111111111111"}' --expect 422 --check detail eq 'An agent profile already specifies the model' --save F06.preset-agent-profile/with-model
+  control-automation api POST /v1/preset/plugin --json '{"name":"qa-pap","prompt":"hi","experiment_id":"e","variants":[{"name":"a","weight":1,"plugins":[{"source":"github:qa/a"}]},{"name":"b","weight":1,"plugins":[{"source":"github:qa/b"}]}],"trigger":{"type":"cron","schedule":"0 0 1 1 *"},"agent_profile_id":"11111111-1111-4111-8111-111111111111"}' --expect 422 --check detail.0.msg contains "cannot be used with 'variants'" --save F06.preset-agent-profile/variants
   ```
 - **Template lookup shared with raw create (`F06.template-shared`).** A preset repeat of a raw template returns the raw automation.
   ```sh
@@ -215,9 +221,9 @@ Preconditions:
 
 - Preset tarballs are gzip (`w:gz`) although the download says
   `application/x-tar` and names the file `.tar`; list them with `tar tzf`.
-- Prompt and plugin presets have no `agent_profile_id`, `tarball_path`,
-  `entrypoint` or `setup_script_path` fields; sending any is a 422
-  `extra_forbidden`. `POST /v1/plugin-spec` takes an `agent_profile_id`.
+- Prompt and plugin presets have no `tarball_path`, `entrypoint` or
+  `setup_script_path` fields; sending any is a 422 `extra_forbidden`. They and
+  `POST /v1/plugin-spec` take an `agent_profile_id`.
 - The template lookup is shared with `POST /v1` and runs before model
   resolution and tarball generation: a repeat returns whatever automation
   first used that `template.id` in the org, raw or preset, with HTTP 200.

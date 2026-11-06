@@ -31,7 +31,6 @@ from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
-    CreateAutomationRequest,
     CronCapabilities,
     CronTrigger,
     DraftValidationError,
@@ -123,7 +122,12 @@ async def get_capabilities(
     # conversation server resolves it - the Agent Server locally, the OpenHands
     # app server in cloud, which has to be a version that serves
     # /api/agent-profiles.
-    features = [*_STATIC_FEATURES, "agentProfiles", "pluginSpecAgentProfiles"]
+    features = [
+        *_STATIC_FEATURES,
+        "agentProfiles",
+        "pluginSpecAgentProfiles",
+        "presetAgentProfiles",
+    ]
     if webhook_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
@@ -197,14 +201,13 @@ async def validate_draft(
     # A failure to ask must not cost the caller the verdicts below: preflight is
     # advisory and creation repeats the check, so the profile is left unjudged.
     profile_error: DraftValidationError | None = None
-    if isinstance(draft, CreateAutomationRequest):
-        try:
-            await ensure_agent_profile_exists(draft.agent_profile_id, request, user)
-        except HTTPException as e:
-            if e.status_code == 422:
-                profile_error = _agent_profile_error(e)
-            else:
-                logger.warning("Preflight could not check the agent profile: %s", e)
+    try:
+        await ensure_agent_profile_exists(draft.agent_profile_id, request, user)
+    except HTTPException as e:
+        if e.status_code == 422:
+            profile_error = _agent_profile_error(e)
+        else:
+            logger.warning("Preflight could not check the agent profile: %s", e)
 
     errors: list[DraftValidationError] = []
     sample_event_matched: bool | None = None
@@ -220,11 +223,10 @@ async def validate_draft(
             )
         )
 
-    if isinstance(draft, CreateAutomationRequest):
-        try:
-            validate_agent_profile_combination(draft.agent_profile_id, draft.model)
-        except HTTPException as e:
-            errors.append(_agent_profile_error(e))
+    try:
+        validate_agent_profile_combination(draft.agent_profile_id, draft.model)
+    except HTTPException as e:
+        errors.append(_agent_profile_error(e))
 
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):

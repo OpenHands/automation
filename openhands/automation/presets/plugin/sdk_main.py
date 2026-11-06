@@ -135,8 +135,8 @@ def _attaches_to_started_conversation(environ) -> bool:
 def _repo_instructions_section(skills) -> str | None:
     """Always-on instructions from the cloned repositories, as a prompt section.
 
-    The app server built the system prompt before this script cloned the
-    repositories, so their AGENTS.md-style skills ride in the task message.
+    The conversation's system prompt was built without these repositories,
+    so their AGENTS.md-style skills ride in the task message.
     Triggered and SKILL.md skills are left out; they would need registering.
     """
     parts = [
@@ -161,6 +161,23 @@ def _listed_runner_repos(environ, attaches: bool):
 ATTACHES_TO_STARTED_CONVERSATION = _attaches_to_started_conversation(os.environ)
 
 
+def _local_launch_profile(environ, attaches: bool, is_local: bool):
+    """The agent profile this script starts its conversation from, or None.
+
+    Only a local agent server holds the owner's profiles; a cloud sandbox's
+    does not, so a cloud run the service did not start keeps the default agent.
+    """
+    if attaches or not is_local:
+        return None
+    return environ.get("AUTOMATION_AGENT_PROFILE_ID") or None
+
+
+LAUNCH_PROFILE_ID = _local_launch_profile(
+    os.environ, ATTACHES_TO_STARTED_CONVERSATION, IS_LOCAL_MODE
+)
+SERVER_BUILDS_AGENT = ATTACHES_TO_STARTED_CONVERSATION or LAUNCH_PROFILE_ID is not None
+
+
 def _attach_started_conversation(workspace, conversation_id: str, callbacks=None):
     """Attach to the conversation the service started, as this run's conversation.
 
@@ -176,6 +193,23 @@ def _attach_started_conversation(workspace, conversation_id: str, callbacks=None
     if callable(register):
         register(str(conversation.id))
     return conversation
+
+
+def _start_profile_conversation(
+    workspace, agent_profile_id: str, llm_profile_ref=None, callbacks=None, **kwargs
+):
+    """Create this run's conversation on the agent server from an agent profile."""
+    if llm_profile_ref:
+        kwargs["agent_launch_additions"] = AgentLaunchAdditions(
+            llm_profile_ref=llm_profile_ref
+        )
+    request = StartConversationRequest(
+        agent_profile_id=uuid.UUID(agent_profile_id),
+        workspace=LocalWorkspace(working_dir=workspace.working_dir),
+        **kwargs,
+    )
+    return RemoteConversation.create(workspace, request, callbacks=callbacks)
+
 
 # Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
@@ -321,6 +355,11 @@ try:
 except ImportError:
     _coerce_mcp_config = None
 from openhands.sdk.plugin import PluginSource
+from openhands.sdk.conversation.request import (
+    AgentLaunchAdditions,
+    StartConversationRequest,
+)
+from openhands.sdk.workspace.local import LocalWorkspace
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
@@ -561,9 +600,9 @@ with workspace_ctx as workspace:
     # If repos were cloned, project skills are loaded from EACH cloned repo
     print("\n=== LOAD SKILLS ===")
     report_phase("Loading skills")
-    if ATTACHES_TO_STARTED_CONVERSATION:
-        # The app server loaded the user's skills when it started the
-        # conversation; only the repositories cloned here are new to it.
+    if SERVER_BUILDS_AGENT:
+        # The conversation's server loads the user's skills with the agent;
+        # only the repositories cloned here are new to it.
         agent_context = None
         loaded_skills = []
         if repo_dirs:
@@ -623,7 +662,7 @@ with workspace_ctx as workspace:
     # Add repos context if repos were cloned
     if repos_context:
         context_sections.append(repos_context)
-    if ATTACHES_TO_STARTED_CONVERSATION:
+    if SERVER_BUILDS_AGENT:
         repo_instructions = _repo_instructions_section(loaded_skills)
         if repo_instructions:
             context_sections.append(repo_instructions)
@@ -712,6 +751,35 @@ More activity arrived on the same subject while this run was queued:
             workspace, automation_conversation_id, callbacks=[event_callback]
         )
         print(f"  attached to conversation {conversation.id} (started by app server)")
+    elif LAUNCH_PROFILE_ID:
+        # The agent server builds the agent, LLM and MCP servers from the
+        # profile, as it does for a chat started from it.
+        print("\n=== GET_SECRETS ===")
+        try:
+            secrets = workspace.get_secrets(agent_profile_id=LAUNCH_PROFILE_ID)
+            print(f"  available: {list(secrets.keys()) or '(none)'}")
+        except Exception as e:
+            print(f"  get_secrets() failed (ok if no secrets): {e}")
+
+        print("\n=== CONVERSATION ===")
+        report_phase("Configuring agent")
+        request_kwargs = {
+            "plugins": plugin_sources,
+            "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
+            **automation_conversation_kwargs(conversation_tags=experiment_tags),
+        }
+        if automation_user_id and _conversation_supports_user_id():
+            request_kwargs["user_id"] = automation_user_id
+        if automation_conversation_id:
+            request_kwargs["conversation_id"] = uuid.UUID(automation_conversation_id)
+        conversation = _start_profile_conversation(
+            workspace,
+            LAUNCH_PROFILE_ID,
+            llm_profile_ref=model_profile,
+            callbacks=[event_callback],
+            **request_kwargs,
+        )
+        print(f"  conversation created from agent profile {LAUNCH_PROFILE_ID}")
     else:
         # Get LLM config via workspace/profile APIs
         print("\n=== GET_LLM ===")
