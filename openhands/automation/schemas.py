@@ -676,6 +676,15 @@ class UpdateAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Replace a plugin-spec automation's configuration, validated against "
+            "its manifest. Omit to preserve it; {} applies schema defaults. "
+            "Null is not allowed. The trigger is unchanged unless also supplied."
+        ),
+    )
+
     plugin: UpdateAutomationPluginSource | None = Field(
         default=None,
         description=(
