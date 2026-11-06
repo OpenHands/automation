@@ -101,6 +101,7 @@ class _BaseDraftBody(BaseModel):
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
+    agent_profile_id: uuid.UUID | None = None
     name: str | None = Field(default=None, min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(

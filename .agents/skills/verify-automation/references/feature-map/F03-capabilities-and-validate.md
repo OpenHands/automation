@@ -32,7 +32,7 @@ Routes: `GET /api/automation/v1/capabilities`, `POST /api/automation/v1/validate
 - `F03.validate-event-source`: an event trigger on a source nothing delivers gets `event_source_not_configured` on `trigger.source`.
 - `F03.validate-event-type`: with GitHub built in, a pattern GitHub cannot deliver gets `event_type_not_delivered` on `trigger.on`.
 - `F03.validate-sample-event`: for a configured source, `sampleEvent` reports `sampleEventMatched` true or false (event key and filter), and a payload the source cannot parse gets `unparseable_sample_event`.
-- `F03.validate-agent-profile`: on `/v1`, `agent_profile_id` with `model` gets `invalid_agent_profile` ("An agent profile already specifies the model"); a non-UUID id is a schema error; in local mode a profile alone is not looked up.
+- `F03.validate-agent-profile`: on `/v1` and the prompt and plugin presets, `agent_profile_id` with `model` gets `invalid_agent_profile` ("An agent profile already specifies the model"); a non-UUID id is a schema error; in local mode a profile alone is not looked up.
 - `F03.validate-advisory`: validate writes nothing and does not run every creation check: an `http://` tarball validates but `POST /v1` refuses it with 422.
 
 ## How to get to it (agent POV)
@@ -65,7 +65,7 @@ Preconditions:
 
 - **Default capabilities (`F03.caps-default`).** The full feature list of a local run, which always has a KV secret.
   ```sh
-  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDrafts", "conversationDispatch", "customTarball", "kvStore", "mcpTools", "presetPlugin", "presetPrompt", "repoClone"]' --check repoProviders contains github --check repoProviders len-ge 3 --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
+  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDescription", "automationDrafts", "conversationDispatch", "customTarball", "kvStore", "mcpTools", "pluginSpecAgentProfiles", "presetAgentProfiles", "presetPlugin", "presetPrompt", "repoClone", "repoUpdate", "serviceAccountRunAs"]' --check repoProviders contains github --check repoProviders len-ge 3 --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
   ```
 - **Cron constraints (`F03.caps-cron`).** The run's scheduler polls every 5 s, but the floor never goes below 60.
   ```sh

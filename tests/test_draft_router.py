@@ -815,3 +815,67 @@ async def test_sa_draft_with_non_sa_run_as_is_not_dispatchable(
     assert [e["code"] for e in created.json()["validation_errors"]] == [
         "run_as_user_id_422"
     ]
+
+
+def _profile_draft(profile_id: str, **extra: object) -> dict:
+    return {
+        "endpoint": "/v1/preset/prompt",
+        "draft": {
+            "name": "Profiled draft",
+            "prompt": "Write a short greeting.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "agent_profile_id": profile_id,
+            **extra,
+        },
+    }
+
+
+async def test_a_draft_test_runs_with_its_agent_profile(
+    async_client, async_session, draft_file_store, agent_profiles_api
+):
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json=_profile_draft(agent_profiles_api.profile_id),
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.status_code == 201
+    assert created.json()["dispatchable"] is True
+    assert created.json()["draft"]["agent_profile_id"] == agent_profiles_api.profile_id
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch",
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    assert draft is not None
+    automation = await async_session.get(Automation, draft.materialized_automation_id)
+    assert automation is not None
+    assert automation.agent_profile_id == uuid.UUID(agent_profiles_api.profile_id)
+    assert automation.model is None
+
+
+@pytest.mark.parametrize(
+    ("profile", "extra"),
+    [
+        pytest.param("known", {"model": "fast"}, id="with-a-model"),
+        pytest.param(str(uuid.uuid4()), {}, id="unknown-profile"),
+    ],
+)
+async def test_a_draft_with_an_invalid_agent_profile_is_not_dispatchable(
+    async_client, agent_profiles_api, profile, extra
+):
+    profile_id = agent_profiles_api.profile_id if profile == "known" else profile
+
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json=_profile_draft(profile_id, **extra),
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert created.status_code == 201
+    assert created.json()["dispatchable"] is False
+    assert [
+        (error["field"], error["code"]) for error in created.json()["validation_errors"]
+    ] == [("agent_profile_id", "invalid_agent_profile")]
