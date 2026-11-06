@@ -46,6 +46,11 @@ from openhands.automation.git_sync.config_override import (
     effective_settings_for,
     get_or_create_org_config,
 )
+from openhands.automation.git_sync.plugin_spec import (
+    PLUGIN_SPEC_RUNTIME,
+    validate_synced_plugin_entrypoint,
+    validate_synced_plugin_spec,
+)
 from openhands.automation.git_sync.serializer import (
     METADATA_FILENAME,
     TARBALL_DIRNAME,
@@ -523,7 +528,11 @@ async def _validate_and_resolve_fields(
     if not isinstance(raw_tags, list):
         raise ValueError("automation.yaml 'tags' must be a list")
     tags = normalize_tags(raw_tags)
-    entrypoint = validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
+    entrypoint = (
+        validate_synced_plugin_entrypoint(raw_entrypoint)
+        if fields.get("plugin_spec") is not None
+        else validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
+    )
     setup_script_path = validate_command_string(
         fields.get("setup_script_path"), "setup_script_path"
     )
@@ -564,9 +573,28 @@ async def _validate_and_resolve_fields(
         validate_agent_profile_selection(agent_profile_id, fields.get("model"))
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
-    tarball_path = await _resolve_tarball_path(
-        session, fields, deserialized, slug, existing, pending_storage_deletes, owner
-    )
+    plugin_spec = fields.get("plugin_spec")
+    if plugin_spec is not None:
+        plugin_spec = validate_synced_plugin_spec(plugin_spec)
+        source = fields.get("tarball_source") or {}
+        if (
+            deserialized.tarball_bytes is not None
+            or source.get("url") != PLUGIN_SPEC_RUNTIME
+        ):
+            raise ValueError(
+                "plugin_spec requires plugin-spec://runtime without tarball files"
+            )
+        tarball_path = PLUGIN_SPEC_RUNTIME
+    else:
+        tarball_path = await _resolve_tarball_path(
+            session,
+            fields,
+            deserialized,
+            slug,
+            existing,
+            pending_storage_deletes,
+            owner,
+        )
 
     return {
         "name": name,
@@ -585,6 +613,7 @@ async def _validate_and_resolve_fields(
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,
+        "plugin_spec": plugin_spec,
     }
 
 
@@ -1028,6 +1057,36 @@ async def _export_dirty_automations(
     encryption_key: str,
     result: SyncCycleResult,
 ) -> bool:
+    # Repair exports from versions that silently omitted plugin_spec.
+    plugin_states = (
+        (
+            await session.execute(
+                select(AutomationGitSyncState)
+                .join(Automation, Automation.id == AutomationGitSyncState.automation_id)
+                .where(
+                    AutomationGitSyncState.org_id == org_id,
+                    AutomationGitSyncState.dirty.is_(False),
+                    Automation.tarball_path == PLUGIN_SPEC_RUNTIME,
+                    Automation.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for state in plugin_states:
+        directory = sync_root / state.slug
+        try:
+            files = await asyncio.to_thread(_read_directory_files, directory)
+            if encryption_key:
+                files = decrypt_file_tree(files, encryption_key)
+            metadata = deserialize_automation(files)
+        except (OSError, ValueError):
+            logger.warning("Could not inspect legacy plugin export %r", state.slug)
+            continue
+        if metadata is not None and "plugin_spec" not in metadata.fields:
+            state.dirty = True
+    await session.flush()
     states = (
         (
             await session.execute(
