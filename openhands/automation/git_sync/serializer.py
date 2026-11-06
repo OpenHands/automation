@@ -7,6 +7,7 @@ Each automation is stored in the sync repo under `{slug}/` as:
 """
 
 import base64
+import gzip
 import hashlib
 import io
 import logging
@@ -231,21 +232,22 @@ def rebuild_tarball(
     exactly, empty included. `None` means metadata predating that field, where
     the old `*.sh` heuristic keeps those automations' current modes.
 
-    Member order and mtimes are fixed for determinism.
+    Member order and tar/gzip mtimes are fixed for determinism.
     """
     executables = None if executable_names is None else set(executable_names)
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for name in sorted(tarball_files):
-            content_bytes = tarball_files[name]
-            info = tarfile.TarInfo(name=name)
-            info.size = len(content_bytes)
-            is_executable = (
-                name.endswith(".sh") if executables is None else name in executables
-            )
-            info.mode = 0o755 if is_executable else 0o644
-            info.mtime = 0
-            tar.addfile(info, io.BytesIO(content_bytes))
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0, filename="") as gz:
+        with tarfile.open(fileobj=gz, mode="w") as tar:
+            for name in sorted(tarball_files):
+                content_bytes = tarball_files[name]
+                info = tarfile.TarInfo(name=name)
+                info.size = len(content_bytes)
+                is_executable = (
+                    name.endswith(".sh") if executables is None else name in executables
+                )
+                info.mode = 0o755 if is_executable else 0o644
+                info.mtime = 0
+                tar.addfile(info, io.BytesIO(content_bytes))
     return buffer.getvalue()
 
 

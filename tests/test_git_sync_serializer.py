@@ -3,6 +3,7 @@
 import io
 import tarfile
 import uuid
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -288,6 +289,22 @@ class TestEncryptDecryptFileTree:
 
 
 class TestRebuildTarball:
+    def test_rebuild_is_identical_across_wall_clock_seconds(self):
+        files = {"main.py": b"print(1)", "bin/run": b"#!/bin/sh\n"}
+        with patch("time.time", return_value=1000):
+            earlier = rebuild_tarball(files, ["bin/run"])
+        with patch("time.time", return_value=1001):
+            later = rebuild_tarball(files, ["bin/run"])
+
+        assert earlier == later
+        assert int.from_bytes(earlier[4:8], "little") == 0
+        assert canonical_tarball_bytes(earlier) == earlier
+        with tarfile.open(fileobj=io.BytesIO(earlier), mode="r:gz") as tar:
+            main_py = tar.extractfile("main.py")
+            assert main_py is not None
+            assert main_py.read() == files["main.py"]
+            assert tar.getmember("bin/run").mode == 0o755
+
     def test_rebuild_matches_original_members(self):
         tarball_bytes = rebuild_tarball(
             {"main.py": b"print(1)", "setup.sh": b"echo hi"}
