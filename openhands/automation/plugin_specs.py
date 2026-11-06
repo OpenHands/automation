@@ -677,10 +677,16 @@ def _convert_catalog_arg_to_schema(arg: dict[str, Any]) -> dict[str, Any]:
         schema["maxLength"] = constraints["maxLength"]
     if "minimum" in constraints:
         schema["minimum"] = constraints["minimum"]
+    elif "min" in constraints:
+        schema["minimum"] = constraints["min"]
     if "maximum" in constraints:
         schema["maximum"] = constraints["maximum"]
+    elif "max" in constraints:
+        schema["maximum"] = constraints["max"]
     if "pattern" in constraints:
         schema["pattern"] = constraints["pattern"]
+    if is_multiple and arg.get("required"):
+        schema["minItems"] = 1
 
     if arg.get("options") and "enum" not in schema and "enum" not in schema.get(
         "items", {}
@@ -730,9 +736,17 @@ def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManife
             timezone=tz.get("default", "UTC") if isinstance(tz, dict) else "UTC",
         )
 
-    entrypoint_command = bundle.get("entrypoint") or "python3 main.py"
+    entrypoint_command = bundle.get("entrypoint")
     bundle_files = bundle.get("files") or {}
     bundle_config = bundle.get("config") or None
+    if entrypoint_command is None:
+        raise PluginSpecError(
+            "Catalog manifest setup.bundle.entrypoint is required: catalog "
+            "plugins have no .plugin/plugin.json, so without an explicit "
+            "entrypoint the worker would run 'python3 main.py' against a "
+            "file that does not exist. Define setup.bundle.entrypoint "
+            "(and setup.bundle.files) in the manifest."
+        )
     if bundle_config is not None and not isinstance(bundle_config, dict):
         raise PluginSpecError(
             "Catalog manifest setup.bundle.config must be an object"
@@ -873,6 +887,11 @@ def _render_form_templates(value: Any, config: dict[str, Any]) -> Any:
     Catalog bundle.config maps form arg names to config file keys, e.g.
     ``{"repos": "{{form.repositories}}"}}``. The config dict is keyed by the
     form arg name, so ``form.repositories`` resolves to ``config["repositories"]``.
+
+    When the whole string is a single template (``"{{form.x}}"``), the resolved
+    value is substituted as-is so it keeps its JSON type — a list stays a list,
+    a number stays a number. When the template is embedded in a longer string,
+    it is stringified so it can be interpolated.
     """
     if isinstance(value, dict):
         return {
@@ -882,6 +901,13 @@ def _render_form_templates(value: Any, config: dict[str, Any]) -> Any:
         return [_render_form_templates(item, config) for item in value]
     if not isinstance(value, str):
         return value
+
+    full = _FORM_TEMPLATE_RE.fullmatch(value.strip())
+    if full is not None and full.group(0) == value:
+        resolved = _config_value(config, full.group("path"))
+        if full.group("json"):
+            return json.dumps(resolved)
+        return resolved
 
     def replace(match: re.Match[str]) -> str:
         resolved = _config_value(config, match.group("path"))
