@@ -6,7 +6,6 @@ acceptable, so a bad configuration is caught before an automation exists.
 Neither endpoint writes.
 """
 
-import fnmatch
 import logging
 from zoneinfo import available_timezones
 
@@ -24,8 +23,8 @@ from openhands.automation.draft_schemas import (
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.event_schemas.catalog import (
     SOURCE_LABELS,
+    pattern_can_match,
     supported_event_patterns,
-    supported_event_types,
 )
 from openhands.automation.filter_eval import FilterFunctions
 from openhands.automation.providers import builtin_sources
@@ -311,10 +310,6 @@ def _event_type_errors(trigger: EventTrigger) -> list[DraftValidationError]:
     Only sources publishing a known catalog can be checked. A custom webhook's
     event keys are whatever its own expression extracts, so anything matches.
     """
-    supported = supported_event_types(trigger.source)
-    if supported is None:
-        return []
-
     label = SOURCE_LABELS.get(trigger.source, trigger.source)
     return [
         DraftValidationError(
@@ -323,12 +318,7 @@ def _event_type_errors(trigger: EventTrigger) -> list[DraftValidationError]:
             message=f"This deployment cannot parse '{pattern}' events from {label}.",
         )
         for pattern in trigger.event_patterns
-        if not any(
-            # Compare event types with the pattern's own wildcards, the way the
-            # trigger matcher compares a delivered event key.
-            fnmatch.fnmatch(event_type, pattern.split(".", 1)[0])
-            for event_type in supported
-        )
+        if pattern_can_match(trigger.source, pattern) is False
     ]
 
 

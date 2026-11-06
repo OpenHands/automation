@@ -562,7 +562,7 @@ async def test_patch_plugin_source_rejects_non_plugin_spec_automation(
     assert "Only plugin-spec automations can update plugin source" in response.text
 
 
-def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
+async def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
     plugin_v1 = write_plugin(tmp_path / "v1")
     plugin_v2 = write_plugin(tmp_path / "v2")
     manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
@@ -575,7 +575,7 @@ def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
         agent_profile_id=profile_id,
     )
 
-    fields = _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+    fields = await _resolve_plugin_spec_update_fields_reusing_existing_profiles(
         plugin=AutomationPluginSource(source=str(plugin_v2)),
         automation=automation,
     )
@@ -592,7 +592,9 @@ def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
     )
 
 
-def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_path):
+async def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(
+    tmp_path,
+):
     plugin_v1 = write_plugin(tmp_path / "v1")
     plugin_v2 = write_plugin(tmp_path / "v2")
     manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
@@ -605,7 +607,7 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+        await _resolve_plugin_spec_update_fields_reusing_existing_profiles(
             plugin=AutomationPluginSource(source=str(plugin_v2)),
             automation=automation,
         )

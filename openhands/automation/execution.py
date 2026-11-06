@@ -25,7 +25,7 @@ from openhands.automation.config import get_config
 from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.utils import log_extra
-from openhands.automation.utils.sandbox import delete_sandbox
+from openhands.automation.utils.sandbox import delete_sandbox, find_agent_server_url
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 from openhands.sdk.workspace import AsyncRemoteWorkspace
 
@@ -72,14 +72,6 @@ def build_tarball(files: dict[str, str | bytes]) -> bytes:
 
 
 # -- Sandbox helpers (private) ------------------------------------------------
-
-
-def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
-    """Return ``(agent_url, session_key)`` if an AGENT_SERVER URL exists."""
-    for url_info in sandbox.get("exposed_urls") or []:
-        if url_info.get("name") == "AGENT_SERVER":
-            return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
-    return None
 
 
 async def _create_sandbox(
@@ -143,7 +135,7 @@ async def _create_and_wait(
         status = sb.get("status", "UNKNOWN")
 
         if status == "RUNNING":
-            result = _find_agent_server_url(sb)
+            result = find_agent_server_url(sb)
             if result is None:
                 raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
             agent_url, session_key = result
@@ -173,6 +165,20 @@ async def _upload(
 ) -> None:
     """Upload bytes through the SDK workspace API."""
     await workspace.file_upload(data, dest)
+
+
+async def upload_files(
+    agent_url: str, session_key: str, files: dict[str, bytes]
+) -> None:
+    """Write files into the execution environment, keyed by absolute path."""
+    workspace = AsyncRemoteWorkspace(
+        host=agent_url, api_key=session_key, working_dir="/"
+    )
+    try:
+        for path, data in files.items():
+            await _upload(workspace, data, path)
+    finally:
+        await workspace.reset_client()
 
 
 async def _bash(
@@ -460,10 +466,10 @@ async def run_automation(
     *env_vars* are exported before setup.sh and the entrypoint run,
     so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
     The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``,
-    ``AGENT_SERVER_URL``, ``AUTOMATION_CALLBACK_API_KEY``) are
-    **always** injected so the SDK's ``local_agent_server_mode`` works
-    and standalone (non-SDK) scripts can reach the agent server and
-    sign their completion callback.
+    ``AUTOMATION_CALLBACK_API_KEY``) are **always** injected so the SDK's
+    ``local_agent_server_mode`` works and scripts can sign their completion
+    callback, along with ``AUTOMATION_RUN_MODE=cloud``. ``AGENT_SERVER_URL``
+    is not: stored scripts read it as running on a local Agent Canvas.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -514,12 +520,12 @@ async def run_automation(
             # get_llm() / get_secrets() inside the sandbox.
             env_vars.setdefault("SANDBOX_ID", sandbox_id)
             env_vars.setdefault("SESSION_API_KEY", session_key)
-            # Standalone (non-SDK) scripts discover the agent server via
-            # AGENT_SERVER_URL; without it os.environ.get returns "". The
-            # per-run API key used for callbacks is the same one the SDK
-            # authenticates with.
-            env_vars.setdefault("AGENT_SERVER_URL", agent_url)
+            # The per-run API key used for callbacks is the same one the SDK
+            # authenticates with. AGENT_SERVER_URL is not exported: scripts
+            # read it as running on a local Agent Canvas.
             env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", api_key)
+            # This helper always runs in a cloud sandbox; say so.
+            env_vars.setdefault("AUTOMATION_RUN_MODE", "cloud")
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):

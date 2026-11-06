@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from openhands.automation.backends import CloudSandboxBackend
 from openhands.automation.config import get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
@@ -1235,7 +1236,12 @@ class TestExecuteRunPhaseReporting:
     """Phase-reporting wiring in _execute_run."""
 
     async def _run_successful_execution(
-        self, mock_execute, async_session_factory, mock_settings, mock_client
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        backend_env: dict[str, str] | None = None,
     ):
         """Drive _execute_run through a successful dispatch; returns run_id."""
         async with async_session_factory() as session:
@@ -1281,7 +1287,7 @@ class TestExecuteRunPhaseReporting:
             api_key="cloud-api-key",
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
-        backend.build_env_vars = MagicMock(return_value={})
+        backend.build_env_vars = MagicMock(return_value=dict(backend_env or {}))
         backend.get_work_dir = MagicMock(return_value="/workspace")
         mock_execute.return_value = MagicMock(
             success=True, bash_command_id="cmd-1", error=None
@@ -1305,21 +1311,51 @@ class TestExecuteRunPhaseReporting:
         assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
-    async def test_injects_agent_server_url_and_callback_key(
+    async def test_injects_callback_key_but_not_agent_server_url(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """Cloud-mode runs inject AGENT_SERVER_URL and AUTOMATION_CALLBACK_API_KEY
-        so standalone (non-SDK) scripts can reach the agent server and sign
-        their completion callback (see issue #679)."""
+        """Cloud-mode runs inject AUTOMATION_CALLBACK_API_KEY so scripts can sign
+        their completion callback (see issue #679), but never AGENT_SERVER_URL:
+        stored scripts read it as running on a local Agent Canvas."""
         await self._run_successful_execution(
             mock_execute, async_session_factory, mock_settings, mock_client
         )
 
         env_vars = mock_execute.await_args.kwargs["env_vars"]
-        assert env_vars["AGENT_SERVER_URL"] == "http://agent.test"
+        assert "AGENT_SERVER_URL" not in env_vars
         assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "cloud-api-key"
         assert env_vars["SANDBOX_ID"] == "sbx-1"
         assert env_vars["SESSION_API_KEY"] == "sk-1"
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_cloud_sandbox_env_names_its_mode(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The presets pick cloud mode from an explicit signal (#688). The real
+        cloud backend's env must carry it next to the sandbox identity, and no
+        AGENT_SERVER_URL."""
+        backend = CloudSandboxBackend(api_url="https://app.test", run=MagicMock())
+        with patch(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
+            new_callable=AsyncMock,
+            return_value="cloud-api-key",
+        ):
+            await backend.get_api_key()
+
+        await self._run_successful_execution(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            backend_env=backend.build_env_vars(),
+        )
+
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert env_vars["AUTOMATION_RUN_MODE"] == "cloud"
+        assert "AGENT_SERVER_URL" not in env_vars
+        assert env_vars["SANDBOX_ID"] == "sbx-1"
+        assert env_vars["SESSION_API_KEY"] == "sk-1"
+        assert env_vars["OPENHANDS_API_KEY"] == "cloud-api-key"
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_marks_starting_automation_phase_after_bash_dispatch(
