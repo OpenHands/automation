@@ -41,6 +41,7 @@ from openhands.automation.telemetry import (
 )
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
+from openhands.automation.usage_router import router as usage_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
@@ -308,6 +309,7 @@ app.include_router(draft_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)
+app.include_router(usage_router, prefix=_base_path)
 app.include_router(git_sync_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)
