@@ -368,6 +368,18 @@ GITHUB_PAYLOAD_CLASSES: dict[str, type[GitHubEvent]] = {
     "release": ReleasePayload,
 }
 
+# Human-readable names for the event key patterns a setup UI offers, keyed by
+# event type. A family pattern (``pull_request.*``) names the family; which
+# action fires is picked in the event filter.
+EVENT_TYPE_LABELS: dict[str, str] = {
+    "pull_request": "Pull request activity",
+    "pull_request_review": "Pull request review activity",
+    "issues": "Issue activity",
+    "issue_comment": "Issue comment activity",
+    "push": "Push",
+    "release": "Release activity",
+}
+
 
 # =============================================================================
 # Event Type Detection
@@ -499,6 +511,21 @@ def get_supported_event_patterns() -> list[str]:
         f"{event_type}.*" if "action" in payload_class.model_fields else event_type
         for event_type, payload_class in GITHUB_PAYLOAD_CLASSES.items()
     )
+
+
+def get_event_labels() -> dict[str, str]:
+    """Get display names for the supported event key patterns.
+
+    Keyed the same way as ``get_supported_event_patterns``, so a setup UI can
+    show a human-readable name per option. A family pattern names the family:
+    which action fires is picked in the event filter, not here.
+    """
+    return {
+        f"{event_type}.*" if "action" in payload_class.model_fields else event_type: (
+            EVENT_TYPE_LABELS[event_type]
+        )
+        for event_type, payload_class in GITHUB_PAYLOAD_CLASSES.items()
+    }
 
 
 def get_event_detection_rules() -> list[dict[str, str]]:
