@@ -787,6 +787,13 @@ async def list_automations(
             "Narrows the caller's org listing; it never reaches other orgs."
         ),
     ),
+    run_as: Literal["me", "others", "service"] | None = Query(
+        default=None,
+        description=(
+            "Only automations that run as the caller (me), as another person "
+            "(others), or as any service account (service)."
+        ),
+    ),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
@@ -810,6 +817,21 @@ async def list_automations(
             ) from exc
     if run_as_user_id is not None:
         base_query = base_query.where(Automation.user_id == run_as_user_id)
+    # The run-as identity, not the creator: me and others are people only.
+    if run_as == "me":
+        base_query = base_query.where(
+            Automation.run_as_kind == AutomationRunAsKind.USER,
+            Automation.user_id == user.user_id,
+        )
+    elif run_as == "others":
+        base_query = base_query.where(
+            Automation.run_as_kind == AutomationRunAsKind.USER,
+            Automation.user_id != user.user_id,
+        )
+    elif run_as == "service":
+        base_query = base_query.where(
+            Automation.run_as_kind == AutomationRunAsKind.SERVICE
+        )
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
