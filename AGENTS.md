@@ -419,6 +419,7 @@ exactly one org, the deterministic local org from `auth.py`'s
   extracted files are committed as plain content and the mode would otherwise
   be lost on the way back in. Slugs are unique per org
   (`AutomationGitSyncState`, `(org_id, slug)`), not globally.
+- Plugin-spec automations also store `plugin_spec` (source, config and pinned required plugins) in `automation.yaml`, with `plugin-spec://runtime` as the source marker and no tarball files. Import validates the stored shape; execution preflight still fetches the manifest and validates its config schema using the run identity. Existing profile and secret references must be available on the destination. Older exports missing the spec are repaired from the live record on the next sync.
 - `git_sync_path` is validated by `normalize_git_sync_path`: repo-relative, no
   `..`, no leading/trailing slashes, never empty. It is joined onto the local
   checkout and passed to `git add -- <path>`, and each slug directory under it
