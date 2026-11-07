@@ -76,6 +76,7 @@ _STATIC_FEATURES = (
     "repoClone",
     # A preset's repositories can be changed with PATCH after creation.
     "repoUpdate",
+    "pluginConfigUpdate",
     # An automation can run as a service account, and its run-as kind is
     # reported; admins may edit and enable those.
     "serviceAccountRunAs",
