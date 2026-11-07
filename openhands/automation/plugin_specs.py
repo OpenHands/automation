@@ -859,8 +859,10 @@ def _convert_catalog_arg_to_schema(arg: dict[str, Any]) -> dict[str, Any]:
     if is_multiple and arg.get("required"):
         schema["minItems"] = 1
 
-    if arg.get("options") and "enum" not in schema and "enum" not in schema.get(
-        "items", {}
+    if (
+        arg.get("options")
+        and "enum" not in schema
+        and "enum" not in schema.get("items", {})
     ):
         options = _catalog_options(arg["options"])
         if is_multiple:
@@ -919,9 +921,7 @@ def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManife
             "(and setup.bundle.files) in the manifest."
         )
     if bundle_config is not None and not isinstance(bundle_config, dict):
-        raise PluginSpecError(
-            "Catalog manifest setup.bundle.config must be an object"
-        )
+        raise PluginSpecError("Catalog manifest setup.bundle.config must be an object")
     try:
         entrypoint = AutomationPluginEntrypoint(
             runner="script",
@@ -1305,9 +1305,7 @@ def _build_runtime_metadata_tarball(
             )
             _add_bytes(tar, "setup.sh", wrapper.encode(), mode=0o755)
         if manifest.entrypoint.bundle_config:
-            rendered = _render_form_templates(
-                manifest.entrypoint.bundle_config, config
-            )
+            rendered = _render_form_templates(manifest.entrypoint.bundle_config, config)
             _add_json(tar, "config.json", rendered)
         if bundle_files:
             for dest, data in bundle_files.items():
@@ -1332,9 +1330,7 @@ def _safe_add_tar_path(tar: tarfile.TarFile, name: str, data: bytes) -> None:
     if name.startswith("/") or ".." in PurePosixPath(name).parts:
         raise PluginSpecError(f"Bundle file path escapes tarball root: {name}")
     if name in _RESERVED_BUNDLE_DESTINATIONS:
-        raise PluginSpecError(
-            f"Bundle file destination is reserved: {name}"
-        )
+        raise PluginSpecError(f"Bundle file destination is reserved: {name}")
     _add_bytes(tar, name, data, mode=0o755 if name.endswith(".sh") else 0o644)
 
 

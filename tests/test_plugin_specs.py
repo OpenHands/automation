@@ -848,12 +848,8 @@ async def test_build_execution_payload_bundle_config_missing_form_value_raises(
                     "version": "1.0",
                     "mode": "direct",
                     "form": {
-                        "triggers": {
-                            "cron": {"schedule": {"default": "0 8 * * *"}}
-                        },
-                        "args": {
-                            "feeds": {"type": "textarea", "required": False}
-                        },
+                        "triggers": {"cron": {"schedule": {"default": "0 8 * * *"}}},
+                        "args": {"feeds": {"type": "textarea", "required": False}},
                     },
                     "bundle": {
                         "entrypoint": "python3 main.py",
@@ -995,9 +991,7 @@ async def test_bundle_files_rejects_reserved_destination(tmp_path, monkeypatch):
 
     # Overwrite manifest to use a reserved destination
     manifest_data = json.loads((repo_root / "manifest.json").read_text())
-    manifest_data["setup"]["bundle"]["files"] = {
-        "config.json": "scripts/main.py"
-    }
+    manifest_data["setup"]["bundle"]["files"] = {"config.json": "scripts/main.py"}
     (repo_root / "manifest.json").write_text(json.dumps(manifest_data))
 
     with pytest.raises(PluginSpecError, match="reserved"):
