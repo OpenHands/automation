@@ -23,6 +23,7 @@ from openhands.automation.draft_schemas import (
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.event_schemas.catalog import (
     SOURCE_LABELS,
+    event_options,
     pattern_can_match,
     supported_event_patterns,
 )
@@ -36,6 +37,7 @@ from openhands.automation.schemas import (
     CronTrigger,
     DraftValidationError,
     EventCapabilities,
+    EventOption,
     EventTrigger,
     TriggerCapabilities,
     ValidateDraftRequest,
@@ -144,6 +146,11 @@ async def get_capabilities(
             source: patterns
             for source in event_sources
             if (patterns := supported_event_patterns(source)) is not None
+        },
+        event_options_by_source={
+            source: [EventOption.model_validate(option) for option in options]
+            for source in event_sources
+            if (options := event_options(source)) is not None
         },
         triggers=TriggerCapabilities(
             cron=CronCapabilities(

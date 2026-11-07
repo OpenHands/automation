@@ -221,6 +221,26 @@ class TestGetCapabilities:
         for name in body["repoProviders"]:
             assert RepoSource(url="https://example.com/org/repo", provider=name)
 
+    async def test_event_options_are_scoped_and_match_real_trigger_keys(
+        self, async_client, configured_deployment
+    ):
+        from openhands.automation.event_schemas.catalog import pattern_can_match
+
+        body = (await async_client.get(CAPABILITIES_URL)).json()
+        catalogs = body["eventOptionsBySource"]
+        assert set(catalogs) == set(body["eventTypesBySource"])
+        for source, options in catalogs.items():
+            keys = [option["key"] for option in options]
+            assert len(keys) == len(set(keys))
+            assert set(body["eventTypesBySource"][source]) <= set(keys)
+            assert all(pattern_can_match(source, key) for key in keys)
+            assert all(option["label"] and option["group"] for option in options)
+        github = {option["key"]: option for option in catalogs["github"]}
+        assert github["pull_request.closed"]["label"] == "Pull request closed"
+        assert "pull_request.merged" not in github
+        assert github["pull_request.*"]["kind"] == "pattern"
+        assert github["pull_request.opened"]["kind"] == "event"
+
     async def test_advertises_the_configured_timeout_ceiling(
         self, async_client, ready_deployment, monkeypatch
     ):
@@ -285,6 +305,7 @@ class TestGetCapabilities:
         assert body["eventSources"] == []
         assert body["eventTypes"] == []
         assert body["eventTypesBySource"] == {}
+        assert body["eventOptionsBySource"] == {}
         assert "event" not in body["triggers"]
         assert "webhookDelivery" not in body["features"]
 
