@@ -1279,9 +1279,7 @@ def _validate_bundle_file_sources(
                     f"Bundle file source escapes repo root: {src_path}"
                 ) from exc
             if not candidate.is_file():
-                raise PluginSpecError(
-                    f"Bundle file not found in repo: {src_path}"
-                )
+                raise PluginSpecError(f"Bundle file not found in repo: {src_path}")
 
 
 def _fetch_bundle_files(
