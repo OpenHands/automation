@@ -72,9 +72,13 @@ async def _create_completed_upload(async_session_factory) -> uuid.UUID:
 
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
-    try:
-        import socket
+    import socket
 
+    # Windows has no AF_UNIX; without this guard the module fails to import
+    # there and none of its tests run.
+    if not hasattr(socket, "AF_UNIX"):
+        return False
+    try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")
         sock.close()
