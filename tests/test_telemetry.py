@@ -112,6 +112,45 @@ def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
     assert properties["duration_ms"] == 2000
 
 
+@pytest.mark.parametrize(
+    ("error_detail", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("Timed out: verification failed: boom", "verification_failed"),
+        ("Timed out: sandbox stalled", "timeout"),
+        ("Cancelled by user", "cancelled"),
+        ("Failed to get execution context", "dispatch_error"),
+        ("Script exited with code 1", "execution_error"),
+    ],
+)
+def test_failure_kind_from_error_detail(error_detail, expected):
+    assert telemetry._failure_kind_from_error_detail(error_detail) == expected
+
+
+def test_base_properties_includes_derived_failure_kind(monkeypatch):
+    monkeypatch.setattr(
+        telemetry,
+        "get_server_version_info",
+        lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
+    )
+    automation = _automation()
+    run = _run(automation)
+    run.status = AutomationRunStatus.FAILED
+    run.error_detail = "Timed out: sandbox stalled; secret path /home/user/x"
+
+    properties = telemetry._base_properties(
+        request_context=TelemetryRequestContext(),
+        user=None,
+        automation=automation,
+        run=run,
+        backend_distinct_id="automation-backend:test",
+    )
+
+    assert properties["failure_kind"] == "timeout"
+    assert "secret path" not in str(properties.values())
+
+
 def test_base_properties_report_run_as_kind(monkeypatch):
     monkeypatch.setattr(
         telemetry,
