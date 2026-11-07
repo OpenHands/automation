@@ -103,6 +103,7 @@ from openhands.automation.utils.tarball_validation import (
     validate_tarball_path,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.webhook_policy import validate_trigger_webhook_compatibility
 
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,18 @@ async def _validate_draft_body(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
+        try:
+            await validate_trigger_webhook_compatibility(
+                user.org_id, trigger.model_dump(), session
+            )
+        except ValueError as exc:
+            errors.append(
+                DraftValidationError(
+                    field="trigger.destination",
+                    code="incompatible_webhook_profile",
+                    message=str(exc),
+                )
+            )
         delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
         if delivery is None:
             errors.append(
