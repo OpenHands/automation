@@ -28,6 +28,27 @@ BITBUCKET_DATA_CENTER_EVENT_TYPES: tuple[str, ...] = (
     "repo:refs_changed",
 )
 
+# Human-readable names a setup UI can show for each event key, keyed the same
+# way as the tuple above.
+BITBUCKET_DATA_CENTER_EVENT_TYPE_LABELS: dict[str, str] = {
+    "pr:comment:added": "Pull request comment added",
+    "pr:comment:deleted": "Pull request comment deleted",
+    "pr:comment:edited": "Pull request comment edited",
+    "pr:declined": "Pull request declined",
+    "pr:deleted": "Pull request deleted",
+    "pr:from_ref_updated": "Pull request source branch updated",
+    "pr:merged": "Pull request merged",
+    "pr:modified": "Pull request modified",
+    "pr:opened": "Pull request opened",
+    "pr:reviewer:approved": "Reviewer approved",
+    "pr:reviewer:needs_work": "Reviewer requested changes",
+    "pr:reviewer:unapproved": "Reviewer removed approval",
+    "repo:comment:added": "Commit comment added",
+    "repo:comment:deleted": "Commit comment deleted",
+    "repo:comment:edited": "Commit comment edited",
+    "repo:refs_changed": "Branch or tag updated",
+}
+
 
 class BitbucketDataCenterEvent(WebhookEvent):
     """Bitbucket Data Center webhook event.

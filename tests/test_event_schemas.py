@@ -5,6 +5,11 @@ import pytest
 from openhands.automation.event_schemas import (
     parse_event,
 )
+from openhands.automation.event_schemas.catalog import (
+    catalog_sources,
+    event_labels,
+    supported_event_patterns,
+)
 from openhands.automation.event_schemas.azure_devops import AzureDevOpsEvent
 from openhands.automation.event_schemas.bitbucket_data_center import (
     BitbucketDataCenterEvent,
@@ -1159,3 +1164,46 @@ class TestHtmlUrlSurvivesParsing:
         event = parse_event("github", payload)
         assert isinstance(event, IssueCommentPayload)
         assert event.comment.html_url is None
+
+
+class TestEventLabels:
+    """Tests for the catalog's display names for event key patterns."""
+
+    def test_every_supported_pattern_has_a_label(self):
+        """A pattern a setup UI offers without a name is a catalog bug."""
+        for source in catalog_sources():
+            patterns = supported_event_patterns(source)
+            labels = event_labels(source)
+
+            assert patterns is not None
+            assert labels is not None
+            assert set(labels) == set(patterns)
+            assert all(labels[pattern].strip() for pattern in patterns)
+
+    def test_labels_are_unique_per_source(self):
+        """Two options with the same name would be indistinguishable."""
+        for source in catalog_sources():
+            labels = event_labels(source)
+            assert len(set(labels.values())) == len(labels)
+
+    def test_github_family_patterns_name_the_family(self):
+        """GitHub actions are free-form, so a pattern's label names the family."""
+        labels = event_labels("github")
+
+        assert labels["pull_request.*"] == "Pull request activity"
+        assert labels["push"] == "Push"
+
+    def test_keyed_sources_name_each_key(self):
+        """A keyed source's whole key is its type, so it has its own name."""
+        jira = event_labels("jira_dc")
+        bitbucket = event_labels("bitbucket_data_center")
+        azure = event_labels("azure_devops")
+
+        assert jira["jira:issue_created"] == "Issue created"
+        assert jira["comment_created"] == "Comment created"
+        assert bitbucket["pr:opened"] == "Pull request opened"
+        assert azure["git.pullrequest.created"] == "Pull request created"
+
+    def test_a_source_without_a_catalog_has_no_labels(self):
+        """Custom webhooks accept any key, so there is nothing to name."""
+        assert event_labels("stripe") is None

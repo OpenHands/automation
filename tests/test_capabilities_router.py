@@ -202,6 +202,20 @@ class TestGetCapabilities:
         assert "jira:issue_updated" in by_source["jira_dc"]
         assert "pr:opened" in by_source["bitbucket_data_center"]
         assert "pr:comment:added" in by_source["bitbucket_data_center"]
+        labels_by_source = body["eventLabelsBySource"]
+        assert set(labels_by_source) == set(by_source)
+        for source, patterns in by_source.items():
+            assert set(labels_by_source[source]) == set(patterns)
+            assert all(labels_by_source[source][pattern].strip() for pattern in patterns)
+        assert labels_by_source["github"]["pull_request.*"] == "Pull request activity"
+        assert labels_by_source["jira_dc"]["jira:issue_created"] == "Issue created"
+        assert labels_by_source["bitbucket_data_center"]["pr:opened"] == (
+            "Pull request opened"
+        )
+        assert (
+            labels_by_source["azure_devops"]["git.pullrequest.created"]
+            == "Pull request created"
+        )
         assert body["triggers"]["event"]["filterLanguage"] == "jmespath"
         assert "icontains" in body["triggers"]["event"]["filterFunctions"]
         assert "UTC" in body["triggers"]["cron"]["timezones"]
