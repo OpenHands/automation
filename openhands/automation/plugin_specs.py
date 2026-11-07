@@ -721,6 +721,7 @@ def preflight_manifest(
                 )
                 manifest = _read_manifest(plugin_path)
                 _validate_manifest_paths(plugin_path, manifest)
+                _validate_bundle_file_sources(plugin, resolved_ref, manifest)
                 return resolved_ref, manifest
     except PluginSpecError:
         raise
@@ -1235,6 +1236,52 @@ async def build_execution_payload(
     if llm_profile_name:
         env["AUTOMATION_LLM_PROFILE_NAME"] = llm_profile_name
     return tarball, env, resolved_runtime, plugin_fetches
+
+
+def _validate_bundle_file_sources(
+    source: AutomationPluginSource,
+    resolved_ref: str | None,
+    manifest: AutomationPluginManifest,
+) -> None:
+    """Check that declared bundle file sources exist in the repo.
+
+    Catalog manifests declare ``setup.bundle.files`` as destination → source
+    paths relative to the repo root. A typo in a source path would otherwise
+    sail through preflight and create, failing only at dispatch when the
+    tarball is assembled. Sources are validated here against a full checkout
+    (no ``repo_path``) so the error surfaces at preflight time.
+    """
+    bundle_files = manifest.entrypoint.bundle_files
+    if not bundle_files:
+        return
+    with tempfile.TemporaryDirectory(prefix="automation-bundle-check-") as tmp_cache:
+        try:
+            repo_root, _ = fetch_plugin_with_resolution(
+                source=source.source,
+                cache_dir=Path(tmp_cache),
+                ref=resolved_ref or source.ref,
+                repo_path=None,
+            )
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Failed to fetch plugin repo for bundle file check: {exc}"
+            ) from exc
+        for dest, src_path in bundle_files.items():
+            if not isinstance(src_path, str) or not src_path.strip():
+                raise PluginSpecError(
+                    f"Bundle file source for '{dest}' must be a non-empty string"
+                )
+            candidate = repo_root / src_path.strip("/")
+            try:
+                candidate.resolve().relative_to(repo_root.resolve())
+            except ValueError as exc:
+                raise PluginSpecError(
+                    f"Bundle file source escapes repo root: {src_path}"
+                ) from exc
+            if not candidate.is_file():
+                raise PluginSpecError(
+                    f"Bundle file not found in repo: {src_path}"
+                )
 
 
 def _fetch_bundle_files(

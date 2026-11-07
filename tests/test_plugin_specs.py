@@ -558,8 +558,16 @@ def _write_catalog_manifest(root: Path) -> Path:
     return catalog_dir
 
 
+def _ensure_catalog_bundle_files(repo_root: Path) -> None:
+    """Create the files referenced by the default bundle.files mapping."""
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir(exist_ok=True)
+    (scripts_dir / "main.py").write_text("print('hello from bundle')\n")
+
+
 def test_preflight_converts_catalog_manifest(tmp_path):
     catalog_dir = _write_catalog_manifest(tmp_path)
+    _ensure_catalog_bundle_files(catalog_dir)
 
     resolved_ref, manifest = preflight_manifest(
         AutomationPluginSource(source=str(catalog_dir)),
@@ -593,6 +601,7 @@ def test_preflight_converts_catalog_manifest(tmp_path):
 
 def test_preflight_catalog_manifest_validates_config(tmp_path):
     catalog_dir = _write_catalog_manifest(tmp_path)
+    _ensure_catalog_bundle_files(catalog_dir)
 
     _resolved_ref, manifest = preflight_manifest(
         AutomationPluginSource(source=str(catalog_dir)),
@@ -619,6 +628,7 @@ def test_preflight_catalog_manifest_uses_temp_dir_not_home_cache(tmp_path, monke
     touches the user persistence dir.
     """
     catalog_dir = _write_catalog_manifest(tmp_path)
+    _ensure_catalog_bundle_files(catalog_dir)
 
     captured: dict[str, object] = {}
 
@@ -757,6 +767,19 @@ def test_preflight_preserves_bundle_files(tmp_path):
 
     assert manifest.entrypoint.runner == "script"
     assert manifest.entrypoint.bundle_files == {"main.py": "scripts/main.py"}
+
+
+def test_preflight_rejects_missing_bundle_file_source(tmp_path):
+    """A bundle file source that doesn't exist in the repo must fail preflight."""
+    catalog_dir = _write_catalog_manifest(tmp_path)
+    # Intentionally do NOT create scripts/main.py — the bundle.files mapping
+    # references it, so preflight must reject it before create/dispatch.
+
+    with pytest.raises(PluginSpecError, match="Bundle file not found in repo"):
+        preflight_manifest(
+            AutomationPluginSource(source=str(catalog_dir)),
+            allow_local_sources=True,
+        )
 
 
 def test_entrypoint_for_bundle_files_omits_plugin_root(tmp_path):
