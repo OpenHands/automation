@@ -27,6 +27,7 @@ from openhands.automation.models import (
     AutomationRunStatus,
     IntegrationEvent,
 )
+from openhands.automation.utils.time import utcnow
 
 
 @pytest.fixture
@@ -212,6 +213,77 @@ async def test_accept_event_matching_automation_creates_run(
     assert len(events) == 1
     assert run.trigger_event_id == events[0].id
     assert run.observability_parent_span_context == "serialized-event-context"
+
+
+@pytest.mark.asyncio
+async def test_event_updates_last_triggered_only_for_a_new_matching_run(
+    org_id, async_session, mock_authenticated_user
+):
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        {"type": "event", "source": "jira_dc", "on": "comment_created"},
+    )
+    previous_poll = datetime(2026, 1, 1, tzinfo=UTC)
+    automation.last_polled_at = previous_poll
+    async_session.add(automation)
+    await async_session.commit()
+
+    event = AcceptedEvent(
+        source="jira_dc",
+        event_key="comment_created",
+        payload={"webhookEvent": "comment_created", "issue": {"key": "TEST-1"}},
+        provider_event_id="jira-delivery-1",
+    )
+    before = utcnow()
+    result = await accept_event(org_id, event, async_session)
+    await async_session.refresh(automation)
+    first_triggered = automation.last_triggered_at
+    assert first_triggered is not None
+    assert before <= first_triggered <= utcnow()
+    assert len(result.run_ids) == 1
+    assert automation.last_polled_at == previous_poll
+
+    duplicate = await accept_event(org_id, event, async_session)
+    unmatched = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="jira_dc",
+            event_key="jira:issue_created",
+            payload={"webhookEvent": "jira:issue_created"},
+            provider_event_id="jira-delivery-2",
+        ),
+        async_session,
+    )
+    await async_session.refresh(automation)
+    assert duplicate.duplicate
+    assert unmatched.matched == 0
+    assert automation.last_triggered_at == first_triggered
+    assert len(await fetch_runs(async_session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_event_last_triggered_rolls_back_with_run(
+    org_id, async_session, mock_authenticated_user
+):
+    from openhands.automation.utils.webhook import create_automation_run
+
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        {"type": "event", "source": "jira_dc", "on": "comment_created"},
+    )
+    async_session.add(automation)
+    await async_session.commit()
+    await create_automation_run(automation, async_session)
+    await async_session.flush()
+    await async_session.refresh(automation)
+    assert automation.last_triggered_at is not None
+
+    await async_session.rollback()
+    await async_session.refresh(automation)
+    assert automation.last_triggered_at is None
+    assert await fetch_runs(async_session) == []
 
 
 @pytest.mark.asyncio

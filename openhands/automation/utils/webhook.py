@@ -29,6 +29,7 @@ from openhands.automation.providers import (
     verify_signature,
 )
 from openhands.automation.schemas import EventTrigger, WebhookConfig
+from openhands.automation.utils.time import utcnow
 
 
 logger = logging.getLogger("automation.utils.webhook")
@@ -294,4 +295,5 @@ async def create_automation_run(
         observability_associations=observability_associations,
     )
     session.add(run)
+    automation.last_triggered_at = utcnow()
     return run
