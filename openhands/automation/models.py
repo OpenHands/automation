@@ -605,9 +605,10 @@ class CustomWebhook(Base):
     - Generic: "X-Signature-256" (default)
 
     The event_id_header field names the HTTP header carrying the provider's own
-    delivery id, used to drop redeliveries. It is optional: a source that does
-    not identify its deliveries leaves it NULL, and its events are recorded and
-    routed but never deduplicated.
+    delivery id, used to drop redeliveries. Alternatively, event_id_expr extracts
+    an ID from the verified body. With neither configured, events are recorded
+    and routed but never deduplicated. admission_expr optionally rejects a
+    verified delivery before storage; acknowledgement selects a fixed response.
     """
 
     __tablename__ = "custom_webhooks"
@@ -661,11 +662,18 @@ class CustomWebhook(Base):
     )
 
     # HTTP header naming the provider's own delivery id, used to drop
-    # redeliveries (e.g. GitHub's "X-GitHub-Delivery"). NULL means this source
-    # does not identify its deliveries: events are recorded and routed, never
-    # deduplicated. Optional so a webhook can opt in to the existing
+    # redeliveries (e.g. GitHub's "X-GitHub-Delivery"). Without this or a body-ID
+    # expression, events are recorded and routed but never deduplicated.
+    # Optional so a webhook can opt in to the existing
     # `integration_events` dedupe path without the router hard-coding a source.
     event_id_header: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Optional verified-body ID and source admission expressions. NULL retains
+    # legacy header-only deduplication and per-automation routing filters.
+    event_id_expr: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    admission_expr: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    # NULL selects the existing event metadata response.
+    acknowledgement: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(

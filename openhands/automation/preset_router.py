@@ -96,6 +96,7 @@ from openhands.automation.utils.timeout import (
     default_automation_timeout,
     validate_automation_timeout,
 )
+from openhands.automation.webhook_policy import require_compatible_trigger
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -607,6 +608,8 @@ async def create_automation_from_prompt(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
+
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     model = resolve_model_profile_for_user(body.model, user)
     state = model_automation_state(body.state, body.enabled)
@@ -1099,6 +1102,8 @@ async def create_automation_from_plugin(
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
+
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     if run_as.kind == AutomationRunAsKind.SERVICE:

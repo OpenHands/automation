@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 
 DEFAULT_VERIFIER: Final[str] = "hmac_sha256_hex"
+TEAMS_VERIFIER: Final[str] = "teams_hmac_sha256"
 DEFAULT_BUILTIN_SIGNATURE_HEADER: Final[str] = "X-Hub-Signature-256"
 # The OpenHands server forwards every built-in source's delivery id in GitHub's
 # header name, as it signs every source into GitHub's signature header.
@@ -271,11 +272,52 @@ class SlackV0Verifier:
         return hmac.compare_digest(signature.encode("utf-8"), expected)
 
 
+def teams_webhook_key(secret: str) -> bytes:
+    """Strictly decode a provider-issued Teams token, without raw-byte fallback."""
+    try:
+        key = base64.b64decode(secret, validate=True)
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("Teams requires a valid base64 security token") from exc
+    if not key:
+        raise ValueError("Teams requires a nonempty base64 security token")
+    return key
+
+
+@dataclass(frozen=True, slots=True)
+class TeamsHmacSha256Verifier:
+    """Teams Outgoing Webhooks: Authorization: HMAC <base64 digest>.
+
+    The raw activity body (and thus a body-derived delivery ID) is signed.
+    There is no timestamp freshness check; replay protection lasts only while
+    the deduplication record is retained.
+    """
+
+    def verify(
+        self,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        secret: str,
+        signature_header: str,
+    ) -> bool:
+        signature = get_header(headers, signature_header)
+        if not signature or not signature.startswith("HMAC "):
+            return False
+        try:
+            candidate = base64.b64decode(signature[5:], validate=True)
+            key = teams_webhook_key(secret)
+        except (ValueError, UnicodeError):
+            return False
+        expected = hmac.new(key, body, hashlib.sha256).digest()
+        return hmac.compare_digest(candidate, expected)
+
+
 VERIFIERS.update(
     {
         "hmac_sha256_hex": HmacSha256HexVerifier(),
         "standard_webhooks": StandardWebhooksVerifier(),
         "slack_v0": SlackV0Verifier(),
+        TEAMS_VERIFIER: TeamsHmacSha256Verifier(),
     }
 )
 
