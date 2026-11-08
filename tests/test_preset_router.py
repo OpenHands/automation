@@ -9,6 +9,7 @@ import socket
 import subprocess
 import tarfile
 import uuid
+import venv
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -605,6 +606,84 @@ class TestPresetEntrypoint:
         assert "command -v python3" in content
         assert "command -v python" in content
         assert "command -v py" in content
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin", "plugin_spec"])
+    @pytest.mark.parametrize(
+        "missing_distribution",
+        [None, "openhands-sdk", "openhands-tools", "openhands-workspace"],
+    )
+    def test_setup_verifies_installed_distributions_without_importing_sdk(
+        self, tmp_path, preset_name, missing_distribution
+    ):
+        """Verify the run venv's packages without starting the SDK twice (#668)."""
+        venv_dir = tmp_path / ".venv"
+        venv.EnvBuilder(with_pip=False).create(venv_dir)
+        python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        site_packages = Path(
+            subprocess.check_output(
+                [
+                    str(python),
+                    "-c",
+                    "import sysconfig; print(sysconfig.get_path('purelib'))",
+                ],
+                text=True,
+            ).strip()
+        )
+        for distribution in ("openhands-sdk", "openhands-tools", "openhands-workspace"):
+            # Successful installation is represented by real distribution metadata.
+            # Imports are deliberately unusable: setup should inspect the install,
+            # leaving module initialization to the preset's entrypoint.
+            module = distribution.removeprefix("openhands-")
+            package = site_packages / "openhands" / module
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text(
+                'raise RuntimeError("unexpected SDK import during setup")\n'
+            )
+            if distribution != missing_distribution:
+                metadata = (
+                    site_packages / f"{distribution.replace('-', '_')}-1.0.dist-info"
+                )
+                metadata.mkdir()
+                (metadata / "METADATA").write_text(
+                    f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 1.0\n"
+                )
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # The installer is outside this verification test; it has completed above.
+        for name, script in {
+            "uv": "#!/bin/sh\nexit 0\n",
+            "curl": '#!/bin/sh\ncat <<\'JSON\'\n{"version":"1.0"}\nJSON\n',
+        }.items():
+            command = bin_dir / name
+            command.write_text(script)
+            command.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "AUTOMATION_API_URL": "https://automation.invalid",
+        }
+
+        result = subprocess.run(
+            ["bash", str(PRESETS_DIR / preset_name / "setup.sh")],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+        assert "unexpected SDK import" not in result.stderr
+        if missing_distribution is None:
+            assert result.returncode == 0, result.stderr
+            assert "[setup] Done" in result.stdout
+        else:
+            assert result.returncode != 0
+            assert (
+                "[setup] ERROR: OpenHands SDK is not importable from .venv"
+                in result.stderr
+            )
 
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     @pytest.mark.parametrize(
