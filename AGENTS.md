@@ -53,6 +53,8 @@ automation/
 │       ├── conversations.py    # Routes an event to its subject's conversation
 │       ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
 │       ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│       ├── draft_router.py     # Saved setup draft CRUD and test dispatch routes
+│       ├── draft_schemas.py    # Draft body validation and normalization
 │       ├── event_router.py     # Receives webhook events, triggers automations
 │       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
