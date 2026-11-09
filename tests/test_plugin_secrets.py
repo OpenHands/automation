@@ -413,6 +413,8 @@ def test_local_references_point_at_the_agent_server_secret_store():
         "GITHUB_TOKEN": {
             "kind": "LookupSecret",
             "description": None,
+            "scope": None,
+            "scope_description": None,
             "url": "http://127.0.0.1:8000/api/settings/secrets/GITHUB_TOKEN",
             "headers": {"X-Session-API-Key": SESSION_KEY},
         }
