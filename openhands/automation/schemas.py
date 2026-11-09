@@ -1192,6 +1192,14 @@ class AutomationTagsResponse(BaseModel):
     tags: list[AutomationTagCount]
 
 
+class UsageResponse(BaseModel):
+    """Totals across every organization, for the OpenHands server's usage report."""
+
+    automations: int = Field(
+        ..., description="Live (not soft-deleted) automations in every org"
+    )
+
+
 class CreateAutomationDraftRequest(BaseModel):
     """Create a server-backed automation setup draft."""
 

@@ -71,6 +71,7 @@ automation/
 │       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
 │       ├── trigger_matcher.py  # Trigger matching for event-based automations
 │       ├── uploads.py          # Tarball upload router
+│       ├── usage_router.py     # Instance-wide totals for the OpenHands server's usage report
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
 │       ├── webhook_router.py   # Custom webhook CRUD
 │       ├── backends/           # Execution backends (Cloud, Local)

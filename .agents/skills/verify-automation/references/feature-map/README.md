@@ -10,7 +10,7 @@ recipe.
 
 Maintenance baseline: `7cda26ab0f60158a2a6dc74964e9aaf84008e04a` (first pass, 2026-10-12).
 
-The map has **264 sub-features**.
+The map has **267 sub-features**.
 
 ## Baseline preconditions
 
@@ -93,6 +93,7 @@ them honest: [../maintenance.md](../maintenance.md).
 | F15 | [Telemetry consent](F15-telemetry-consent.md) | consent, capture gating, anonymous and aggregate events, persistence, cloud mode | `POST /v1/telemetry/consent` | `Launch:` telemetry sink | 9 |
 | F16 | [The run's contract with the Agent Server](F16-agent-server-contract.md) | bash command and output, uploads cleanup, conversation tags, model profiles, agent-server failures | Agent Server `/api/...` | baseline; `llm`, `pypi` | 8 |
 | F17 | [Stream sources (Slack Socket Mode)](F17-stream-sources.md) | stream supervisor, config parsing, retries, kill switch, Socket Mode delivery | the stream supervisor (no route) | baseline; a real Slack app for two blocked bullets | 7 |
+| F18 | [Usage totals for the OpenHands server](F18-usage-report.md) | instance-wide automation count behind the service key, unconfigured and wrong-key refusals | `GET /v1/usage` | baseline | 3 |
 
 ## Not mapped
 
