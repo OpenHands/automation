@@ -69,3 +69,19 @@ To reproduce after configuring an isolated dummy local profile, use the measured
 Read the three small shell diffs and the runtime test, then inspect the measured samples. This is prepared for CS146S contribution 2; the course requires you to understand and stand behind the submitted code. No PR will be opened before your review. The HUMAN section, if required by the submission template, must be written by you.
 
 The isolated verification stack was stopped after the smoke check; its owned ports closed and its private runtime/profile state was purged. Docker Desktop was started for the test suite; unrelated existing containers were left untouched.
+
+## Quick terminal demo for human review
+
+These commands need no running service or model key. The demo uses the existing
+benchmark venv; it only reads package metadata and imports installed modules.
+
+```sh
+cd ~/Documents/cs146s/automation
+uv run --frozen python .pr/preset-metadata-check/demo.py
+uv run --frozen pytest tests/test_preset_router.py -k verifies_installed_distributions -v
+```
+
+The first command compares the actual old and new verification code three times
+each and prints their median duration. It measures the verification step only,
+excluding installation and venv creation. The second command should show 12 passing
+cases: all packages present and each package missing, across all three presets.
