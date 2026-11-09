@@ -72,7 +72,11 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
+    resolve_model_profile_for_user,
+    validate_agent_profile_combination,
+)
 from openhands.automation.utils.run_as import (
     require_automation_creator,
     resolve_run_as,
@@ -176,6 +180,13 @@ class CreatePromptAutomationRequest(BaseModel):
 
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Agent profile the runs launch from. It owns the model, so it "
+            "cannot be combined with 'model'."
+        ),
     )
 
     name: str = Field(..., min_length=1, max_length=500)
@@ -598,6 +609,8 @@ async def create_automation_from_prompt(
     5. Execute the provided prompt
     6. Report completion status back to the automation service
     """
+    validate_agent_profile_combination(body.agent_profile_id, body.model)
+
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
@@ -610,8 +623,15 @@ async def create_automation_from_prompt(
 
     await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
-    model = resolve_model_profile_for_user(body.model, user)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
     state = model_automation_state(body.state, body.enabled)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
@@ -679,6 +699,7 @@ async def create_automation_from_prompt(
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
+            agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
             tarball_path=tarball_path,
@@ -767,6 +788,13 @@ class CreatePluginAutomationRequest(BaseModel):
 
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Agent profile the runs launch from. It owns the model, so it "
+            "cannot be combined with 'model'."
+        ),
     )
 
     name: str = Field(..., min_length=1, max_length=500)
@@ -906,6 +934,8 @@ class CreatePluginAutomationRequest(BaseModel):
         """Enforce mutual exclusivity between plugins and variants."""
         if (self.plugins is None) == (self.variants is None):
             raise ValueError("Exactly one of 'plugins' or 'variants' must be provided.")
+        if self.variants is not None and self.agent_profile_id is not None:
+            raise ValueError("'agent_profile_id' cannot be used with 'variants'.")
 
         if self.variants is not None:
             if self.experiment_id is None:
@@ -1093,6 +1123,8 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
+    validate_agent_profile_combination(body.agent_profile_id, body.model)
+
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
@@ -1105,6 +1137,9 @@ async def create_automation_from_plugin(
 
     await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     if run_as.kind == AutomationRunAsKind.SERVICE:
         body = await _pin_preset_plugin_refs(
@@ -1113,7 +1148,11 @@ async def create_automation_from_plugin(
                 get_http_client(request), user_id=run_as.user_id, org_id=user.org_id
             ),
         )
-    model = resolve_model_profile_for_user(body.model, user)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
     state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
@@ -1204,6 +1243,7 @@ async def create_automation_from_plugin(
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
+            agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
             tarball_path=tarball_path,

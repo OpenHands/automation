@@ -23,7 +23,7 @@ Routes: `POST /api/automation/v1/drafts`, `GET /api/automation/v1/drafts`,
 - `F09.create-prompt`: a `/v1/preset/prompt` draft saves at any completeness: `{}` is a 201 with `dispatchable=false` and one `missing` error each for `name`, `prompt`, `trigger`; a complete body is `dispatchable=true` with `validation_errors=null`.
 - `F09.create-raw`: a `/v1` draft over an uploaded tarball is dispatchable; one whose `oh-internal://` upload does not exist saves with code `tarball_path_404`.
 - `F09.create-plugin`: a `/v1/preset/plugin` draft with `plugins` is dispatchable; `plugins` and `variants` together is a shape error.
-- `F09.shape-errors`: a draft body the endpoint cannot accept (unknown key, unknown trigger type, `agent_profile_id` on `/v1`, a bad `tarball_path` scheme) is 422 `{"detail":{"message":"Draft body does not match endpoint schema","errors":[{field,code,message}]}}` and stores nothing; an unknown `endpoint` is a plain FastAPI 422; no key is 401.
+- `F09.shape-errors`: a draft body the endpoint cannot accept (unknown key, unknown trigger type, a non-UUID `agent_profile_id`, a bad `tarball_path` scheme) is 422 `{"detail":{"message":"Draft body does not match endpoint schema","errors":[{field,code,message}]}}` and stores nothing; an unknown `endpoint` is a plain FastAPI 422; no key is 401.
 - `F09.final-validation`: a well-shaped but invalid body is still 201 with field-addressed errors: a bad cron on `trigger.schedule`, `state:"DRAFT"` on `state`, a sub-minute schedule as `interval_too_short`.
 - `F09.cron-floor`: the `interval_too_short` floor is `max(60, AUTOMATION_SCHEDULER_INTERVAL_SECONDS)`, matching `GET /v1/capabilities` `triggers.cron.minIntervalSeconds`.
 - `F09.name`: the draft's `name` is the request `name` when given, else `draft.name`, else null.
@@ -38,6 +38,7 @@ Routes: `POST /api/automation/v1/drafts`, `GET /api/automation/v1/drafts`,
 - `F09.artifact-guard`: the materialized DRAFT automation cannot be dispatched (`POST /v1/{id}/dispatch`) or activated (`PATCH state/enabled`) through the normal API: 409, or 422 `Draft is not dispatchable` when the draft has become invalid.
 - `F09.preset-materialize`: dispatching a prompt or plugin draft generates a fresh `oh-internal://` upload named `draft-prompt-automation-<name>` / `draft-plugin-automation-<name>`, with `setup_script_path=setup.sh` and entrypoint `.venv/bin/python main.py`.
 - `F09.delete`: DELETE is 204; the draft and its materialized automation then answer 404, its pending runs (manual included) become `SKIPPED` with `status_detail.detail` `Automation draft deleted by user`, and a second DELETE is 404.
+- `F09.agent-profile`: a draft keeps `agent_profile_id` on every endpoint. With a `model` it saves with `invalid_agent_profile` on `agent_profile_id` and is not dispatchable; dispatching it materializes the automation with that profile and `model: null`.
 - `F09.template-after-draft-test`: after a draft carrying `template.id` was test-dispatched, creating the real automation from the same template should create a new ACTIVE automation (known bug: it returns 200 with the hidden DRAFT artifact).
 
 ## How to get to it (agent POV)
@@ -92,7 +93,7 @@ Preconditions:
   N0=$(control-automation api GET /v1/drafts --expect 200 --field total)
   control-automation api POST /v1/drafts --json '{"endpoint":"/v1/preset/prompt","draft":{"foo":1}}' --expect 422 --check detail.message eq 'Draft body does not match endpoint schema' --check detail.errors.0.field eq foo --check detail.errors.0.code eq extra_forbidden --save F09.shape-errors/extra-key
   control-automation api POST /v1/drafts --json '{"endpoint":"/v1/preset/prompt","draft":{"trigger":{"type":"bogus"}}}' --expect 422 --check detail.errors.0.field eq trigger --check detail.errors.0.code eq union_tag_invalid
-  control-automation api POST /v1/drafts --json '{"endpoint":"/v1","draft":{"agent_profile_id":"qa-profile"}}' --expect 422 --check detail.errors.0.field eq agent_profile_id --check detail.errors.0.code eq extra_forbidden
+  control-automation api POST /v1/drafts --json '{"endpoint":"/v1","draft":{"agent_profile_id":"qa-profile"}}' --expect 422 --check detail.errors.0.field eq agent_profile_id --check detail.errors.0.code eq uuid_parsing
   control-automation api POST /v1/drafts --json '{"endpoint":"/v1","draft":{"tarball_path":"ftp://example.invalid/x.tar.gz"}}' --expect 422 --check detail.errors.0.field eq tarball_path --check detail.errors.0.message contains 'tarball_path must start with'
   control-automation api POST /v1/drafts --json '{"endpoint":"/v2","draft":{}}' --expect 422 --check detail.0.loc.1 eq endpoint --check detail.0.type eq literal_error
   control-automation api POST /v1/drafts --json '{"endpoint":"/v1","draft":{}}' --auth none --expect 401 --check detail contains 'Authentication required'
@@ -241,6 +242,15 @@ Preconditions:
   ```
   The deleted automation's runs list is gone with it (`GET /v1/{id}/runs` is
   404), so the run row is read from the database.
+- **Agent profile (`F09.agent-profile`).** Local mode does not look the id up.
+  ```sh
+  control-automation api POST /v1/drafts --json '{"endpoint":"/v1/preset/prompt","draft":{"name":"qa profiled","prompt":"hi","model":"qa-model","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"agent_profile_id":"11111111-1111-4111-8111-111111111111"}}' --expect 201 --check dispatchable eq false --check validation_errors.0.field eq agent_profile_id --check validation_errors.0.code eq invalid_agent_profile --save F09.agent-profile/with-model
+  QA=$(control-automation api POST /v1/drafts --json '{"endpoint":"/v1/preset/prompt","draft":{"name":"qa profiled","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"agent_profile_id":"11111111-1111-4111-8111-111111111111"}}' --expect 201 --check dispatchable eq true --check draft.agent_profile_id eq 11111111-1111-4111-8111-111111111111 --field id)
+  control-automation api POST "/v1/drafts/$QA/dispatch" --expect 201
+  QAM=$(control-automation api GET "/v1/drafts/$QA" --expect 200 --field materialized_automation_id)
+  control-automation api GET "/v1/$QAM" --expect 200 --check agent_profile_id eq 11111111-1111-4111-8111-111111111111 --check model eq null --save F09.agent-profile/materialized
+  control-automation api DELETE "/v1/drafts/$QA" --expect 204
+  ```
 - **Template enable after a draft test (`F09.template-after-draft-test`), known bug.** The real create should make a new ACTIVE automation; it returns the hidden DRAFT artifact instead.
   Requires: `F09.create-raw`
   ```sh
@@ -288,5 +298,5 @@ Preconditions:
 - Creator-only checks (403 `Only the draft creator can modify or dispatch
   it`) cannot be reached in local mode, where one user owns every draft.
   Draft routes need only `view_automations`, like the create routes.
-- `agent_profile_id` and `observability_associations` are accepted by `POST
-  /v1` but not by a `/v1` draft (shape 422).
+- `observability_associations` is accepted by `POST /v1` but not by a `/v1`
+  draft (shape 422).
