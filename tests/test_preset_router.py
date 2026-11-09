@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
@@ -2015,6 +2016,155 @@ class TestCreateAutomationFromPrompt:
 
         assert response.status_code == 500
 
+    async def test_create_from_prompt_with_an_agent_profile(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        """The profile owns the model, so no model is stored with it."""
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+        assert response.json()["model"] is None
+        assert len(agent_profiles_api.requests) == 1
+
+    async def test_create_from_prompt_rejects_an_unknown_agent_profile(
+        self, async_client, agent_profiles_api, mock_file_store
+    ):
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": str(uuid.uuid4()),
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
+        mock_file_store.write_stream.assert_not_called()
+
+    async def test_create_from_prompt_refuses_a_personal_profile_for_another_identity(
+        self, async_client, agent_profiles_api, mock_file_store
+    ):
+        """A personal profile is the caller's alone, so a run as anyone else
+        could not launch it."""
+        agent_profiles_api.response = httpx.Response(
+            200,
+            json={
+                "profiles": [
+                    {
+                        "id": agent_profiles_api.profile_id,
+                        "name": "mine",
+                        "scope": "personal",
+                    }
+                ]
+            },
+        )
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+                "run_as_user_id": str(uuid.uuid4()),
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "personal" in response.json()["detail"]
+        mock_file_store.write_stream.assert_not_called()
+
+    async def test_create_from_prompt_accepts_a_personal_profile_run_as_the_caller(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        agent_profiles_api.response = httpx.Response(
+            200,
+            json={
+                "profiles": [
+                    {
+                        "id": agent_profiles_api.profile_id,
+                        "name": "mine",
+                        "scope": "personal",
+                    }
+                ]
+            },
+        )
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+
+    async def test_another_members_profiles_are_not_trusted_from_the_cache(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        """Personal profiles make each member's list their own."""
+        body = {
+            "name": "Profiled",
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "agent_profile_id": agent_profiles_api.profile_id,
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json=body,
+            headers=agent_profiles_api.caller_auth,
+        )
+        assert first.status_code == 201
+
+        mock_authenticated_user.user_id = uuid.uuid4()
+        agent_profiles_api.response = httpx.Response(200, json={"profiles": []})
+        second = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json=body,
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert second.status_code == 422
+        assert "not found" in second.json()["detail"]
+        assert len(agent_profiles_api.requests) == 2
+
+    async def test_create_from_prompt_rejects_a_model_with_an_agent_profile(
+        self, async_client, agent_profiles_api, mock_file_store
+    ):
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "model": "fast-profile",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "already specifies the model" in response.json()["detail"]
+        assert agent_profiles_api.requests == []
+        mock_file_store.write_stream.assert_not_called()
+
 
 # --- Plugin Preset Tests ---
 
@@ -2284,6 +2434,27 @@ class TestGeneratePluginTarball:
 
 class TestExperimentVariantValidation:
     """Tests for A/B test variant validation on CreatePluginAutomationRequest."""
+
+    def test_variants_reject_an_agent_profile(self):
+        """An experiment run builds its own agent, so it cannot launch a profile."""
+        import pydantic
+
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(pydantic.ValidationError, match="cannot be used with"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "AB Test",
+                    "experiment_id": "my-experiment",
+                    "agent_profile_id": str(uuid.uuid4()),
+                    "variants": [
+                        {"name": "a", "weight": 50, "plugins": [{"source": "x/a"}]},
+                        {"name": "b", "weight": 50, "plugins": [{"source": "x/b"}]},
+                    ],
+                    "prompt": "Test prompt",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
 
     def test_variants_accepted(self):
         """Valid variants request is accepted."""
@@ -3163,6 +3334,26 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+    async def test_create_from_plugin_with_an_agent_profile(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "Profiled",
+                "plugins": [{"source": "github:owner/review"}],
+                "prompt": "/review:run",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+        assert response.json()["model"] is None
 
 
 class TestCreatePresetAsServiceAccount:
