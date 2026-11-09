@@ -452,8 +452,13 @@ class TemplateProvenance(BaseModel):
     id: str = Field(
         ...,
         min_length=1,
-        max_length=100,
-        description="Identifier of the extension template (catalog entry id).",
+        max_length=255,
+        description=(
+            "Identifier of the extension template (catalog entry id). "
+            "Plugin-spec installs use a composite id "
+            "``plugin-spec:<source>/<repo_path>/<ref>`` which can exceed 100 "
+            "chars for deeply nested plugin paths or long branch names."
+        ),
     )
     version: str = Field(
         ...,
@@ -675,6 +680,15 @@ class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Replace a plugin-spec automation's configuration, validated against "
+            "its manifest. Omit to preserve it; {} applies schema defaults. "
+            "Null is not allowed. The trigger is unchanged unless also supplied."
+        ),
+    )
 
     plugin: UpdateAutomationPluginSource | None = Field(
         default=None,

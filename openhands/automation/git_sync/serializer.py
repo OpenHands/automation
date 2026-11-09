@@ -20,6 +20,7 @@ from typing import Any, Final
 import yaml
 from pydantic import SecretStr
 
+from openhands.automation.git_sync.plugin_spec import validate_synced_plugin_spec
 from openhands.automation.models import Automation
 from openhands.automation.utils.tarball_validation import is_internal_url
 from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
@@ -163,6 +164,8 @@ def _automation_yaml_fields(
     # Omitted when empty for the same reason.
     if automation.tags:
         fields["tags"] = automation.tags
+    if automation.plugin_spec is not None:
+        fields["plugin_spec"] = validate_synced_plugin_spec(automation.plugin_spec)
     return fields
 
 
