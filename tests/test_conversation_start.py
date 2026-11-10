@@ -570,6 +570,12 @@ class TestWhichRunsStartThroughTheAppServer:
         assert start.agent_profile_id is None
         assert start.llm_profile is None
 
+    def test_prompt_preset_with_a_chosen_profile_takes_the_profiles_model(self):
+        start = _conversation_start(_automation(model=None), _RUN, None, [], {})
+        assert start is not None
+        assert start.agent_profile_id == PROFILE_ID
+        assert start.llm_profile is None
+
     def test_plugin_preset_passes_its_plugins(self):
         plugins = [{"source": "github:acme/plugin", "ref": "v1"}]
         start = _conversation_start(
@@ -931,6 +937,7 @@ class TestExecuteRunStartsTheConversation:
         run = await self._run(
             async_session_factory,
             preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+            agent_profile_id=None,
             subject_key="OpenHands/OpenHands/1",
         )
         backend = self._backend(
@@ -957,6 +964,30 @@ class TestExecuteRunStartsTheConversation:
         assert "conversation_start_fallback" in caplog.text
         reloaded = await self._reload(async_session_factory, run.id)
         assert reloaded.status == AutomationRunStatus.RUNNING
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_an_app_server_without_the_contract_fails_a_run_with_a_profile(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+        )
+        backend = self._backend(
+            ConversationStartUnavailable("no route", status_code=404)
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        mock_execute.assert_not_awaited()
+        backend.release_context.assert_awaited_once()
+        reloaded = await self._reload(async_session_factory, run.id)
+        assert reloaded.status == AutomationRunStatus.FAILED
+        detail = cast(dict, reloaded.status_detail)
+        assert detail["code"] == "agent_profile_unsupported"
+        assert detail["transient"] is False
+        assert PROFILE_ID in detail["detail"]
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_a_failed_start_fails_the_run_before_any_command(
@@ -1697,3 +1728,78 @@ class TestRunnersAttachToTheStartedConversation:
         )
         with pytest.raises(RuntimeError, match="acme/ssh"):
             clone(workspace, str(config), left)
+
+
+class TestPresetRunnersLaunchTheProfileLocally:
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_only_a_local_run_it_creates_launches_the_profile(self, preset_name):
+        """Only a local agent server holds the owner's profiles."""
+        launch_profile = _load_preset_function(preset_name, "_local_launch_profile", {})
+        env = {"AUTOMATION_AGENT_PROFILE_ID": PROFILE_ID}
+
+        assert launch_profile(env, False, True) == PROFILE_ID
+        assert launch_profile(env, True, True) is None
+        assert launch_profile(env, False, False) is None
+        assert launch_profile({}, False, True) is None
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_creates_the_conversation_from_the_profile(self, preset_name):
+        from openhands.sdk.conversation.request import (
+            AgentLaunchAdditions,
+            StartConversationRequest,
+        )
+        from openhands.sdk.hooks import HookConfig
+        from openhands.sdk.workspace.local import LocalWorkspace
+
+        remote = MagicMock()
+        start = _load_preset_function(
+            preset_name,
+            "_start_profile_conversation",
+            {
+                "AgentLaunchAdditions": AgentLaunchAdditions,
+                "LocalWorkspace": LocalWorkspace,
+                "RemoteConversation": remote,
+                "StartConversationRequest": StartConversationRequest,
+                "uuid": uuid,
+            },
+        )
+        workspace = SimpleNamespace(working_dir="/workspace")
+        callbacks = [lambda event: None]
+        hooks = HookConfig()
+
+        conversation = start(
+            workspace,
+            PROFILE_ID,
+            callbacks=callbacks,
+            hook_config=hooks,
+            plugins=[PluginSource(source="github:acme/review")],
+            conversation_id=uuid.UUID(CONVERSATION_ID),
+        )
+
+        assert conversation is remote.create.return_value
+        [(sent_workspace, request), kwargs] = remote.create.call_args
+        assert sent_workspace is workspace
+        assert kwargs == {"callbacks": callbacks}
+        assert request.agent_profile_id == uuid.UUID(PROFILE_ID)
+        assert request.agent is None
+        assert request.agent_settings is None
+        assert request.workspace.working_dir == "/workspace"
+        assert request.hook_config is hooks
+        assert request.conversation_id == uuid.UUID(CONVERSATION_ID)
+        assert [p.source for p in request.plugins] == ["github:acme/review"]
+        assert request.agent_launch_additions is None
+
+        start(workspace, PROFILE_ID, llm_profile_ref="fast")
+        request = remote.create.call_args.args[1]
+        assert request.agent_launch_additions.llm_profile_ref == "fast"
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_a_profile_launch_loads_only_the_repositories_skills(self, preset_name):
+        """The agent server loads the user's skills with the profile's agent."""
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        assert (
+            "    if SERVER_BUILDS_AGENT:\n        # The conversation's server" in source
+        )
+        assert "workspace.get_secrets(agent_profile_id=LAUNCH_PROFILE_ID)" in source
+        assert "    elif LAUNCH_PROFILE_ID:\n" in source

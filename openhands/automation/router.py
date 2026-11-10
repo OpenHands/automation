@@ -56,6 +56,7 @@ from openhands.automation.plugin_specs import (
     CreatePluginSpecAutomationRequest,
     PluginSecretLookup,
     PluginSpecError,
+    PluginSpecPreflightResponse,
     entrypoint_for_manifest,
     no_plugin_secrets,
     pin_plugin_refs,
@@ -269,7 +270,9 @@ async def create_automation(
 
     # After the template lookup, so a repeat enable stays one query and does
     # not depend on the OpenHands API, and before the rest of the transaction.
-    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
 
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
 
@@ -368,6 +371,7 @@ async def create_automation_from_plugin_spec(
         user=user,
         run_as_user_id=run_as.user_id,
         pin_ref=run_as.kind == AutomationRunAsKind.SERVICE,
+        agent_profile_id=body.agent_profile_id,
     )
     trigger = await _resolve_plugin_spec_trigger(
         requested_trigger=body.trigger,
@@ -437,6 +441,49 @@ async def create_automation_from_plugin_spec(
         },
     )
     return AutomationResponse.model_validate(automation)
+
+
+@router.get(
+    "/plugin-spec/preflight",
+    response_model=PluginSpecPreflightResponse,
+)
+async def preflight_plugin_spec(
+    source: str,
+    ref: str | None = None,
+    repo_path: str | None = None,
+    user: AuthenticatedUser = Depends(_require_view_automations),  # noqa: ARG001
+) -> PluginSpecPreflightResponse:
+    """Read-only preflight of a plugin spec.
+
+    Resolves and parses the plugin manifest (config schema, runtime profile
+    requirements, suggested trigger) with no side effects. Used by launch
+    flows to render typed config inputs and a default trigger before the user
+    commits to creating an automation.
+    """
+    plugin = AutomationPluginSource(source=source, ref=ref, repo_path=repo_path)
+    allow_local_sources = _allow_local_plugin_sources()
+    try:
+        resolved_ref, manifest = preflight_manifest(
+            plugin, allow_local_sources=allow_local_sources
+        )
+        validate_required_plugins(
+            manifest.runtime.plugins,
+            allow_local_sources=allow_local_sources,
+        )
+        # Static suggested_trigger can be returned directly. Templated triggers
+        # need config the preflight doesn't have, so return null and let the
+        # frontend render the trigger once config is collected at install time.
+        if manifest.suggested_trigger_template is None:
+            suggested_trigger = resolve_suggested_trigger(manifest, {})
+        else:
+            suggested_trigger = None
+    except PluginSpecError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return PluginSpecPreflightResponse(
+        manifest=manifest,
+        resolved_ref=resolved_ref,
+        suggested_trigger=suggested_trigger,
+    )
 
 
 def _allow_local_plugin_sources() -> bool:
@@ -578,6 +625,8 @@ async def _resolve_plugin_spec_runtime_fields(
     user: AuthenticatedUser,
     run_as_user_id: uuid.UUID,
     pin_ref: bool = False,
+    agent_profile_id: uuid.UUID | None = None,
+    current_agent_profile_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Validate a plugin spec and return automation fields derived from it.
 
@@ -601,16 +650,25 @@ async def _resolve_plugin_spec_runtime_fields(
         _plugin_secrets_for(request, run_as_user_id, user.org_id),
     )
 
+    agent_profile_requirement = manifest.runtime.agent_profile
+    if agent_profile_requirement is None:
+        if agent_profile_id is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "This plugin does not run on an agent profile",
+            )
+    elif agent_profile_id is None:
+        agent_profile_id = current_agent_profile_id
     agent_profile_name = (
-        manifest.runtime.agent_profile.default_name
-        if manifest.runtime.agent_profile is not None
+        agent_profile_requirement.default_name
+        if agent_profile_requirement is not None and agent_profile_id is None
         else None
     )
-    has_agent_profile = bool(agent_profile_name)
+    has_agent_profile = agent_profile_id is not None or bool(agent_profile_name)
     if (
-        manifest.runtime.agent_profile is not None
-        and manifest.runtime.agent_profile.required
-        and not agent_profile_name
+        agent_profile_requirement is not None
+        and agent_profile_requirement.required
+        and not has_agent_profile
     ):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -636,9 +694,8 @@ async def _resolve_plugin_spec_runtime_fields(
             resolve_model_profile_for_user(llm_default, user) if llm_default else None
         )
 
-    agent_profile_requirement = manifest.runtime.agent_profile
     agent_profile_id = await validate_agent_profile_allowlists(
-        None,
+        agent_profile_id,
         agent_profile_name,
         agent_profile_requirement.allowed_tools
         if agent_profile_requirement is not None
@@ -669,6 +726,7 @@ async def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
     plugin: AutomationPluginSource,
     automation: Automation,
     secrets: PluginSecretLookup = no_plugin_secrets,
+    plugin_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve a plugin update without rereading agent profile details.
 
@@ -690,14 +748,15 @@ async def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Existing plugin-spec automation is missing plugin source metadata",
         )
-    requested_config = existing_plugin_spec.get("config")
+    existing_config = existing_plugin_spec.get("config")
+    requested_config = plugin_config if plugin_config is not None else existing_config
     old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
     (
         _old_config,
         old_manifest,
         _old_ref,
         _old_required,
-    ) = await _fetch_validated_plugin_manifest(old_plugin, requested_config, secrets)
+    ) = await _fetch_validated_plugin_manifest(old_plugin, existing_config, secrets)
     (
         plugin_config,
         manifest,
@@ -864,6 +923,18 @@ async def update_automation(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Only prompt and plugin preset automations can update repos",
         )
+    config_requested = "config" in update_data
+    requested_config = update_data.pop("config", None)
+    if config_requested:
+        if requested_config is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, "config cannot be null"
+            )
+        if not auto.plugin_spec or auto.tarball_path != "plugin-spec://runtime":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Only plugin-spec automations can update config",
+            )
     plugin_update_requested = "plugin" in update_data
     if plugin_update_requested:
         if update_data["plugin"] is None:
@@ -876,6 +947,7 @@ async def update_automation(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "Only plugin-spec automations can update plugin source",
             )
+    if plugin_update_requested or config_requested:
         runtime_overrides = sorted(
             set(update_data)
             & {
@@ -895,17 +967,20 @@ async def update_automation(
                     "plugin manifest; remove: " + ", ".join(runtime_overrides)
                 ),
             )
+    if plugin_update_requested:
+        assert auto.plugin_spec is not None
         plugin_source = AutomationPluginSource.model_validate(update_data.pop("plugin"))
         try:
             plugin_runtime_fields = await _resolve_plugin_spec_runtime_fields(
                 plugin=plugin_source,
-                plugin_config=auto.plugin_spec.get("config")
-                if auto.plugin_spec
-                else None,
+                plugin_config=requested_config
+                if config_requested
+                else auto.plugin_spec.get("config"),
                 request=request,
                 user=user,
                 run_as_user_id=auto.user_id,
                 pin_ref=auto.run_as_kind == AutomationRunAsKind.SERVICE,
+                current_agent_profile_id=auto.agent_profile_id,
             )
         except HTTPException as exc:
             if (
@@ -922,10 +997,23 @@ async def update_automation(
                     plugin=plugin_source,
                     automation=auto,
                     secrets=_plugin_secrets_for(request, auto.user_id, auto.org_id),
+                    plugin_config=requested_config if config_requested else None,
                 )
             )
         plugin_runtime_fields.pop("manifest", None)
         update_data.update(plugin_runtime_fields)
+    elif config_requested:
+        assert auto.plugin_spec is not None
+        plugin_source = AutomationPluginSource.model_validate(
+            auto.plugin_spec["plugin"]
+        )
+        resolved_config, _, _, _ = await _fetch_validated_plugin_manifest(
+            plugin_source,
+            requested_config,
+            _plugin_secrets_for(request, auto.user_id, auto.org_id),
+        )
+        # A config edit must not repin code or change the selected profiles.
+        update_data["plugin_spec"] = {**auto.plugin_spec, "config": resolved_config}
 
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
@@ -1011,7 +1099,9 @@ async def update_automation(
             # Only a newly selected profile is looked up: an update that sends
             # the current one back must not start failing because the profile
             # was deleted since, or the OpenHands API is down.
-            await ensure_agent_profile_exists(selected_profile, request, user)
+            await ensure_agent_profile_exists(
+                selected_profile, request, user, runs_as_user_id=auto.user_id
+            )
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:

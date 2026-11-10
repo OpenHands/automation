@@ -158,6 +158,8 @@ class TestGetCapabilities:
         response = await async_client.get(CAPABILITIES_URL)
 
         assert "agentProfiles" in response.json()["features"]
+        assert "pluginSpecAgentProfiles" in response.json()["features"]
+        assert "presetAgentProfiles" in response.json()["features"]
 
     async def test_configured_deployment_advertises_event_support(
         self, async_client, configured_deployment
@@ -182,6 +184,7 @@ class TestGetCapabilities:
             "pull_request_review.*",
             "push",
             "release.*",
+            "workflow_run.*",
         ]
         by_source = body["eventTypesBySource"]
         assert set(by_source) == {
@@ -210,6 +213,7 @@ class TestGetCapabilities:
         assert "customTarball" in body["features"]
         assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
+        assert "pluginConfigUpdate" in body["features"]
         assert "serviceAccountRunAs" in body["features"]
         # The list follows the pinned SDK's providers, so an SDK bump that adds
         # one (Azure DevOps in 1.58.0) is advertised without a change here.
@@ -431,6 +435,7 @@ class TestValidateDraft:
                 id="type-the-deployment-cannot-parse",
             ),
             pytest.param("pull_request.*", [], id="wildcard-over-supported-types"),
+            pytest.param("workflow_run.completed", [], id="workflow-run-completed"),
         ],
     )
     async def test_event_types_are_checked_against_what_the_deployment_parses(
@@ -669,6 +674,55 @@ class TestValidateDraft:
         assert response.status_code == 200
         assert addressed_errors(response.json()) == [
             ("trigger.schedule", "interval_too_short")
+        ]
+
+    @pytest.mark.parametrize(
+        ("endpoint", "draft"),
+        [
+            ("/v1/preset/prompt", CRON_DRAFT),
+            (
+                "/v1/preset/plugin",
+                {**CRON_DRAFT, "plugins": [{"source": "github:acme/review"}]},
+            ),
+        ],
+    )
+    async def test_checks_a_presets_profile(
+        self, async_client, agent_profiles_api, endpoint, draft
+    ):
+        known = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**draft, "agent_profile_id": agent_profiles_api.profile_id},
+                endpoint=endpoint,
+            ),
+            headers=agent_profiles_api.caller_auth,
+        )
+        unknown = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**draft, "agent_profile_id": str(uuid.uuid4())}, endpoint=endpoint
+            ),
+            headers=agent_profiles_api.caller_auth,
+        )
+        with_model = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {
+                    **draft,
+                    "agent_profile_id": agent_profiles_api.profile_id,
+                    "model": "active-profile",
+                },
+                endpoint=endpoint,
+            ),
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert known.json()["valid"] is True
+        assert addressed_errors(unknown.json()) == [
+            ("agent_profile_id", "invalid_agent_profile")
+        ]
+        assert addressed_errors(with_model.json()) == [
+            ("agent_profile_id", "invalid_agent_profile")
         ]
 
     async def test_unknown_creation_endpoint_is_rejected(self, async_client):

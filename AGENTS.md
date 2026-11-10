@@ -53,6 +53,8 @@ automation/
 │       ├── conversations.py    # Routes an event to its subject's conversation
 │       ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
 │       ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│       ├── draft_router.py     # Saved setup draft CRUD and test dispatch routes
+│       ├── draft_schemas.py    # Draft body validation and normalization
 │       ├── event_router.py     # Receives webhook events, triggers automations
 │       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
@@ -71,6 +73,7 @@ automation/
 │       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
 │       ├── trigger_matcher.py  # Trigger matching for event-based automations
 │       ├── uploads.py          # Tarball upload router
+│       ├── usage_router.py     # Instance-wide totals for the OpenHands server's usage report
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
 │       ├── webhook_router.py   # Custom webhook CRUD
 │       ├── backends/           # Execution backends (Cloud, Local)
@@ -201,7 +204,7 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
 4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
-6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. Presets also pass a finish-required plugin the service writes into the sandbox and, when their runner supports it, the repositories the app server can clone (`selected_repository`, `additional_repositories`): those on a provider and host the owner is connected to, from `provider_tokens_set` in `GET /api/v1/settings`. The runner clones the rest, and all of them if that read fails. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (a missing route or a body it cannot validate) logs `conversation_start_fallback` and the runner creates the conversation as before; any other refusal fails the run. Local mode and custom tarballs skip this step.
+6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. Presets also pass a finish-required plugin the service writes into the sandbox and, when their runner supports it, the repositories the app server can clone (`selected_repository`, `additional_repositories`): those on a provider and host the owner is connected to, from `provider_tokens_set` in `GET /api/v1/settings`. The runner clones the rest, and all of them if that read fails. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (a missing route or a body it cannot validate) logs `conversation_start_fallback` and the runner creates the conversation as before, unless the automation selected an agent profile: only the app server can launch one, so that run fails with `agent_profile_unsupported`. Any other refusal fails the run. Local mode and custom tarballs skip this step.
 7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
    - Native Windows local mode (the run's work dir is a drive path): the agent-server runs commands with cmd.exe, so the tarball, a JSON spec (env vars + entrypoint) and `windows_runner.py` are uploaded into the work dir and `uv run --no-project python <runner> <spec>` does the same steps, running `setup.py` instead of `setup.sh`
@@ -421,6 +424,7 @@ exactly one org, the deterministic local org from `auth.py`'s
   extracted files are committed as plain content and the mode would otherwise
   be lost on the way back in. Slugs are unique per org
   (`AutomationGitSyncState`, `(org_id, slug)`), not globally.
+- Plugin-spec automations also store `plugin_spec` (source, config and pinned required plugins) in `automation.yaml`, with `plugin-spec://runtime` as the source marker and no tarball files. Import validates the stored shape; execution preflight still fetches the manifest and validates its config schema using the run identity. Existing profile and secret references must be available on the destination. Older exports missing the spec are repaired from the live record on the next sync.
 - `git_sync_path` is validated by `normalize_git_sync_path`: repo-relative, no
   `..`, no leading/trailing slashes, never empty. It is joined onto the local
   checkout and passed to `git add -- <path>`, and each slug directory under it

@@ -184,6 +184,8 @@ async def test_local_run_fetches_a_private_plugin_at_both_points(
         "PLUGIN_TOKEN": {
             "kind": "LookupSecret",
             "description": None,
+            "scope": None,
+            "scope_description": None,
             "url": f"{store.url}/api/settings/secrets/PLUGIN_TOKEN",
             "headers": {"X-Session-API-Key": SESSION_KEY},
         }
