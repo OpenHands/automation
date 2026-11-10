@@ -547,7 +547,7 @@ def service_key(monkeypatch):
 
 
 def _lookup(client: AsyncClient, org_id: uuid.UUID, ids: list[uuid.UUID], **kwargs):
-    params = [("org_id", str(org_id)), *(("id", str(i)) for i in ids)]
+    params = {"org_id": str(org_id), "id": [str(i) for i in ids]}
     return client.get(
         SERVICE_FACTORIES,
         params=params,

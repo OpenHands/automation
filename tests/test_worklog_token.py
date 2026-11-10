@@ -65,17 +65,16 @@ CONTRACT_CLAIMS = {
 }
 
 
-def _token(**overrides) -> str:
-    values = dict(
+def _token(automation_name: str = "Nightly triage") -> str:
+    return create_worklog_token(
+        SERVICE_KEY,
         org_id=ORG_ID,
         factory_id=FACTORY_ID,
         automation_id=AUTOMATION_ID,
-        automation_name="Nightly triage",
+        automation_name=automation_name,
         run_id=RUN_ID,
         now=ISSUED_AT,
     )
-    values.update(overrides)
-    return create_worklog_token(SERVICE_KEY, **values)
 
 
 def _config(monkeypatch, *, service_key: str | None, local: bool = False) -> None:
@@ -165,7 +164,7 @@ def test_the_raw_service_key_does_not_verify_the_token():
 
 def test_the_automation_name_is_cut_to_256_characters():
     claims = jwt.decode(
-        _token(automation_name="n" * 300),
+        _token("n" * 300),
         derive_worklog_signing_key(SERVICE_KEY),
         algorithms=["HS256"],
         audience="worklog",
@@ -291,8 +290,9 @@ async def _dispatch(
             success=True, bash_command_id="cmd-1", error=None
         )
         await _execute_run(loaded, mock_settings, async_session_factory, MagicMock())
-        execute.assert_awaited_once()
-        return execute.await_args.kwargs["env_vars"], run_id
+        call = execute.await_args
+        assert call is not None
+        return call.kwargs["env_vars"], run_id
 
 
 async def test_dispatch_injects_a_token_that_names_the_run_and_its_factory(
