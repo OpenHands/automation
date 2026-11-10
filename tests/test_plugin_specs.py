@@ -2,6 +2,7 @@ import json
 import tarfile
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -428,6 +429,33 @@ async def test_stock_conversation_runner_packages_primary_plugin_command(tmp_pat
     assert "threading" not in main_source
     assert "conversation_title" not in main_source
     assert "report_phase" not in main_source
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_stock_conversation_runner_packages_platform_setup(tmp_path, monkeypatch, platform):
+    plugin = write_conversation_plugin(tmp_path)
+    source = AutomationPluginSource(source=str(plugin))
+    _, _, manifest = fetch_manifest(source)
+    monkeypatch.setattr(plugin_specs, "_PLUGIN_SPEC_PRESET_CACHE", None)
+    monkeypatch.setattr(plugin_specs, "os", SimpleNamespace(name=platform))
+
+    tarball = plugin_specs._build_stock_runner_tarball(
+        source=source,
+        resolved_ref=None,
+        manifest=manifest,
+        config={},
+        resolved_runtime={},
+        required_plugins=[],
+    )
+
+    with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
+        assert "setup.sh" in tar.getnames()
+        if platform == "nt":
+            setup = tar.extractfile("setup.py")
+            assert setup is not None
+            assert setup.read() == (plugin_specs.PRESETS_DIR / "setup.py").read_bytes()
+        else:
+            assert "setup.py" not in tar.getnames()
 
 
 async def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch):
