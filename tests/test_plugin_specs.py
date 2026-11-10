@@ -432,7 +432,9 @@ async def test_stock_conversation_runner_packages_primary_plugin_command(tmp_pat
 
 
 @pytest.mark.parametrize("platform", ["nt", "posix"])
-def test_stock_conversation_runner_packages_platform_setup(tmp_path, monkeypatch, platform):
+def test_stock_conversation_runner_packages_platform_setup(
+    tmp_path, monkeypatch, platform
+):
     plugin = write_conversation_plugin(tmp_path)
     source = AutomationPluginSource(source=str(plugin))
     _, _, manifest = fetch_manifest(source)
