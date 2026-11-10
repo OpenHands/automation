@@ -39,9 +39,9 @@ Routes: `POST /api/automation/v1/events/{org_id}/{source}`,
 - `F11.nested-key`: `event_key_expr: event.name` reads a nested key, and a numeric key becomes the string `"42"`.
 - `F11.dedupe`: with `event_id_header` set, a second delivery with the same id answers `matched:0` and creates no run, a new id matches again; without a delivery-id header every delivery creates a run.
 - `F11.disabled-automation`: a disabled automation is not matched; re-enabled, it is.
-- `F11.builtin-github`: with `AUTOMATION_WEBHOOK_SECRET`, a signed `{payload: <pull_request opened>}` matches `on: pull_request.opened` with a filter, a redelivery with the same `X-GitHub-Delivery` matches nothing, a body without `payload` answers 400, an unsupported GitHub event (`workflow_run`) answers 200 `matched:0`, and the run's `event` is the parsed model with `event_key`.
+- `F11.builtin-github`: with `AUTOMATION_WEBHOOK_SECRET`, a signed `{payload: <pull_request opened>}` matches `on: pull_request.opened` with a filter, a redelivery with the same `X-GitHub-Delivery` matches nothing, a body without `payload` answers 400, an unsupported GitHub event (`check_run`) answers 200 `matched:0`, and the run's `event` is the parsed model with `event_key`.
 - `F11.builtin-jira-bitbucket`: `jira_dc` keys on `payload.webhookEvent` and `bitbucket_data_center` on `payload.eventKey`; a jira payload without `webhookEvent` answers 200 `matched:0`.
-- `F11.requested-types`: `github` lists its 6 parseable event types and 8 detection rules, `jira_dc` lists the `on` patterns of enabled automations (`*` collapses to `["*"]`), a custom source answers 404, and a tampered or missing signature 401.
+- `F11.requested-types`: `github` lists its 7 parseable event types and 8 detection rules, `jira_dc` lists the `on` patterns of enabled automations (`*` collapses to `["*"]`), a custom source answers 404, and a tampered or missing signature 401.
 - `F11.builtin-unconfigured`: without `AUTOMATION_WEBHOOK_SECRET` the built-ins answer 404 on both routes, even correctly signed; with it back, they answer 200.
 - `F11.continue-conversation`: with `destination: continue_conversation`, the first event on a subject creates a run, a second event on the same subject while that run is still queued answers `runs_created:[]` and `conversations_continued:[<uuid5>]`, an event without a subject creates an ordinary run, and the run starts with `AUTOMATION_CONVERSATION_ID` set to that id and the second event in `follow_up_turns`.
 
@@ -236,12 +236,12 @@ decode to the same key).
   control-automation event send github --builtin --delivery-id X-GitHub-Delivery=qa-gh-1 --json "$PR" --expect 200 --check matched eq 0 --save F11.builtin-github/redelivery
   control-automation event send github --builtin --tamper --json "$PR" --expect 401 --check detail eq 'Invalid signature'
   control-automation event send github --secret qa-builtin-secret --signature-header X-Hub-Signature-256 --json "$PR" --expect 400 --check detail eq 'Missing payload in builtin source request'
-  control-automation event send github --builtin --json '{"workflow_run":{"id":1},"repository":{"id":1,"name":"r","full_name":"qa/r","private":false},"sender":{"id":1,"login":"qa"}}' --expect 200 --check matched eq 0
+  control-automation event send github --builtin --json '{"check_run":{"id":1},"repository":{"id":1,"name":"r","full_name":"qa/r","private":false},"sender":{"id":1,"login":"qa"}}' --expect 200 --check matched eq 0
   control-automation run wait "$GH_AID" --run-id "$GH_RID" --status COMPLETED --timeout 120 --check trigger_source eq event
   control-automation state cat "workspaces/automation-runs/$GH_RID/qa-env.json" --field AUTOMATION_EVENT_PAYLOAD | python3 -c 'import json,sys; e=json.load(sys.stdin)["event"]; assert e["event_key"] == "pull_request.opened" and e["pull_request"]["base"]["ref"] == "main" and e["repository"]["default_branch"] == "main" and "payload" not in e, e'
   ```
   The redelivery with the same `X-GitHub-Delivery` matches nothing; the raw
-  PR without the wrapper is a 400; `workflow_run` is acknowledged with
+  PR without the wrapper is a 400; `check_run` is acknowledged with
   `matched:0`. The run's `event` is the parsed PR model (with filled-in
   defaults such as `default_branch`), not a `{payload: ...}` wrapper.
 - **Built-in Jira and Bitbucket Data Center (`F11.builtin-jira-bitbucket`).** Each keys on its own field.
@@ -255,7 +255,7 @@ decode to the same key).
   ```
 - **Requested event types (`F11.requested-types`).** Signed over the source name.
   ```sh
-  control-automation event requested-types github --expect 200 --check event_types len-eq 6 --check event_types contains pull_request --check event_types contains release --check event_detection_rules len-eq 8 --save F11.requested-types/github
+  control-automation event requested-types github --expect 200 --check event_types len-eq 7 --check event_types contains pull_request --check event_types contains release --check event_detection_rules len-eq 8 --save F11.requested-types/github
   control-automation event requested-types github --tamper --expect 401 --check detail eq 'Invalid signature'
   control-automation event requested-types github --unsigned --expect 401 --check detail eq 'Missing signature header: X-Hub-Signature-256'
   control-automation event requested-types qa-orders --expect 404 --check detail eq 'Unknown builtin webhook source: qa-orders'
@@ -267,7 +267,7 @@ decode to the same key).
   control-automation api PATCH "/v1/$RT_AID" --json '{"enabled":false}' --expect 200
   control-automation event requested-types jira_dc --expect 200 --field event_types | python3 -c 'import json,sys; t=json.load(sys.stdin); assert "*" not in t and "jira:worklog_updated" not in t, t'
   ```
-  `github` always lists its six parseable families. `jira_dc` lists the `on`
+  `github` always lists its seven parseable families. `jira_dc` lists the `on`
   patterns of enabled automations (no splitting on `:`), a `*` pattern
   collapses the list to `["*"]`, and disabling that automation removes its
   patterns again.

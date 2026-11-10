@@ -354,6 +354,64 @@ class ReleasePayload(GitHubEvent):
 
 
 # =============================================================================
+# Workflow Run Events
+# =============================================================================
+
+
+class WorkflowRunPullRequest(BaseModel):
+    """A pull request associated with a workflow run."""
+
+    number: int
+    head: GitHubRef
+    base: GitHubRef
+
+    model_config = {"extra": "ignore"}
+
+
+class WorkflowRun(BaseModel):
+    """GitHub Actions workflow run object."""
+
+    id: int
+    name: str | None = None
+    path: str  # .github/workflows/ci.yml
+    head_branch: str | None = None
+    head_sha: str
+    event: str  # "push", "pull_request", ...
+    status: str  # "requested", "queued", "in_progress", "completed", "waiting"
+    conclusion: str | None = None  # "success", "failure", ...; None until completed
+    run_number: int
+    run_attempt: int = 1
+    workflow_id: int
+    html_url: str
+    pull_requests: list[WorkflowRunPullRequest] = []
+
+    model_config = {"extra": "ignore"}
+
+
+class WorkflowRunPayload(GitHubEvent):
+    """
+    GitHub workflow_run event.
+
+    Triggered when a GitHub Actions workflow run is requested, starts, or completes.
+
+    Event keys:
+    - workflow_run.requested
+    - workflow_run.in_progress
+    - workflow_run.completed
+
+    Common JMESPath filters:
+    - workflow_run.conclusion == 'failure'
+    - workflow_run.head_branch == 'main'
+    - workflow_run.name == 'CI'
+    """
+
+    _event_type: ClassVar[str] = "workflow_run"
+
+    action: str
+    workflow_run: WorkflowRun
+
+
+# =============================================================================
 # Event Registry
 # =============================================================================
 
@@ -366,6 +424,7 @@ GITHUB_PAYLOAD_CLASSES: dict[str, type[GitHubEvent]] = {
     "issue_comment": IssueCommentPayload,
     "push": PushPayload,
     "release": ReleasePayload,
+    "workflow_run": WorkflowRunPayload,
 }
 
 

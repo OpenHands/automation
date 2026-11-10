@@ -184,6 +184,7 @@ class TestGetCapabilities:
             "pull_request_review.*",
             "push",
             "release.*",
+            "workflow_run.*",
         ]
         by_source = body["eventTypesBySource"]
         assert set(by_source) == {
@@ -434,6 +435,7 @@ class TestValidateDraft:
                 id="type-the-deployment-cannot-parse",
             ),
             pytest.param("pull_request.*", [], id="wildcard-over-supported-types"),
+            pytest.param("workflow_run.completed", [], id="workflow-run-completed"),
         ],
     )
     async def test_event_types_are_checked_against_what_the_deployment_parses(
