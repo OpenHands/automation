@@ -43,6 +43,7 @@ from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
+    Factory,
 )
 from openhands.automation.observability import (
     add_event,
@@ -187,6 +188,37 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Only admins, owners, or the automation creator can modify it",
     )
+
+
+async def _authorize_factory_change(
+    session: AsyncSession,
+    automation: Automation,
+    factory_id: uuid.UUID | None,
+    user: AuthenticatedUser,
+) -> None:
+    """Authorize setting, moving or clearing an automation's factory.
+
+    Joining a factory gives its features access to the factory's data, so this
+    is a factory-level act: it needs ``manage_automations`` even from the
+    automation's creator, whom ``_assert_can_manage`` would otherwise let edit.
+    Resending the current value changes nothing and needs no permission.
+    """
+    if factory_id == automation.factory_id:
+        return
+    if "manage_automations" not in user.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Requires manage_automations permission to change the factory",
+        )
+    if factory_id is None:
+        return
+    in_org = await session.scalar(
+        select(Factory.id).where(
+            Factory.id == factory_id, Factory.org_id == user.org_id
+        )
+    )
+    if in_org is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Factory not found")
 
 
 async def _get_draft_for_materialized_automation(
@@ -800,6 +832,10 @@ async def list_automations(
             "Narrows the caller's org listing; it never reaches other orgs."
         ),
     ),
+    factory_id: uuid.UUID | None = Query(
+        default=None,
+        description="Only automations in this factory of the caller's org",
+    ),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
@@ -823,6 +859,8 @@ async def list_automations(
             ) from exc
     if run_as_user_id is not None:
         base_query = base_query.where(Automation.user_id == run_as_user_id)
+    if factory_id is not None:
+        base_query = base_query.where(Automation.factory_id == factory_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
@@ -887,6 +925,8 @@ async def update_automation(
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
+    if "factory_id" in update_data:
+        await _authorize_factory_change(session, auto, update_data["factory_id"], user)
     # Same ownership check as create. Only a new value is checked: resending the
     # stored path cannot grant anything the row does not already have, and that
     # upload need not be owned by the editor or still be live.

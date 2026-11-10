@@ -22,6 +22,7 @@ from openhands.automation.db import (
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.draft_router import router as draft_router
 from openhands.automation.event_router import router as event_router
+from openhands.automation.factory_router import router as factory_router
 from openhands.automation.git_sync import git_sync_loop
 from openhands.automation.git_sync.router import router as git_sync_router
 from openhands.automation.kv_router import router as kv_router
@@ -313,6 +314,7 @@ app.include_router(usage_router, prefix=_base_path)
 app.include_router(git_sync_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)
+app.include_router(factory_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 
 

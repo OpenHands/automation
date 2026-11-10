@@ -75,6 +75,34 @@ class AutomationChangeActorKind(StrEnum):
     SYSTEM = "system"
 
 
+class Factory(Base):
+    """A named group of automations that serve one goal.
+
+    ``id`` is never reused: other services keep it as a plain reference with no
+    foreign key. ``slug`` is unique per org and never changes.
+    """
+
+    __tablename__ = "factories"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (Index("ix_factories_org_slug", "org_id", "slug", unique=True),)
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -99,6 +127,13 @@ class Automation(Base):
         default=lambda ctx: ctx.get_current_parameters()["user_id"],
     )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # The factory the automation belongs to; NULL means none.
+    factory_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("factories.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     telemetry_distinct_id: Mapped[str | None] = mapped_column(

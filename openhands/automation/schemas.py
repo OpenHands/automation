@@ -740,6 +740,14 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
     )
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory the automation belongs to, in the automation's org. Null "
+            "removes it from its factory; omit to leave it unchanged. Changing "
+            "it needs manage_automations, even for the automation's creator."
+        ),
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -1143,6 +1151,7 @@ class AutomationResponse(BaseModel):
     run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER
     created_by_user_id: uuid.UUID
     org_id: uuid.UUID
+    factory_id: uuid.UUID | None = None
     model: str | None
 
     name: str
@@ -1190,6 +1199,50 @@ class AutomationTagsResponse(BaseModel):
     """The org's tags, most-used first, for a list filter."""
 
     tags: list[AutomationTagCount]
+
+
+FACTORY_NAME_MAX_LENGTH: Final[int] = 200
+FACTORY_SLUG_MAX_LENGTH: Final[int] = 64
+FACTORY_SLUG_PATTERN: Final[str] = r"^[a-z0-9]+(-[a-z0-9]+)*$"
+
+
+class CreateFactoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=FACTORY_NAME_MAX_LENGTH)
+    slug: str | None = Field(
+        default=None,
+        max_length=FACTORY_SLUG_MAX_LENGTH,
+        pattern=FACTORY_SLUG_PATTERN,
+        description=(
+            "Lowercase letters, numbers and single hyphens. Derived from the "
+            "name when omitted. Unique within the org and never changes."
+        ),
+    )
+
+
+class UpdateFactoryRequest(BaseModel):
+    """Rename a factory. The slug cannot be changed, so it is not accepted."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=FACTORY_NAME_MAX_LENGTH)
+
+
+class FactoryResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    slug: str
+    automation_count: int = Field(
+        description="Live (not soft-deleted) automations in the factory."
+    )
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class FactoryListResponse(BaseModel):
+    factories: list[FactoryResponse]
+    total: int
 
 
 class UsageResponse(BaseModel):
