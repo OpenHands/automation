@@ -115,6 +115,7 @@ from openhands.automation.utils.timeout import resolve_automation_timeout_second
 from openhands.automation.utils.unhealthy import (
     maybe_disable_unhealthy_automation_after_run,
 )
+from openhands.automation.utils.worklog import worklog_token_for_run
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -1137,6 +1138,8 @@ async def _execute_run(
             automation_id=automation.id,
             run_id=run.id,
         )
+    if worklog_token := worklog_token_for_run(automation, run):
+        env_vars["AUTOMATION_WORKLOG_TOKEN"] = worklog_token
 
     # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.
     try:

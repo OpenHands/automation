@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # The one place that knows the membership route. ``{user_id}`` and ``{org_id}``
 # are filled in by ``get_org_member``.
 ORG_MEMBERSHIP_PATH = "/api/service/users/{user_id}/orgs/{org_id}/membership"
+FACTORY_WORKLOGS_PATH = "/api/service/orgs/{org_id}/factories/{factory_id}/worklogs"
 
 
 class EnterpriseClientError(Exception):
@@ -80,3 +81,41 @@ async def get_org_member(
         return OrgMemberInfo.model_validate(response.json())
     except (ValueError, ValidationError) as exc:
         raise EnterpriseClientError("Unexpected membership response") from exc
+
+
+async def purge_factory_worklogs(
+    client: httpx.AsyncClient, org_id: uuid.UUID, factory_id: uuid.UUID
+) -> None:
+    """Tell the enterprise server that a factory is gone, so it drops its worklogs.
+
+    Best effort: any failure is logged and swallowed, because the factory delete
+    has already committed and the enterprise server's maintenance task repairs a
+    missed notification. Skipped in local mode (there is no enterprise server)
+    and without a service key (nothing to authenticate with).
+    """
+    config = get_config().service
+    if config.is_local_mode or not config.service_key:
+        return
+
+    url = config.openhands_api_base_url.rstrip("/") + FACTORY_WORKLOGS_PATH.format(
+        org_id=org_id, factory_id=factory_id
+    )
+    try:
+        response = await client.delete(
+            url, headers={"X-Service-API-Key": config.service_key}
+        )
+    except httpx.RequestError as exc:
+        logger.warning(
+            "Worklog purge for factory %s in org %s failed: %s",
+            factory_id,
+            org_id,
+            exc,
+        )
+        return
+    if response.status_code != 204:
+        logger.warning(
+            "Worklog purge for factory %s in org %s returned HTTP %s",
+            factory_id,
+            org_id,
+            response.status_code,
+        )

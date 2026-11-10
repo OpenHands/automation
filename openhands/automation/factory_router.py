@@ -16,12 +16,17 @@ import uuid
 from collections.abc import Iterable
 from typing import Final
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+    require_permission,
+)
 from openhands.automation.db import get_session
 from openhands.automation.models import Automation, Factory
 from openhands.automation.schemas import (
@@ -31,6 +36,7 @@ from openhands.automation.schemas import (
     FactoryResponse,
     UpdateFactoryRequest,
 )
+from openhands.automation.utils.enterprise_client import purge_factory_worklogs
 
 
 router = APIRouter(prefix="/v1/factories", tags=["Factories"])
@@ -184,13 +190,16 @@ async def rename_factory(
 @router.delete("/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_factory(
     slug: str,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
+    client: httpx.AsyncClient = Depends(get_http_client),
 ) -> None:
     """Delete a factory that no live automation belongs to.
 
     Soft-deleted automations that still point at it are detached first, so the
-    outcome does not depend on the database enforcing the foreign key.
+    outcome does not depend on the database enforcing the foreign key. Once the
+    delete commits, the enterprise server is told to drop the factory's worklogs.
     """
     factory = await _get_org_factory(session, user.org_id, slug)
     live = (await _automation_counts(session, [factory.id])).get(factory.id, 0)
@@ -210,3 +219,4 @@ async def delete_factory(
         .execution_options(synchronize_session=False)
     )
     await session.delete(factory)
+    background_tasks.add_task(purge_factory_worklogs, client, user.org_id, factory.id)

@@ -5,17 +5,21 @@ API tests run on both PostgreSQL and SQLite: the factory count and the
 foreign key behave through different drivers on each.
 """
 
+import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from httpx import AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
-from openhands.automation.db import set_sqlite_mode, using_sqlite
+from openhands.automation.app import app
+from openhands.automation.config import clear_config_cache
+from openhands.automation.db import get_session, set_sqlite_mode, using_sqlite
 from openhands.automation.factory_router import derive_slug
 from openhands.automation.git_sync.loop import (
     _create_automation_from_git,
@@ -37,6 +41,8 @@ from openhands.automation.models import (
 
 BASE = "/api/automation/v1"
 FACTORIES = f"{BASE}/factories"
+SERVICE_FACTORIES = f"{BASE}/service/factories"
+SERVICE_KEY = "test-service-key"
 
 
 @pytest.fixture(params=["postgresql", "sqlite"])
@@ -526,3 +532,214 @@ async def test_git_sync_neither_writes_nor_reads_the_factory(
     )
 
     assert (imported.name, imported.factory_id) == ("Renamed in git", factory.id)
+
+
+# --- Lookup by another service ---
+
+
+@pytest.fixture
+def service_key(monkeypatch):
+    """The service key the OpenHands server shares with this service."""
+    monkeypatch.setenv("AUTOMATION_SERVICE_KEY", SERVICE_KEY)
+    clear_config_cache()
+    yield
+    clear_config_cache()
+
+
+def _lookup(client: AsyncClient, org_id: uuid.UUID, ids: list[uuid.UUID], **kwargs):
+    params = [("org_id", str(org_id)), *(("id", str(i)) for i in ids)]
+    return client.get(
+        SERVICE_FACTORIES,
+        params=params,
+        headers=kwargs.get("headers", {"X-Service-API-Key": SERVICE_KEY}),
+    )
+
+
+@pytest.mark.usefixtures("service_key")
+async def test_lookup_returns_only_requested_factories_of_the_org(
+    async_client, async_session
+):
+    org, other_org = uuid.uuid4(), uuid.uuid4()
+    first = await _factory(async_session, org, "First")
+    second = await _factory(async_session, org, "Second")
+    unrequested = await _factory(async_session, org, "Unrequested")
+    foreign = await _factory(async_session, other_org, "Foreign")
+
+    response = await _lookup(
+        async_client, org, [first.id, second.id, foreign.id, uuid.uuid4()]
+    )
+
+    assert response.status_code == 200, response.text
+    found = {(f["id"], f["org_id"]) for f in response.json()["factories"]}
+    assert found == {(str(first.id), str(org)), (str(second.id), str(org))}
+    assert str(unrequested.id) not in {i for i, _ in found}
+
+
+@pytest.mark.usefixtures("service_key")
+async def test_lookup_without_ids_finds_nothing(async_client):
+    response = await _lookup(async_client, uuid.uuid4(), [])
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"factories": []}
+
+
+@pytest.mark.usefixtures("service_key")
+async def test_lookup_accepts_100_ids_and_refuses_101(async_client):
+    org = uuid.uuid4()
+
+    at_limit = await _lookup(async_client, org, [uuid.uuid4() for _ in range(100)])
+    over = await _lookup(async_client, org, [uuid.uuid4() for _ in range(101)])
+
+    assert (at_limit.status_code, over.status_code) == (200, 422)
+
+
+@pytest.mark.usefixtures("service_key")
+async def test_lookup_needs_the_org_id(async_client):
+    response = await async_client.get(
+        SERVICE_FACTORIES, headers={"X-Service-API-Key": SERVICE_KEY}
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.usefixtures("service_key")
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({}, id="no-key"),
+        pytest.param({"X-Service-API-Key": "wrong"}, id="wrong-key"),
+        pytest.param({"Authorization": "Bearer user-credential"}, id="user-credential"),
+    ],
+)
+async def test_lookup_refuses_callers_without_the_service_key(async_client, headers):
+    response = await _lookup(async_client, uuid.uuid4(), [], headers=headers)
+
+    assert response.status_code == 401, response.text
+
+
+async def test_lookup_is_unavailable_without_a_configured_service_key(
+    async_client, monkeypatch
+):
+    monkeypatch.delenv("AUTOMATION_SERVICE_KEY", raising=False)
+    clear_config_cache()
+
+    response = await _lookup(async_client, uuid.uuid4(), [])
+
+    assert response.status_code == 503, response.text
+
+
+# --- Delete notification ---
+
+
+class Enterprise:
+    """The enterprise server as a factory delete sees it."""
+
+    def __init__(self, session_factory) -> None:
+        self.requests: list[httpx.Request] = []
+        self.factory_still_stored: list[bool] = []
+        self.respond: Callable[[], httpx.Response] = lambda: httpx.Response(204)
+        self._session_factory = session_factory
+        self.watched: uuid.UUID | None = None
+
+    async def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.watched is not None:
+            async with self._session_factory() as session:
+                stored = await session.scalar(
+                    select(Factory.id).where(Factory.id == self.watched)
+                )
+            self.factory_still_stored.append(stored is not None)
+        return self.respond()
+
+
+@pytest.fixture
+async def enterprise(async_client, async_session_factory, service_key):
+    """Real commit handling, and an enterprise server that records its calls."""
+    app.dependency_overrides.pop(get_session, None)
+    server = Enterprise(async_session_factory)
+    app.state.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(server.handle)
+    )
+    return server
+
+
+async def test_delete_tells_the_enterprise_server_after_it_commits(
+    async_client, async_session, mock_authenticated_user, enterprise
+):
+    org_id = mock_authenticated_user.org_id
+    factory = await _factory(async_session, org_id, "F")
+    enterprise.watched = factory.id
+
+    response = await async_client.delete(f"{FACTORIES}/f")
+
+    assert response.status_code == 204, response.text
+    (request,) = enterprise.requests
+    assert request.method == "DELETE"
+    assert request.url.path == (
+        f"/api/service/orgs/{org_id}/factories/{factory.id}/worklogs"
+    )
+    assert request.headers["X-Service-API-Key"] == SERVICE_KEY
+    assert enterprise.factory_still_stored == [False]
+
+
+@pytest.mark.parametrize("status_code", [404, 401, 500])
+async def test_delete_succeeds_and_warns_when_enterprise_answers_an_error(
+    async_client,
+    async_session,
+    mock_authenticated_user,
+    enterprise,
+    caplog,
+    status_code,
+):
+    await _factory(async_session, mock_authenticated_user.org_id, "F")
+    enterprise.respond = lambda: httpx.Response(status_code)
+
+    with caplog.at_level(logging.WARNING):
+        response = await async_client.delete(f"{FACTORIES}/f")
+
+    assert response.status_code == 204, response.text
+    assert (await async_client.get(f"{FACTORIES}/f")).status_code == 404
+    assert f"returned HTTP {status_code}" in caplog.text
+
+
+async def test_delete_succeeds_and_warns_when_enterprise_is_unreachable(
+    async_client, async_session, mock_authenticated_user, enterprise, caplog
+):
+    await _factory(async_session, mock_authenticated_user.org_id, "F")
+
+    def unreachable() -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    enterprise.respond = unreachable
+
+    with caplog.at_level(logging.WARNING):
+        response = await async_client.delete(f"{FACTORIES}/f")
+
+    assert response.status_code == 204, response.text
+    assert "failed: connection refused" in caplog.text
+    assert SERVICE_KEY not in caplog.text
+
+
+async def test_delete_sends_nothing_in_local_mode(
+    async_client, async_session, mock_authenticated_user, enterprise, monkeypatch
+):
+    await _factory(async_session, mock_authenticated_user.org_id, "F")
+    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+    clear_config_cache()
+
+    response = await async_client.delete(f"{FACTORIES}/f")
+
+    assert response.status_code == 204, response.text
+    assert enterprise.requests == []
+
+
+async def test_a_refused_delete_sends_nothing(
+    async_client, async_session, mock_authenticated_user, enterprise
+):
+    factory = await _factory(async_session, mock_authenticated_user.org_id, "F")
+    await _automation(async_session, mock_authenticated_user, factory_id=factory.id)
+
+    response = await async_client.delete(f"{FACTORIES}/f")
+
+    assert response.status_code == 409, response.text
+    assert enterprise.requests == []

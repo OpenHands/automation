@@ -1245,6 +1245,17 @@ class FactoryListResponse(BaseModel):
     total: int
 
 
+class ServiceFactory(BaseModel):
+    id: uuid.UUID
+    org_id: uuid.UUID
+
+
+class ServiceFactoriesResponse(BaseModel):
+    """The requested factories that exist in the org, for another service."""
+
+    factories: list[ServiceFactory]
+
+
 class UsageResponse(BaseModel):
     """Totals across every organization, for the OpenHands server's usage report."""
 
