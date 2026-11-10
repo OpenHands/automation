@@ -22,6 +22,9 @@ MANAGE_ONLY_ROUTES = {
     ("PUT", "/api/automation/v1/git-sync/config"),
     ("POST", "/api/automation/v1/git-sync/check"),
     ("POST", "/api/automation/v1/git-sync/sync"),
+    ("POST", "/api/automation/v1/factories"),
+    ("PATCH", "/api/automation/v1/factories/{slug}"),
+    ("DELETE", "/api/automation/v1/factories/{slug}"),
 }
 
 # Every check that require_permission() returns shares this code object.

@@ -57,6 +57,7 @@ automation/
 │       ├── draft_schemas.py    # Draft body validation and normalization
 │       ├── event_router.py     # Receives webhook events, triggers automations
 │       ├── exceptions.py       # Transient vs terminal failure exceptions
+│       ├── factory_router.py   # Factory CRUD (named groups of automations; automations.factory_id)
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
 │       ├── filter_eval.py      # JMESPath-based filter evaluation for event matching
 │       ├── ingest.py           # Transport-neutral event ingestion (accept_event)

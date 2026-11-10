@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from httpx import AsyncClient
+from httpx import AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
@@ -91,7 +91,9 @@ async def _automation(
     return automation
 
 
-async def _assign(client: AsyncClient, automation: Automation, factory_id) -> object:
+async def _assign(
+    client: AsyncClient, automation: Automation, factory_id: uuid.UUID | None
+) -> Response:
     return await client.patch(
         f"{BASE}/{automation.id}",
         json={"factory_id": None if factory_id is None else str(factory_id)},
