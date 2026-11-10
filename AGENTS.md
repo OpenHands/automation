@@ -69,6 +69,7 @@ automation/
 │       ├── providers.py        # Event provider descriptors and signature verifiers
 │       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
 │       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
+│       ├── service_router.py   # Service-key routes for the OpenHands server (factory lookup)
 │       ├── schemas.py          # Pydantic request/response schemas
 │       ├── subjects.py         # Maps an external subject to a conversation id
 │       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
@@ -227,6 +228,7 @@ Completion is handled asynchronously:
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
+| `AUTOMATION_WORKLOG_TOKEN` | `utils/worklog.py`, cloud mode with a service key, when the automation belongs to a factory; absent otherwise | HS256 JWT (24 hours) that lets the run write to its factory's worklogs on the Enterprise server, at `$OPENHANDS_CLOUD_API_URL/api/service/worklog/...`. Signed with a key derived from the service key (HKDF-SHA256, info `openhands-worklog-run-token-v1`); the claims and a test vector are in `utils/worklog.py` and `tests/test_worklog_token.py`. It names the factory the automation had at dispatch and keeps it until it expires, even if the automation moves to another factory. Never stored or logged |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
 | `AUTOMATION_CONVERSATION_ID` | Derived by the service for `continue_conversation` runs; the started conversation's id when the app server started it | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
 | `AUTOMATION_CONVERSATION_STARTED` | `app_server`, cloud mode, when the service started the conversation | The stock runners attach to `AUTOMATION_CONVERSATION_ID` with `RemoteConversation.attach` instead of building an agent and creating it, and register it with the workspace so the completion callback reports it as the run's conversation. Absent otherwise |

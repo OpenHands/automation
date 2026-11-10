@@ -7,14 +7,18 @@ the name. An automation belongs to at most one factory, through
 `automations.factory_id` (null means none, and a fresh install has no
 factories). Any org member reads factories; creating, renaming and deleting
 one, and assigning an automation to one, need `manage_automations`. A factory
-cannot be deleted while a live automation belongs to it.
+cannot be deleted while a live automation belongs to it. The OpenHands
+Enterprise server, which stores each factory's worklogs, asks this service
+which factory ids exist (`GET /v1/service/factories`, behind the service key)
+and is told when a factory is deleted.
 
-Source: `openhands/automation/factory_router.py`, `openhands/automation/router.py`, `openhands/automation/schemas.py`, `openhands/automation/models.py`
+Source: `openhands/automation/factory_router.py`, `openhands/automation/service_router.py`, `openhands/automation/router.py`, `openhands/automation/schemas.py`, `openhands/automation/models.py`, `openhands/automation/utils/enterprise_client.py`, `openhands/automation/utils/worklog.py`
 
 Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 `GET /api/automation/v1/factories/{slug}`,
 `PATCH /api/automation/v1/factories/{slug}`,
-`DELETE /api/automation/v1/factories/{slug}`
+`DELETE /api/automation/v1/factories/{slug}`,
+`GET /api/automation/v1/service/factories`
 
 ## Sub-features
 
@@ -23,6 +27,7 @@ Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 - `F19.read-rename`: `GET /v1/factories` answers `{factories, total}` by name and pages with `limit`/`offset`; `GET /v1/factories/{slug}` answers one; an unknown slug answers 404; `PATCH` with a new `name` changes the name and keeps the slug, and a `slug` in the body answers 422.
 - `F19.assign`: `PATCH /v1/{id}` with `factory_id` puts an automation in the factory, moves it to another, and removes it with `null`; omitting the field keeps it; every automation response carries `factory_id`; a factory id that does not exist in the org answers 404; `GET /v1?factory_id=` lists only that factory's live automations.
 - `F19.count-delete`: `automation_count` counts live automations only; deleting a factory with a live automation answers 409 with the count, and once none are left answers 204 and the slug answers 404.
+- `F19.service-lookup`: `GET /v1/service/factories?org_id=&id=` answers 503 `Service authentication not configured` with no service key configured, 401 `Invalid service API key` with a missing or wrong `X-Service-API-Key` (the local session key does not open it), and with the right key `{"factories": [{id, org_id}]}` for the requested ids that exist in that org; unknown ids and ids of another org are absent, and more than 100 ids answer 422.
 
 ## How to get to it (agent POV)
 
@@ -33,6 +38,12 @@ Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 - Config: none. A factory is an ordinary row; there is no setting.
 - Later features hang off the factory `id`, which is never reused. Other
   services keep it as a plain reference.
+- Consumer: the Enterprise server calls `GET /v1/service/factories` with its
+  `AUTOMATIONS_SERVICE_KEY` (the same value as this service's
+  `AUTOMATION_SERVICE_KEY`), and receives `DELETE
+  /api/service/orgs/{org_id}/factories/{factory_id}/worklogs` after a factory
+  delete commits. A run of an automation in a factory also gets
+  `AUTOMATION_WORKLOG_TOKEN` (F07).
 - Git sync neither writes nor reads `factory_id` (F13): a factory's id and
   slug are local to an install.
 - In local mode the only user holds `manage_automations`, so the 403 paths
@@ -100,6 +111,22 @@ Preconditions:
   ```
   The deleted automation's row is still in the table; the factory delete
   cleared its `factory_id`.
+- **Lookup for another service (`F19.service-lookup`).** The service key opens the route; every other caller is refused. Restores the baseline.
+  ```sh
+  control-automation api GET '/v1/service/factories?org_id=00000000-0000-4000-8000-000000000000' --auth none --expect 503 --check detail eq 'Service authentication not configured' --save F19.service-lookup/unconfigured
+  control-automation restart --service automation --env AUTOMATION_SERVICE_KEY=qa-service-key
+  control-automation api GET '/v1/service/factories?org_id=00000000-0000-4000-8000-000000000000' --auth none --expect 401 --check detail eq 'Invalid service API key' --save F19.service-lookup/missing
+  control-automation api GET '/v1/service/factories?org_id=00000000-0000-4000-8000-000000000000' --auth key --expect 401 --check detail eq 'Invalid service API key'
+  FS=$(control-automation api POST /v1/factories --json '{"name":"QA Service Lookup"}' --expect 201 --field id)
+  ORG=$(control-automation state sql "SELECT org_id FROM factories WHERE slug = 'qa-service-lookup'" --field rows.0.org_id)
+  control-automation api GET "/v1/service/factories?org_id=$ORG&id=$FS&id=00000000-0000-4000-8000-000000000001" --auth none --header 'X-Service-API-Key: qa-service-key' --expect 200 --check factories.0.id eq "$FS" --save F19.service-lookup/found
+  control-automation api GET "/v1/service/factories?org_id=00000000-0000-4000-8000-000000000000&id=$FS" --auth none --header 'X-Service-API-Key: qa-service-key' --expect 200 --check factories eq '[]' --save F19.service-lookup/other-org
+  control-automation api DELETE /v1/factories/qa-service-lookup --expect 204
+  control-automation restart --service automation --reset-env
+  ```
+  The `org_id` is read from the table because the local user's org is not
+  fixed. In local mode no notification is sent to an enterprise server when
+  the factory is deleted, so the run needs no stub for it.
 
 ## Gotchas
 
@@ -113,3 +140,7 @@ Preconditions:
   `factory_id` null.
 - The router is registered before `/v1/{automation_id}`, which would
   otherwise take `factories` as an id (F01 router order).
+- A run of an automation in a factory gets `AUTOMATION_WORKLOG_TOKEN` only in
+  cloud mode with a service key, never in local mode. The run keeps the factory
+  named in its token until the token expires (24 hours), even if the
+  automation moves to another factory meanwhile.
