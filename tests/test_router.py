@@ -5622,8 +5622,6 @@ class TestAutomationChangeEvents:
             f"/api/automation/v1/{automation.id}", json={"enabled": True}
         )
 
-        # Both PATCHes run in the test's one transaction, so the rows share
-        # created_at; match them by action instead of by order.
         events = {e.action: e for e in await self._events(async_session, automation.id)}
         assert set(events) == {"disable", "enable"}
         assert events["disable"].changed_fields == [
@@ -5680,6 +5678,34 @@ class TestAutomationChangeEvents:
         assert body["changes"][0]["changed_fields"] == ["name"]
         assert body["changes"][0]["actor_kind"] == "user"
         assert body["changes"][0]["actor_user_id"] == str(TEST_USER_ID)
+
+    async def test_changes_endpoint_lists_back_to_back_changes_newest_first(
+        self, async_client, async_session
+    ):
+        # Issue #739: CURRENT_TIMESTAMP gave these rows one created_at (one
+        # transaction here, one second on SQLite) and the uuid4 tie-break
+        # shuffled them.
+        automation = await _seed_s3_automation(async_session)
+        patches = [
+            {"name": "Renamed"},
+            {"description": "Described"},
+            {"entrypoint": "uv run other.py"},
+        ]
+        for body in patches:
+            response = await async_client.patch(
+                f"/api/automation/v1/{automation.id}", json=body
+            )
+            assert response.status_code == 200
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+
+        changes = response.json()["changes"]
+        assert [c["changed_fields"] for c in changes[:3]] == [
+            ["entrypoint"],
+            ["description"],
+            ["name"],
+        ]
+        assert changes[3]["action"] == "create"
 
     async def test_changes_endpoint_orders_equal_timestamps_by_id(
         self, async_client, async_session

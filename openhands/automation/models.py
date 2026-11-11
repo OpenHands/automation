@@ -193,8 +193,12 @@ class Automation(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Python default, not only CURRENT_TIMESTAMP: SQLite stores the server
+    # default in whole seconds, so same-second rows would tie in every
+    # newest-first list. See utils/time.py:utcnow.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -348,6 +352,7 @@ class AutomationRun(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,  # sub-second order on SQLite, see Automation.created_at
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -530,8 +535,11 @@ class AutomationChangeEvent(Base):
     # for Git sync, or the label a session set (utils/change_events.py)
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     changed_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    # Each flush sets its own microsecond value, so a create and an update in
+    # the same second still list newest first (see Automation.created_at).
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -569,6 +577,7 @@ class TarballUpload(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,  # sub-second order on SQLite, see Automation.created_at
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -670,6 +679,7 @@ class CustomWebhook(Base):
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,  # sub-second order on SQLite, see Automation.created_at
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )

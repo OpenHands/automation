@@ -114,7 +114,6 @@ Preconditions:
 - **List (`F10.list`).** Newest first, paged, never a secret.
   ```sh
   control-automation api POST /v1/webhooks --json '{"name":"qa list a","source":"qa-list-a","webhook_secret":"qa-list-secret"}' --expect 201 --quiet
-  sleep 1.1
   control-automation api POST /v1/webhooks --json '{"name":"qa list b","source":"qa-list-b","webhook_secret":"qa-list-secret"}' --expect 201 --quiet
   TOTAL=$(control-automation api GET /v1/webhooks --expect 200 --field total)
   test "$TOTAL" -ge 2
@@ -125,8 +124,8 @@ Preconditions:
   control-automation api GET /v1/webhooks --query offset=-1 --expect 422 --check detail.0.loc contains offset
   ```
   `qa-list-b` (created last) comes first, `offset=1` skips it, and no row has
-  a `webhook_secret` key. The `sleep 1.1` is deliberate: `created_at` has
-  one-second resolution and the list has no tiebreaker (see Gotchas).
+  a `webhook_secret` key. No `sleep` is needed: `created_at` has
+  microseconds, so back-to-back creates list newest first (see Gotchas).
 - **Unknown and malformed ids (`F10.get-missing`).** Every id route answers 404 for an unknown UUID and 422 for a non-UUID.
   ```sh
   NOPE=00000000-0000-0000-0000-000000000000
@@ -226,9 +225,9 @@ Preconditions:
   `signature_scheme` (served as `hmac_sha256_hex`), but for `name`,
   `enabled`, `event_key_expr` and `signature_header` it is the 500 of
   `F10.patch-null-required`.
-- The list orders by `created_at` only, stored with one-second resolution on
-  SQLite and with no tiebreaker, so webhooks created in the same second can
-  come back in either order and can shift between pages.
+- The list orders by `created_at` (microseconds) and then `id`, so pages
+  are stable. Webhooks from a release before that fix have whole-second
+  `created_at` on SQLite and order among themselves by random `id`.
 - `updated_at` comes back with microseconds after a write and without them in
   the create response; compare values, not formats.
 - A disabled webhook and an unknown source give the same 404 on the event
