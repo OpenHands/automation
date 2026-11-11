@@ -17,15 +17,19 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
+    CreatePluginAutomationRequest,
+    CreatePromptAutomationRequest,
     _generate_plugin_tarball,
     _generate_tarball,
     _get_preset_entrypoint,
     _replace_files_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -3682,3 +3686,154 @@ class TestCreatePresetAsServiceAccount:
         )
 
         assert response.status_code == 201
+
+
+CONTINUING_TRIGGER = {
+    "type": "event",
+    "source": "qa-src",
+    "on": "qa.*",
+    "destination": "continue_conversation",
+    "subject_key_expr": "id",
+}
+
+PRESET_BODIES: dict[str, dict[str, Any]] = {
+    "/v1/preset/prompt": {"name": "Continuing", "prompt": "hi"},
+    "/v1/preset/plugin": {
+        "name": "Continuing",
+        "prompt": "hi",
+        "plugins": [{"source": "github:owner/plugin"}],
+    },
+}
+
+PRESET_MODELS: dict[
+    str, type[CreatePromptAutomationRequest] | type[CreatePluginAutomationRequest]
+] = {
+    "/v1/preset/prompt": CreatePromptAutomationRequest,
+    "/v1/preset/plugin": CreatePluginAutomationRequest,
+}
+
+
+@pytest.mark.parametrize("endpoint", sorted(PRESET_BODIES))
+class TestPresetContinueConversationKeepAlive:
+    """Presets apply the `continue_conversation` keep_alive rule `POST /v1` does.
+
+    The cleanup paths delete a sandbox unless `keep_alive` is true, so a preset
+    that skipped the rule would lose the conversation the next event continues.
+    """
+
+    def test_keep_alive_is_forced_when_omitted(self, endpoint):
+        body = {**PRESET_BODIES[endpoint], "trigger": CONTINUING_TRIGGER}
+
+        assert PRESET_MODELS[endpoint].model_validate(body).keep_alive is True
+
+    def test_keep_alive_false_is_refused(self, endpoint):
+        body = {
+            **PRESET_BODIES[endpoint],
+            "trigger": CONTINUING_TRIGGER,
+            "keep_alive": False,
+        }
+
+        with pytest.raises(ValidationError) as caught:
+            PRESET_MODELS[endpoint].model_validate(body)
+
+        assert CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR in str(caught.value)
+
+    def test_other_triggers_keep_their_own_keep_alive(self, endpoint):
+        body = {
+            **PRESET_BODIES[endpoint],
+            "trigger": {"type": "event", "source": "qa-src", "on": "qa.*"},
+            "keep_alive": False,
+        }
+
+        assert PRESET_MODELS[endpoint].model_validate(body).keep_alive is False
+
+    async def test_omitted_keep_alive_is_stored_true(
+        self, async_client, async_session, preset_file_store, endpoint
+    ):
+        response = await async_client.post(
+            f"/api/automation{endpoint}",
+            json={**PRESET_BODIES[endpoint], "trigger": CONTINUING_TRIGGER},
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["keep_alive"] is True
+        automation = await async_session.get(
+            Automation, uuid.UUID(response.json()["id"])
+        )
+        assert automation is not None
+        assert automation.keep_alive is True
+
+    async def test_keep_alive_false_answers_422_like_post_v1(
+        self, async_client, preset_file_store, endpoint
+    ):
+        response = await async_client.post(
+            f"/api/automation{endpoint}",
+            json={
+                **PRESET_BODIES[endpoint],
+                "trigger": CONTINUING_TRIGGER,
+                "keep_alive": False,
+            },
+        )
+
+        assert response.status_code == 422
+        assert (
+            CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
+            in response.json()["detail"][0]["msg"]
+        )
+
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            pytest.param({"type": "cron", "schedule": "0 9 * * *"}, id="cron"),
+            pytest.param(
+                {"type": "event", "source": "qa-src", "on": "qa.*"}, id="dispatch-run"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("keep_alive", [None, False, True])
+    async def test_other_triggers_store_keep_alive_as_given(
+        self,
+        async_client,
+        async_session,
+        preset_file_store,
+        endpoint,
+        trigger,
+        keep_alive,
+    ):
+        body: dict[str, Any] = {**PRESET_BODIES[endpoint], "trigger": trigger}
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
+
+        response = await async_client.post(f"/api/automation{endpoint}", json=body)
+
+        assert response.status_code == 201, response.text
+        assert response.json()["keep_alive"] is keep_alive
+        automation = await async_session.get(
+            Automation, uuid.UUID(response.json()["id"])
+        )
+        assert automation is not None
+        assert automation.keep_alive is keep_alive
+
+
+@pytest.fixture
+def preset_file_store():
+    """A file store that accepts the generated preset tarball."""
+    from collections.abc import AsyncIterator
+    from unittest.mock import AsyncMock
+
+    from openhands.automation.app import app
+    from openhands.automation.storage import get_file_store
+
+    async def write_stream(
+        path: str,
+        stream: AsyncIterator[bytes],
+        max_size: int | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> int:
+        return sum([len(chunk) async for chunk in stream])
+
+    store = MagicMock()
+    store.write_stream = AsyncMock(side_effect=write_stream)
+    app.dependency_overrides[get_file_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_file_store, None)

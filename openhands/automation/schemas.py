@@ -501,6 +501,38 @@ RUN_AS_USER_ID_DESCRIPTION = (
 )
 
 
+CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR = (
+    "keep_alive cannot be false when destination is "
+    "'continue_conversation': deleting the sandbox would destroy "
+    "the conversation the next event continues"
+)
+
+
+def continue_conversation_keep_alive(
+    trigger: Trigger | dict[str, Any] | None, keep_alive: bool | None
+) -> bool | None:
+    """Return the `keep_alive` an automation with `trigger` must store.
+
+    A continued conversation outlives its run, so its sandbox must too: an
+    event trigger with `destination: continue_conversation` forces `keep_alive`
+    to true and refuses false with `ValueError`. Every other trigger keeps the
+    requested value. Every create and update path applies this one rule, so the
+    cleanup paths can check `keep_alive` alone. `trigger` is a parsed trigger
+    or its stored dict form.
+    """
+    if isinstance(trigger, EventTrigger):
+        destination: Any = trigger.destination
+    elif isinstance(trigger, dict):
+        destination = trigger.get("destination")
+    else:
+        destination = None
+    if destination != "continue_conversation":
+        return keep_alive
+    if keep_alive is False:
+        raise ValueError(CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR)
+    return True
+
+
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -640,18 +672,9 @@ class CreateAutomationRequest(BaseModel):
         alone, rather than every deletion site re-deriving that a run holding a
         subject is implicitly kept.
         """
-        trigger = self.trigger
-        if not isinstance(trigger, EventTrigger):
-            return self
-        if trigger.destination != "continue_conversation":
-            return self
-        if self.keep_alive is False:
-            raise ValueError(
-                "keep_alive cannot be false when destination is "
-                "'continue_conversation': deleting the sandbox would destroy "
-                "the conversation the next event continues"
-            )
-        self.keep_alive = True
+        self.keep_alive = continue_conversation_keep_alive(
+            self.trigger, self.keep_alive
+        )
         return self
 
 

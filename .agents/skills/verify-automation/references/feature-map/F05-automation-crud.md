@@ -158,7 +158,7 @@ Preconditions:
   control-automation api GET "/v1/$KID" --expect 200 --check keep_alive eq true --check trigger.destination eq continue_conversation
   control-automation api POST /v1 --json '{"name":"qa-continue-off","trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","keep_alive":false}' --expect 422 --check detail.0.msg contains "keep_alive cannot be false when destination is 'continue_conversation'"
   ```
-  Presets do not apply this rule; see `F06.continue-keep-alive`.
+  The preset routes apply the same rule (`F06.continue-keep-alive`).
 - **Template idempotency (`F05.template-idempotent`).** The second create with the same template id returns the first automation unchanged.
   ```sh
   TPL="qa-tpl-$(date +%s%N)"

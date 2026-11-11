@@ -33,9 +33,9 @@ Routes: `POST /api/automation/v1/preset/prompt`, `POST /api/automation/v1/preset
   control-automation api GET "/v1/plugin-spec/preflight?source=github:qa-org/qa-plugin&ref=main" --expect 422 --check detail contains 'Failed to preflight automation plugin' --save F06.plugin-spec-preflight/missing-plugin
   ```
   A real catalog-backed plugin source answers 200 with `manifest.config_schema`, `manifest.runtime`, and `suggested_trigger`; this negative recipe drives the route without depending on an external test repository.
-- `F06.continue-keep-alive`, known bug: a preset with an event trigger whose `destination` is `continue_conversation` should store `keep_alive: true` as `POST /v1` does; it stores `null`.
-- `F06.continue-keep-alive-false`, known bug: a preset with `continue_conversation` and `keep_alive: false` should answer 422 as `POST /v1` does; it answers 201.
-- `F06.continue-patch-enforced`: any later PATCH of such a preset forces `keep_alive: true`, and PATCH `keep_alive: false` answers 400.
+- `F06.continue-keep-alive`: a preset with an event trigger whose `destination` is `continue_conversation` stores `keep_alive: true` when it is omitted, as `POST /v1` does.
+- `F06.continue-keep-alive-false`: a preset with `continue_conversation` and `keep_alive: false` answers 422 with the message `POST /v1` uses.
+- `F06.continue-patch-enforced`: a later PATCH of such a preset keeps `keep_alive: true`, and PATCH `keep_alive: false` answers 400.
 - `F06.auth`: both preset routes answer 401 without a key and create nothing.
 
 ## How to get to it (agent POV)
@@ -193,31 +193,32 @@ Preconditions:
   ```
   A variant without `model` inherits the automation's `model`; in local
   mode a missing automation `model` leaves the variant's `null`.
-- **Preset continue_conversation keep_alive (`F06.continue-keep-alive`), known bug.** The preset should force `keep_alive: true` like `POST /v1` does.
+- **Preset continue_conversation keep_alive (`F06.continue-keep-alive`).** The preset forces `keep_alive: true` like `POST /v1` does.
   ```sh
-  CKID=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa-preset-continue","prompt":"hi","trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 201 --field id)
-  control-automation api GET "/v1/$CKID" --expect 200 --check trigger.destination eq continue_conversation --check keep_alive eq true --save F06.continue-keep-alive/get  # bug: status eq 200 && response.body.keep_alive eq null
+  CKID=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa-preset-continue","prompt":"hi","trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 201 --check keep_alive eq true --field id)
+  control-automation api GET "/v1/$CKID" --expect 200 --check trigger.destination eq continue_conversation --check keep_alive eq true --save F06.continue-keep-alive/get
   ```
-  Today `keep_alive` is stored as `null`. The watchdog and the run-complete
-  handler clean up a sandbox unless `keep_alive` is `true`, trusting that
-  `continue_conversation` automations were forced at creation, so the
-  sandbox (and the conversation the next event should continue) is deleted
-  after each run. Raw creates do it right (`F05.keep-alive-continue`).
-- **Preset continue_conversation with keep_alive false (`F06.continue-keep-alive-false`), known bug.** The preset should refuse it like `POST /v1` does.
+  The watchdog and the run-complete handler clean up a sandbox unless
+  `keep_alive` is `true`, trusting that `continue_conversation` automations
+  were forced at creation; the presets share that rule with raw creates
+  (`F05.keep-alive-continue`), so the conversation the next event continues
+  keeps its sandbox.
+- **Preset continue_conversation with keep_alive false (`F06.continue-keep-alive-false`).** The preset refuses it like `POST /v1` does.
   ```sh
-  control-automation api POST /v1/preset/plugin --json '{"name":"qa-preset-continue-off","prompt":"hi","plugins":[{"source":"github:qa-org/qa-plugin"}],"keep_alive":false,"trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 422 --save F06.continue-keep-alive-false/create  # bug: status eq 201 && response.body.keep_alive eq false
+  control-automation api POST /v1/preset/plugin --json '{"name":"qa-preset-continue-off","prompt":"hi","plugins":[{"source":"github:qa-org/qa-plugin"}],"keep_alive":false,"trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 422 --check detail.0.msg contains "keep_alive cannot be false when destination is 'continue_conversation'" --save F06.continue-keep-alive-false/create
+  control-automation api POST /v1/preset/prompt --json '{"name":"qa-preset-continue-off","prompt":"hi","keep_alive":false,"trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 422 --check detail.0.msg contains "keep_alive cannot be false when destination is 'continue_conversation'"
+  control-automation state sql "SELECT count(*) AS n FROM automations WHERE name = 'qa-preset-continue-off'" --check rows.0.n eq 0
   ```
-  Today it answers 201 with `keep_alive: false`. The prompt preset behaves
-  the same.
-- **A later PATCH enforces keep_alive (`F06.continue-patch-enforced`).** The PATCH handler applies the rule the preset create skipped.
+  Both presets refuse it, and nothing is created.
+- **A later PATCH enforces keep_alive (`F06.continue-patch-enforced`).** The PATCH handler applies the same rule to the merged view.
   ```sh
   CPID=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa-preset-continue-patch","prompt":"hi","trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 201 --field id)
   control-automation api PATCH "/v1/$CPID" --json '{"name":"qa-preset-continue-patched"}' --expect 200 --check keep_alive eq true --save F06.continue-patch-enforced/rename
   control-automation api GET "/v1/$CPID" --expect 200 --check keep_alive eq true
   control-automation api PATCH "/v1/$CPID" --json '{"keep_alive":false}' --expect 400 --check detail contains "keep_alive cannot be false when destination is 'continue_conversation'"
   ```
-  Any PATCH, even a rename, settles `keep_alive: true`; until then the
-  preset runs with cleanup enabled.
+  The rule answers 400 on PATCH, where `POST` answers 422 from request
+  validation.
 - **Key required (`F06.auth`).** No key, no preset, no upload.
   ```sh
   U0=$(control-automation state sql "SELECT count(*) AS n FROM tarball_uploads" --field rows.0.n)
@@ -241,9 +242,9 @@ Preconditions:
   a `prompt-automation-<name>-edit` upload replaces it. PATCH regenerates
   for any automation whose internal tarball contains `prompt.txt`,
   including a raw one that happens to ship such a file.
-- `continue_conversation` is not enforced at preset creation
-  (`F06.continue-keep-alive`, `F06.continue-keep-alive-false`); send
-  `keep_alive: true` explicitly, or PATCH once after creating.
+- `continue_conversation` forces `keep_alive: true` at preset creation and
+  refuses `false` with 422, as `POST /v1` does; `POST /v1/validate` and saved
+  drafts for the preset endpoints report the same refusal.
 - `model` is stored as given in local mode (no profile list); in cloud mode
   an unknown name is 422 `Model profile ... not found`, and an omitted one
   takes the user's active profile at creation time.
