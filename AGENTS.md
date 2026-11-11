@@ -370,7 +370,8 @@ path gained is the catalog contract the presets already had:
 - **`template` provenance** (`TemplateProvenance` in `schemas.py`), accepted by
   all three creation endpoints and stored under `preset_metadata["template"]`.
   `find_existing_template_automation` (`utils/templates.py`) is consulted first,
-  so enabling an entry twice returns the existing automation with a 200.
+  so enabling an entry twice returns the existing non-draft automation with a
+  200 (a draft test's hidden DRAFT artifact is not an install).
   `record_first_run_outcome` keys on the same value, so bundles get first-run
   telemetry for free.
 - **Preflight**: `POST /v1/validate` accepts `"endpoint": "/v1"`. It validates

@@ -963,6 +963,78 @@ class TestCreateAutomation:
         assert second.status_code == 201
         assert second.json()["id"] != first.json()["id"]
 
+    @staticmethod
+    def _template_row(state: AutomationState) -> Automation:
+        return Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="From template",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            state=state,
+            enabled=state == AutomationState.ACTIVE,
+            preset_metadata={"template": {"id": "tpl-drafted", "version": "1"}},
+        )
+
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            (
+                "/api/automation/v1",
+                {
+                    "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                    "entrypoint": "uv run main.py",
+                },
+            ),
+            ("/api/automation/v1/preset/prompt", {"prompt": "Review PRs."}),
+        ],
+        ids=["bundle", "preset-prompt"],
+    )
+    async def test_draft_test_artifact_does_not_count_as_template_install(
+        self, async_client, async_session, path, payload
+    ):
+        """A DRAFT row from a draft test dispatch does not block the real create."""
+        draft_artifact = self._template_row(AutomationState.DRAFT)
+        async_session.add(draft_artifact)
+        await async_session.commit()
+
+        response = await async_client.post(
+            path,
+            json={
+                **payload,
+                "name": "Real",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "template": {"id": "tpl-drafted", "version": "1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["id"] != str(draft_artifact.id)
+        assert response.json()["state"] == "ACTIVE"
+
+    async def test_inactive_template_install_still_returns_existing(
+        self, async_client, async_session
+    ):
+        """A disabled install is still an install: the create replays it, 200."""
+        installed = self._template_row(AutomationState.INACTIVE)
+        async_session.add(installed)
+        await async_session.commit()
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "Again",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                "entrypoint": "uv run main.py",
+                "template": {"id": "tpl-drafted", "version": "1"},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["id"] == str(installed.id)
+
     async def test_create_automation_rejects_oversized_template_config(
         self, async_client
     ):

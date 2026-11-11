@@ -11,7 +11,7 @@ from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.db import using_sqlite
-from openhands.automation.models import Automation
+from openhands.automation.models import Automation, AutomationState
 from openhands.automation.schemas import AutomationResponse
 
 
@@ -35,6 +35,10 @@ async def find_existing_template_automation(
 ) -> Automation | None:
     """Find the org's live automation created from the given template.
 
+    DRAFT rows are hidden artifacts materialized by a draft test dispatch, not
+    installs of the template, so they are skipped; an INACTIVE install still
+    counts and is returned.
+
     JSON extraction mirrors ``get_event_automations``: ``json_extract`` on
     SQLite, ``->``/``->>`` on PostgreSQL. Rows without provenance yield NULL and
     are excluded on both.
@@ -57,6 +61,7 @@ async def find_existing_template_automation(
         .where(
             Automation.org_id == org_id,
             Automation.deleted_at.is_(None),
+            Automation.state != AutomationState.DRAFT,
             template_filter,
         )
         .order_by(Automation.created_at.asc())
