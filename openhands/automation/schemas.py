@@ -1057,9 +1057,9 @@ class CustomWebhookCreate(BaseModel):
     @classmethod
     def validate_payload_expression(cls, v: str | None) -> str | None:
         if v is not None:
-            from openhands.automation.filter_eval import validate_filter
+            from openhands.automation.filter_eval import validate_payload_expression
 
-            valid, _ = validate_filter(v)
+            valid, _ = validate_payload_expression(v)
             if not valid or not v.strip():
                 raise ValueError("Invalid JMESPath expression")
         return v

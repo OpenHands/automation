@@ -5,6 +5,10 @@ uses the event automation API and works in self-hosted deployments as well as
 deployments exposing the same API. It does not require an Enterprise-only
 integration or a native Teams application.
 
+Outgoing webhooks support **@mentions in public (standard) Teams channels only**.
+Conversational follow-ups are tracked in [extensions #924](https://github.com/OpenHands/extensions/issues/924).
+See [Microsoft's Outgoing Webhook limitations](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-outgoing-webhook).
+
 This server capability is tracked in [issue #714](https://github.com/OpenHands/automation/issues/714).
 Canvas form controls and the reusable Teams example are separate follow-ups.
 Use these API fields with a server version that includes this change.
@@ -76,12 +80,11 @@ sends `Authorization: HMAC <base64 digest>`. The token must be strict, nonempty
 base64. A valid signature identifies the webhook, not authorization for every
 team member to run an automation.
 
-`admission_expr` is a required Teams source policy, evaluated on the verified
-payload before storage or routing. Use tenant, team, channel and stable requester
-identifiers rather than display names. Missing fields, false results or evaluation
-errors deny admission. The example allows one requester; extend it deliberately
-using the existing JMESPath/filter functions if more requesters are intended.
-Per-automation filters can further restrict routing but cannot bypass admission.
+`admission_expr` must return the boolean `true` before Automation stores or
+routes the delivery. Use explicit comparisons against stable tenant, team,
+channel, and requester IDs. Per-automation filters can further restrict routing.
+Automation checks syntax, function names, and argument counts when saving
+`admission_expr` or `event_id_expr`. It checks argument types during delivery.
 
 `event_id_expr` must return a nonempty string of at most 255 characters. Its value
 must be unique within this organization/source: include conversation scope where

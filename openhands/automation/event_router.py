@@ -65,7 +65,6 @@ from openhands.automation.event_schemas.catalog import (
 from openhands.automation.filter_eval import (
     FilterEvaluationError,
     evaluate_expression,
-    evaluate_filter,
 )
 from openhands.automation.ingest import (
     AcceptedEvent,
@@ -94,6 +93,14 @@ from openhands.automation.webhook_policy import validate_webhook_protocol
 
 
 logger = logging.getLogger("automation.event_router")
+
+
+def _log_rejection(source: str, org_id: uuid.UUID, reason: str) -> None:
+    """Log static reason codes, never delivery content or evaluation errors."""
+    logger.warning(
+        "Webhook rejected: reason=%s source=%s org=%s", reason, source, org_id
+    )
+
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
 
@@ -271,11 +278,13 @@ async def receive_event(
         payload = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         if teams:
+            _log_rejection(source, org_id, "invalid_json")
             raise HTTPException(400, "Invalid JSON") from None
         logger.warning("Malformed JSON in event payload: %s", e)
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
     if teams and (not isinstance(payload, dict) or payload.get("type") != "message"):
+        _log_rejection(source, org_id, "unrecognized_activity")
         raise HTTPException(400, "Unrecognized Teams message activity")
 
     # Extract IDs only from authenticated bytes, never silently dropping an
@@ -289,21 +298,23 @@ async def receive_event(
         try:
             provider_event_id = evaluate_expression(config.event_id_expr, payload)
         except FilterEvaluationError:
+            _log_rejection(source, org_id, "body_id_evaluation_failed")
             raise HTTPException(400, "Invalid body delivery ID") from None
         if (
             not isinstance(provider_event_id, str)
             or not provider_event_id.strip()
             or len(provider_event_id) > 255
         ):
+            _log_rejection(source, org_id, "invalid_body_id")
             raise HTTPException(400, "Invalid body delivery ID")
 
     if config.admission_expr is not None:
         try:
-            admitted = evaluate_filter(config.admission_expr, payload)
+            admitted = evaluate_expression(config.admission_expr, payload) is True
         except FilterEvaluationError:
             admitted = False
         if not admitted:
-            logger.info("Webhook admission denied for source=%s org=%s", source, org_id)
+            _log_rejection(source, org_id, "admission_denied")
             raise HTTPException(
                 403, "Webhook source admission policy rejected delivery"
             )
@@ -330,6 +341,7 @@ async def receive_event(
         raise  # Re-raise HTTPExceptions as-is
     except ValueError as e:
         if teams:
+            _log_rejection(source, org_id, "unrecognized_activity")
             raise HTTPException(400, "Unrecognized Teams message activity") from None
         # Unknown event type (e.g. a GitHub event we don't have a detection
         # rule for). This is normal - the service supports a subset of event
@@ -344,6 +356,7 @@ async def receive_event(
         return EventResponse(received=True, matched=0, runs_created=[])
     except Exception as e:
         if teams:
+            _log_rejection(source, org_id, "invalid_activity")
             raise HTTPException(400, "Invalid Teams message activity") from None
         logger.warning("Failed to parse event: %s", e)
         raise HTTPException(status_code=400, detail=f"Failed to parse event: {e}")

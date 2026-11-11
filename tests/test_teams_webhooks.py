@@ -883,3 +883,141 @@ async def test_default_ingestion_telemetry_is_committed_and_detached(
         )
     assert observed == ["automation_event_matched", "automation_run_created"]
     assert result.telemetry == []
+
+
+@pytest.mark.parametrize(
+    "value", [True, False, None, "allowed", 1, [1], {"id": "allowed"}]
+)
+async def test_admission_requires_literal_true(
+    async_client, async_session, mock_authenticated_user, value
+):
+    response = await async_client.post(
+        "/api/automation/v1/webhooks", json=source_config(admission_expr="admission")
+    )
+    assert response.status_code == 201
+    await add_automation(async_session, mock_authenticated_user)
+    response = await deliver(
+        async_client, mock_authenticated_user.org_id, activity(admission=value)
+    )
+    assert response.status_code == (200 if value is True else 403)
+    assert await counts(async_session) == ((1, 1) if value is True else (0, 0))
+
+
+@pytest.mark.parametrize("field", ["admission_expr", "event_id_expr"])
+@pytest.mark.parametrize("expression", ["icontain(text, 'x')", "icontains(text)"])
+async def test_invalid_function_rejected_on_create_and_update(
+    async_client, registered_source, field, expression
+):
+    response = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json=source_config(source="invalid-functions", **{field: expression}),
+    )
+    assert response.status_code == 422
+    webhook_id = registered_source["id"]
+    response = await async_client.patch(
+        f"/api/automation/v1/webhooks/{webhook_id}", json={field: expression}
+    )
+    assert response.status_code == 422
+    response = await async_client.get(f"/api/automation/v1/webhooks/{webhook_id}")
+    assert response.status_code == 200
+    assert response.json()[field] == source_config()[field]
+
+
+@pytest.mark.parametrize(
+    "overrides, raw, reason",
+    [
+        ({}, b'{"payload-secret":', "invalid_json"),
+        ({}, b'{"type":"payload-secret"}', "unrecognized_activity"),
+        (
+            {"event_key_expr": "unknown(type)"},
+            json.dumps(activity(text="payload-secret")).encode(),
+            "unrecognized_activity",
+        ),
+        (
+            {"event_id_expr": "id"},
+            json.dumps(activity(id=" ", text="payload-secret")).encode(),
+            "invalid_body_id",
+        ),
+        (
+            {"event_id_expr": "join('/', id)"},
+            json.dumps(activity(text="payload-secret")).encode(),
+            "body_id_evaluation_failed",
+        ),
+        (
+            {"admission_expr": "text"},
+            json.dumps(activity(text="payload-secret")).encode(),
+            "admission_denied",
+        ),
+    ],
+)
+async def test_rejection_logs_static_reason_without_delivery_content(
+    async_client, async_session, mock_authenticated_user, caplog, overrides, raw, reason
+):
+    response = await async_client.post(
+        "/api/automation/v1/webhooks", json=source_config(**overrides)
+    )
+    assert response.status_code == 201
+    response = await deliver(async_client, mock_authenticated_user.org_id, raw=raw)
+    assert response.status_code in (400, 403)
+    messages = [
+        r.getMessage() for r in caplog.records if r.name == "automation.event_router"
+    ]
+    assert any(
+        f"reason={reason}" in m
+        and SOURCE in m
+        and str(mock_authenticated_user.org_id) in m
+        for m in messages
+    )
+    assert all(
+        "payload-secret" not in m and TOKEN not in m and "Authorization" not in m
+        for m in messages
+    )
+    assert await counts(async_session) == (0, 0)
+
+
+async def test_valid_slices_on_create_update_and_delivery(
+    async_client, async_session, mock_authenticated_user
+):
+    admission = source_config()["admission_expr"] + " && length([id][0:1]) == `1`"
+    response = await async_client.post(
+        "/api/automation/v1/webhooks", json=source_config(admission_expr=admission)
+    )
+    assert response.status_code == 201, response.text
+    webhook_id = response.json()["id"]
+    await add_automation(async_session, mock_authenticated_user)
+    assert (
+        await deliver(async_client, mock_authenticated_user.org_id)
+    ).status_code == 200
+    response = await async_client.patch(
+        f"/api/automation/v1/webhooks/{webhook_id}",
+        json={"event_id_expr": "join('/', [conversation.id, id][::-1])"},
+    )
+    assert response.status_code == 200, response.text
+    response = await deliver(
+        async_client, mock_authenticated_user.org_id, activity(id="sliced-delivery")
+    )
+    assert response.status_code == 200, response.text
+    assert await counts(async_session) == (2, 2)
+
+
+async def test_unexpected_parse_rejection_has_sanitized_log(
+    async_client,
+    async_session,
+    mock_authenticated_user,
+    registered_source,
+    monkeypatch,
+    caplog,
+):
+    def fail_parse(*args, **kwargs):
+        raise RuntimeError("payload-secret")
+
+    monkeypatch.setattr("openhands.automation.event_router.parse_event", fail_parse)
+    response = await deliver(async_client, mock_authenticated_user.org_id)
+    assert response.status_code == 400
+    assert "payload-secret" not in response.text
+    messages = [
+        r.getMessage() for r in caplog.records if r.name == "automation.event_router"
+    ]
+    assert any("reason=invalid_activity" in m for m in messages)
+    assert all("payload-secret" not in m and TOKEN not in m for m in messages)
+    assert await counts(async_session) == (0, 0)

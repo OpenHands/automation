@@ -157,7 +157,7 @@ async def accept_event(
     if not allow_conversation_continuation:
         automations = await get_event_automations(org_id, source, session)
         if any(
-            trigger.destination == "continue_conversation" for _, trigger in automations
+            trigger.destination == CONTINUE_CONVERSATION for _, trigger in automations
         ):
             raise ContinuationNotAllowed(
                 "Deadline-bound sources cannot continue conversations"

@@ -14,6 +14,7 @@ from openhands.automation.acknowledgements import (
 )
 from openhands.automation.models import Automation, CustomWebhook
 from openhands.automation.providers import TEAMS_VERIFIER, teams_webhook_key
+from openhands.automation.schemas import DraftValidationError
 
 
 CONTINUATION_CONFLICT = (
@@ -29,6 +30,23 @@ async def require_compatible_trigger(
         await validate_trigger_webhook_compatibility(org_id, trigger, session)
     except ValueError:
         raise HTTPException(422, CONTINUATION_CONFLICT) from None
+
+
+async def trigger_webhook_validation_errors(
+    org_id: uuid.UUID, trigger: dict[str, Any], session: AsyncSession
+) -> list[DraftValidationError]:
+    """Use one diagnostic contract for draft saving and advisory validation."""
+    try:
+        await validate_trigger_webhook_compatibility(org_id, trigger, session)
+    except ValueError:
+        return [
+            DraftValidationError(
+                field="trigger.destination",
+                code="incompatible_webhook_profile",
+                message=CONTINUATION_CONFLICT,
+            )
+        ]
+    return []
 
 
 def validate_webhook_protocol(
