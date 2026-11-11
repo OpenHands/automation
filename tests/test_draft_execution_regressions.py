@@ -199,7 +199,7 @@ async def test_only_draft_creator_can_mutate_or_dispatch_materialized_draft(
     await async_session.refresh(draft)
     await async_session.refresh(automation)
     assert draft.deleted_at is None
-    assert draft.draft_body == _raw_body()
+    assert draft.draft_body == {**_raw_body(), "tags": []}
     assert automation.tarball_path == _raw_body()["tarball_path"]
     assert automation.user_id != mock_authenticated_user.user_id
 
