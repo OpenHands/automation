@@ -335,12 +335,14 @@ Preconditions:
 - `http://` is accepted by the schema regex but refused by the handler;
   the schema's error message lists `http://` and omits `oh-internal://`.
   `https://`, `s3://` and `gs://` are never fetched at create time.
-- Every table's `created_at` (automations, runs, uploads, webhooks, change
-  rows and the rest) is written from Python with microseconds, so back-to-back writes (a create
-  and an immediate PATCH) list newest first. Rows written by a release
-  before that fix have whole-second times on SQLite and tie within a second;
-  ties order by random UUID (`id` desc), stable across pages but not in
-  time order.
+- Every ORM-written `created_at` (automations, runs, uploads, webhooks,
+  change rows and the rest) comes from Python with microseconds, so
+  back-to-back writes (a create and an immediate PATCH) list newest first.
+  The raw SQL inserts into `automation_service_metadata` still use
+  `CURRENT_TIMESTAMP`; nothing reads that column. Rows written by a release
+  before that fix have whole-second times on SQLite and tie within a
+  second; ties order by random UUID (`id` desc), stable across pages but
+  not in time order.
 - PATCH with `null` on a NOT NULL column is a 500 today (`F05.patch-null`);
   send only the fields you change, never `null` placeholders.
 - `enabled` is deprecated in favor of `state` but still accepted on create
