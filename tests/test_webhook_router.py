@@ -5,6 +5,7 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
+from openhands.automation.models import CustomWebhook
 from openhands.automation.schemas import (
     RESERVED_SOURCES,
     CustomWebhookCreate,
@@ -382,11 +383,21 @@ async def test_event_id_header_flows_through_the_api(async_client):
     assert invalid.status_code == 422
 
 
+async def _stored_webhook(session_factory, webhook_id: str) -> CustomWebhook:
+    """Read the row back through a fresh session, not the request's."""
+    async with session_factory() as session:
+        webhook = await session.get(CustomWebhook, uuid.UUID(webhook_id))
+        assert webhook is not None
+        return webhook
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "field", ["name", "enabled", "event_key_expr", "signature_header"]
 )
-async def test_patch_null_on_required_field_is_422(async_client, field):
+async def test_patch_null_on_required_field_is_422(
+    async_client, async_session_factory, field
+):
     """A NOT NULL field refuses explicit null with 422 and leaves the row alone."""
     created = await async_client.post(
         "/api/automation/v1/webhooks",
@@ -395,18 +406,26 @@ async def test_patch_null_on_required_field_is_422(async_client, field):
     assert created.status_code == 201
     before = created.json()
     url = f"/api/automation/v1/webhooks/{before['id']}"
+    stored_before = getattr(
+        await _stored_webhook(async_session_factory, before["id"]), field
+    )
 
     response = await async_client.patch(url, json={field: None})
 
     assert response.status_code == 422, response.text
     assert response.json()["detail"][0]["loc"] == ["body", field]
+    stored = await _stored_webhook(async_session_factory, before["id"])
+    assert getattr(stored, field) is not None
+    assert getattr(stored, field) == stored_before
     after = await async_client.get(url)
     assert after.json()[field] == before[field]
 
 
 @pytest.mark.asyncio
-async def test_patch_omitted_fields_kept_and_nullable_fields_cleared(async_client):
-    """Omitting a field keeps it; nullable fields still accept null."""
+async def test_patch_omitted_fields_kept_and_nullable_fields_cleared(
+    async_client, async_session_factory
+):
+    """Omitting a field keeps it; nullable fields store NULL when sent null."""
     created = await async_client.post(
         "/api/automation/v1/webhooks",
         json={
@@ -417,16 +436,22 @@ async def test_patch_omitted_fields_kept_and_nullable_fields_cleared(async_clien
         },
     )
     assert created.status_code == 201, created.text
-    url = f"/api/automation/v1/webhooks/{created.json()['id']}"
+    webhook_id = created.json()["id"]
+    url = f"/api/automation/v1/webhooks/{webhook_id}"
 
     response = await async_client.patch(
         url, json={"signature_scheme": None, "event_id_header": None}
     )
 
     assert response.status_code == 200, response.text
-    data = response.json()
-    # A cleared scheme is served as the default verifier.
-    assert data["signature_scheme"] == "hmac_sha256_hex"
-    assert data["event_id_header"] is None
-    assert data["name"] == "Keep Me"
-    assert data["enabled"] is True
+    stored = await _stored_webhook(async_session_factory, webhook_id)
+    assert stored.signature_scheme is None
+    assert stored.event_id_header is None
+    assert stored.name == "Keep Me"
+    assert stored.enabled is True
+    fetched = (await async_client.get(url)).json()
+    # A NULL scheme is served as the default verifier.
+    assert fetched["signature_scheme"] == "hmac_sha256_hex"
+    assert fetched["event_id_header"] is None
+    assert fetched["name"] == "Keep Me"
+    assert fetched["enabled"] is True

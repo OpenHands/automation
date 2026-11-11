@@ -781,9 +781,9 @@ class UpdateAutomationRequest(BaseModel):
     def validate_public_state(cls, v: Any) -> Any:
         return reject_public_draft_state(v)
 
-    @field_validator(
-        "name", "trigger", "tarball_path", "entrypoint", "enabled", "state"
-    )
+    # state is NOT NULL too, but an explicit null there has always been a
+    # no-op (the handler skips it), so it is left out on purpose.
+    @field_validator("name", "trigger", "tarball_path", "entrypoint", "enabled")
     @classmethod
     def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
         return reject_explicit_null(v, info)
