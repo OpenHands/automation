@@ -258,13 +258,17 @@ Preconditions:
   control-automation api POST "/v1/drafts/$TD/dispatch" --expect 201 --quiet
   TMA=$(control-automation api GET "/v1/drafts/$TD" --expect 200 --field materialized_automation_id)
   control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT
-  control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA"
+  TRA=$(control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA" --field id)
   control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT --check enabled eq false
   control-automation api DELETE "/v1/drafts/$TD" --expect 204
   control-automation api GET "/v1/$TMA" --expect 404
+  control-automation api GET "/v1/$TRA" --expect 200 --check state eq ACTIVE
+  control-automation api DELETE "/v1/$TRA" --expect 204
   ```
   Observed: `201` with a new `id` and `state=ACTIVE`; the DRAFT artifact stays
-  as it was and is still removed with its draft (DELETE 204, then 404).
+  as it was and is still removed with its draft (DELETE 204, then 404); the
+  new install is still ACTIVE afterwards and is deleted so a replay on a
+  reused run starts clean.
   `find_existing_template_automation` (`utils/templates.py`) skips
   `state=DRAFT` rows, so every template-aware create (`POST /v1`,
   `/v1/plugin-spec`, `/v1/preset/prompt`, `/v1/preset/plugin`) ignores draft

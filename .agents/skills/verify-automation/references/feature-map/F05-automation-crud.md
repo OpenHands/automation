@@ -331,8 +331,9 @@ Preconditions:
 - `POST /v1` checks the template before anything else except the
   profile/model pair: a repeat with an invalid tarball, model or trigger
   still answers 200 with the existing automation. The lookup is per org
-  (not per user) and matches inactive and draft-state rows too; presets
-  share it (`F06.template-shared`). Use a fresh `template.id` per replay.
+  (not per user) and matches inactive rows too (not draft-test artifacts;
+  see `F09.template-after-draft-test`); presets share it
+  (`F06.template-shared`). Use a fresh `template.id` per replay.
 - `http://` is accepted by the schema regex but refused by the handler;
   the schema's error message lists `http://` and omits `oh-internal://`.
   `https://`, `s3://` and `gs://` are never fetched at create time.

@@ -235,8 +235,9 @@ Preconditions:
   `setup_script_path` fields; sending any is a 422 `extra_forbidden`. They and
   `POST /v1/plugin-spec` take an `agent_profile_id`.
 - The template lookup is shared with `POST /v1` and runs before model
-  resolution and tarball generation: a repeat returns whatever automation
-  first used that `template.id` in the org, raw or preset, with HTTP 200.
+  resolution and tarball generation: a repeat returns whatever non-draft
+  automation first used that `template.id` in the org, raw or preset, with
+  HTTP 200.
 - Prompt edits leave a trail of uploads: the original is soft-deleted and
   a `prompt-automation-<name>-edit` upload replaces it. PATCH regenerates
   for any automation whose internal tarball contains `prompt.txt`,
