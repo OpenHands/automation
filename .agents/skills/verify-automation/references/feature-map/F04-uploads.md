@@ -130,7 +130,6 @@ Preconditions:
   ```sh
   TARF=$(control-automation fixture tarball --kind echo --field path)
   LA=$(control-automation api POST /v1/uploads --query name=qa-list-a --data-file "$TARF" --content-type application/gzip --expect 201 --field id)
-  sleep 1.2
   LB=$(control-automation api POST /v1/uploads --query name=qa-list-b --data-file "$TARF" --content-type application/gzip --expect 201 --field id)
   TOTAL=$(control-automation api GET /v1/uploads --expect 200 --check uploads.0.id eq "$LB" --check uploads.1.id eq "$LA" --field total)
   control-automation api GET /v1/uploads --query limit=1 --query offset=1 --expect 200 --check uploads len-eq 1 --check uploads.0.id eq "$LA" --check total eq "$TOTAL" --save F04.list/page
@@ -141,10 +140,9 @@ Preconditions:
   control-automation api GET /v1/uploads --query status=DONE --expect 422 --check detail.0.loc.1 eq status
   ```
   `total` counts every live upload of the caller regardless of paging.
-  `F04.size-streamed` shows the `status=FAILED` filter. The `sleep` is
-  deliberate: `created_at` is stored with one-second precision and the list
-  has no tie-breaker, so two uploads in the same second come back in either
-  order.
+  `F04.size-streamed` shows the `status=FAILED` filter. No `sleep` is
+  needed: `created_at` has microseconds, so back-to-back uploads list newest
+  first.
 - **Get one upload (`F04.get`).** By id, unknown id, and a malformed id.
   ```sh
   TARF=$(control-automation fixture tarball --kind echo --field path)
@@ -220,9 +218,9 @@ Preconditions:
 - Uploads created by presets and draft dispatch appear in `GET /v1/uploads`
   next to your own (`prompt-automation-<name>`, `plugin-automation-<name>`,
   `...-edit` after a prompt PATCH).
-- `created_at` has one-second precision (no fraction, unlike `updated_at`)
-  and the list orders by it alone, so uploads created in the same second
-  have no stable order across pages.
+- The list orders by `created_at` (microseconds) and then `id`, so pages
+  are stable. Uploads from a release before that fix have whole-second
+  `created_at` on SQLite and order among themselves by random `id`.
 - SQLite stores ids as 32 hex digits without dashes; `state sql` queries
   compare with `replace(id_with_dashes, '-', '')`.
 - There is no in-use check on delete and no garbage collection of
