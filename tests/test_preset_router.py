@@ -3781,6 +3781,39 @@ class TestPresetContinueConversationKeepAlive:
             in response.json()["detail"][0]["msg"]
         )
 
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            pytest.param({"type": "cron", "schedule": "0 9 * * *"}, id="cron"),
+            pytest.param(
+                {"type": "event", "source": "qa-src", "on": "qa.*"}, id="dispatch-run"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("keep_alive", [None, False, True])
+    async def test_other_triggers_store_keep_alive_as_given(
+        self,
+        async_client,
+        async_session,
+        preset_file_store,
+        endpoint,
+        trigger,
+        keep_alive,
+    ):
+        body: dict[str, Any] = {**PRESET_BODIES[endpoint], "trigger": trigger}
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
+
+        response = await async_client.post(f"/api/automation{endpoint}", json=body)
+
+        assert response.status_code == 201, response.text
+        assert response.json()["keep_alive"] is keep_alive
+        automation = await async_session.get(
+            Automation, uuid.UUID(response.json()["id"])
+        )
+        assert automation is not None
+        assert automation.keep_alive is keep_alive
+
 
 @pytest.fixture
 def preset_file_store():
