@@ -259,9 +259,13 @@ Preconditions:
   TMA=$(control-automation api GET "/v1/drafts/$TD" --expect 200 --field materialized_automation_id)
   control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT
   control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA"
+  control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT --check enabled eq false
+  control-automation api DELETE "/v1/drafts/$TD" --expect 204
+  control-automation api GET "/v1/$TMA" --expect 404
   ```
   Observed: `201` with a new `id` and `state=ACTIVE`; the DRAFT artifact stays
-  as it was. `find_existing_template_automation` (`utils/templates.py`) skips
+  as it was and is still removed with its draft (DELETE 204, then 404).
+  `find_existing_template_automation` (`utils/templates.py`) skips
   `state=DRAFT` rows, so every template-aware create (`POST /v1`,
   `/v1/plugin-spec`, `/v1/preset/prompt`, `/v1/preset/plugin`) ignores draft
   test artifacts, while an installed ACTIVE or INACTIVE automation from the
