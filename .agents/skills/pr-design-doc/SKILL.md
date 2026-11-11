@@ -41,14 +41,15 @@ non-trivial PR easy to review.
 
 Use the temporary **`.pr/`** directory for PR-only artifacts. Before relying on automatic
 cleanup, verify that the target repository has an enabled
-`.github/workflows/pr-artifacts.yml` workflow that opens or updates a cleanup PR to remove
-`.pr/` after merge to `main`.
+`.github/workflows/pr-artifacts-before-merge.yml` workflow (OpenHands/release-actions
+`pr-artifacts.yml`), which removes `.pr/` from the PR branch once the PR is approved.
 
-- Same-repository or fork PR with verified cleanup workflow: leave `.pr/` for review;
-  the workflow opens or updates a cleanup PR after merge to `main`.
-- Repository without a verified cleanup workflow: remove `.pr/` manually before merge.
+- Same-repository PR, or fork PR with **Allow edits by maintainers** on: leave `.pr/` for
+  review; the workflow removes it from the PR branch at approval, before merge.
+- Fork PR without maintainer edits, or a repository without that workflow: remove `.pr/`
+  manually before merge.
 
-The design doc is a temporary review aid and must not remain on `main` after cleanup.
+The design doc is a temporary review aid and must never reach `main`.
 Keep the essential design summary in the PR description: intent, important before/after
 behavior or API shape, compatibility, risk,
 and code references. Use commit-pinned document links so cleanup does not break access.
@@ -156,10 +157,9 @@ and code references. Use commit-pinned document links so cleanup does not break 
 5. **Self-contained & offline.** One HTML file, inline CSS/SVG, no external scripts or
    assets, opens by double-click, and survives being copied to another machine.
 6. **`.pr/` only, and temporary.** The doc is a review aid, not project docs. Keep it in
-   `.pr/` for review. With a verified repository cleanup workflow, leave it in place until
-   the PR merges to `main`; the workflow opens or updates a cleanup PR. Without a verified
-   cleanup workflow, remove it manually before merge. Do not move design HTML into `docs/`
-   or leave it on `main` after cleanup.
+   `.pr/` for review. With a verified repository cleanup workflow, leave it in place; the
+   workflow removes it from the PR branch at approval. Without one, remove it manually
+   before merge. Do not move design HTML into `docs/` or let it reach `main`.
 
 ## Anti-patterns
 

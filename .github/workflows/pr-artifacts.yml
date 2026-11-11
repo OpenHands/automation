@@ -72,7 +72,7 @@ jobs:
                       const body = `${marker}
                       📁 **PR Artifacts Notice**
 
-                      This PR contains a \`.pr/\` directory with temporary PR-specific documents. The directory will be **automatically removed after this PR merges to \`main\`**, through a cleanup PR.
+                      This PR contains a \`.pr/\` directory with temporary PR-specific documents. The directory is **removed automatically once this PR is approved**, by a commit on this branch from the \`PR artifacts before merge\` workflow. Until then the required \`pr-artifacts\` status stays pending. Link evidence by commit SHA so the links keep working.
                       `;
 
                       core.warning('.pr/ directory contains temporary PR-only artifacts');
