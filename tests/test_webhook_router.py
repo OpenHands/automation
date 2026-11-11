@@ -380,3 +380,53 @@ async def test_event_id_header_flows_through_the_api(async_client):
         json={"name": "Bad", "source": "bad", "event_id_header": "Invalid Header!"},
     )
     assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ["name", "enabled", "event_key_expr", "signature_header"]
+)
+async def test_patch_null_on_required_field_is_422(async_client, field):
+    """A NOT NULL field refuses explicit null with 422 and leaves the row alone."""
+    created = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={"name": "Null Guard", "source": f"null-{field.replace('_', '-')}"},
+    )
+    assert created.status_code == 201
+    before = created.json()
+    url = f"/api/automation/v1/webhooks/{before['id']}"
+
+    response = await async_client.patch(url, json={field: None})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"] == ["body", field]
+    after = await async_client.get(url)
+    assert after.json()[field] == before[field]
+
+
+@pytest.mark.asyncio
+async def test_patch_omitted_fields_kept_and_nullable_fields_cleared(async_client):
+    """Omitting a field keeps it; nullable fields still accept null."""
+    created = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={
+            "name": "Keep Me",
+            "source": "null-nullable",
+            "signature_scheme": "standard_webhooks",
+            "event_id_header": "X-GitHub-Delivery",
+        },
+    )
+    assert created.status_code == 201, created.text
+    url = f"/api/automation/v1/webhooks/{created.json()['id']}"
+
+    response = await async_client.patch(
+        url, json={"signature_scheme": None, "event_id_header": None}
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    # A cleared scheme is served as the default verifier.
+    assert data["signature_scheme"] == "hmac_sha256_hex"
+    assert data["event_id_header"] is None
+    assert data["name"] == "Keep Me"
+    assert data["enabled"] is True

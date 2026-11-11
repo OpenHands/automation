@@ -2169,6 +2169,58 @@ class TestUpdateAutomation:
         assert fetched.status_code == 200
         assert fetched.json()["description"] is None
 
+    @pytest.mark.parametrize(
+        "field",
+        ["name", "entrypoint", "tarball_path", "trigger", "enabled", "state"],
+    )
+    async def test_update_automation_null_on_required_field_is_422(
+        self, async_client, async_session, field
+    ):
+        """Explicit null on a NOT NULL column is a 422 naming it, not a 500."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Required Fields",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        url = f"/api/automation/v1/{automation.id}"
+        before = (await async_client.get(url)).json()
+
+        response = await async_client.patch(url, json={field: None})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"][0]["loc"] == ["body", field]
+        after = (await async_client.get(url)).json()
+        assert after[field] == before[field]
+
+    async def test_update_automation_state_with_null_enabled_uses_state(
+        self, async_client, async_session
+    ):
+        """A null enabled next to a state is derived from the state, as before."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="State Wins",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"state": "INACTIVE", "enabled": None},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == "INACTIVE"
+        assert response.json()["enabled"] is False
+
     async def test_update_automation_schedule(self, async_client, async_session):
         """PATCH updates the trigger schedule."""
         automation = Automation(

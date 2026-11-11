@@ -41,7 +41,7 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.patch-fields`: PATCH updates `name`, `trigger`, `timeout`, `entrypoint`, `setup_script_path` and bumps `updated_at`; unset fields are kept; a GET shows the stored values.
 - `F05.patch-state`: PATCH `state: INACTIVE` sets `enabled: false`, `disabled_reason: manual`, `disabled_detail {"reason":"manual","source":"user"}`, `disabled_at` and records a disable event; `enabled: true` reactivates and clears all three.
 - `F05.patch-validation`: PATCH applies the create validators (timeout bounds, entrypoint rules, unknown fields, `state: DRAFT`) with 422; an unknown id answers 404; `keep_alive: false` on a `continue_conversation` automation answers 400.
-- `F05.patch-null`, known bug: an explicit `null` for a NOT NULL column (`name`, `entrypoint`, `tarball_path`, `trigger`, `enabled`) answers 500 instead of 422.
+- `F05.patch-null`: an explicit `null` for a NOT NULL column (`name`, `entrypoint`, `tarball_path`, `trigger`, `enabled`, `state`) answers 422 naming the field and changes nothing; a nullable field such as `description` still clears with `null`.
 - `F05.delete`: DELETE answers 204 and soft-deletes (`deleted_at`, `state: INACTIVE`, `disabled_reason: manual_delete`); afterwards GET, PATCH and DELETE answer 404 and the list drops it.
 - `F05.tarball-download`: `GET /v1/{id}/tarball` for an internal upload answers 200 `application/x-tar` with `Content-Disposition: attachment; filename="<name>.tar"` and the uploaded bytes unchanged.
 - `F05.tarball-filename`: a non-ASCII name gets an ASCII `filename` fallback plus an RFC 5987 `filename*`; quotes and slashes are stripped.
@@ -241,17 +241,23 @@ Preconditions:
   The `keep_alive` rule is a 400 from the handler on PATCH, a 422 from the
   schema on create. PATCH does not re-check ownership of a new
   `tarball_path` (only the scheme regex applies).
-- **Explicit null on required fields (`F05.patch-null`), known bug.** The schema accepts `null`, the database refuses it, and the client gets a 500.
+- **Explicit null on required fields (`F05.patch-null`).** `null` is not a value for a NOT NULL column: the schema refuses it with a 422 before the handler runs.
   ```sh
   NID=$(control-automation api POST /v1 --json '{"name":"qa-null","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
-  control-automation api PATCH "/v1/$NID" --json '{"name":null}' --expect 422 --save F05.patch-null/name  # bug: status eq 500
+  control-automation api PATCH "/v1/$NID" --json '{"name":null}' --expect 422 --check detail.0.loc.1 eq name --save F05.patch-null/name
+  control-automation api PATCH "/v1/$NID" --json '{"entrypoint":null}' --expect 422 --check detail.0.loc.1 eq entrypoint
+  control-automation api PATCH "/v1/$NID" --json '{"tarball_path":null}' --expect 422 --check detail.0.loc.1 eq tarball_path
+  control-automation api PATCH "/v1/$NID" --json '{"trigger":null}' --expect 422 --check detail.0.loc.1 eq trigger
+  control-automation api PATCH "/v1/$NID" --json '{"enabled":null}' --expect 422 --check detail.0.loc.1 eq enabled
+  control-automation api PATCH "/v1/$NID" --json '{"state":null}' --expect 422 --check detail.0.loc.1 eq state
+  control-automation api PATCH "/v1/$NID" --json '{"description":null}' --expect 200 --check description eq null --check name eq qa-null --check enabled eq true --save F05.patch-null/nullable
+  control-automation api GET "/v1/$NID" --expect 200 --check name eq qa-null --check entrypoint eq 'bash run.sh' --check tarball_path eq https://qa.invalid/x.tgz --check trigger.schedule eq '0 0 1 1 *' --check state eq ACTIVE
   ```
-  Correct behavior is a 422 that names the field. Today `name`,
-  `entrypoint`, `tarball_path`, `trigger` and `enabled` set to `null` each
-  answer 500 `Internal Server Error` (an `IntegrityError: NOT NULL
-  constraint failed` in the service log) and store nothing. `timeout: null`
-  is stored as `null` (200) instead of falling back to the default, and
-  `state: null` is ignored.
+  The message is `<field> cannot be null; omit it to leave it unchanged`;
+  `tags: null` has its own message (`F05.tags`). An omitted field is left
+  as it was. `{"state":"INACTIVE","enabled":null}` is still accepted:
+  `enabled` follows `state`. `timeout: null` is stored as `null` (200)
+  rather than falling back to the default.
 - **Soft delete (`F05.delete`).** 204, then every route answers 404 and the row keeps its tombstone.
   ```sh
   DAID=$(control-automation api POST /v1 --json '{"name":"qa-delete","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
@@ -338,7 +344,7 @@ Preconditions:
   `https://`, `s3://` and `gs://` are never fetched at create time.
 - `created_at` has one-second precision; ordering within a second is by
   random UUID.
-- PATCH with `null` on a NOT NULL column is a 500 today (`F05.patch-null`);
+- PATCH with `null` on a NOT NULL column is a 422 (`F05.patch-null`);
   send only the fields you change, never `null` placeholders.
 - `enabled` is deprecated in favor of `state` but still accepted on create
   and PATCH (with a server-side `DeprecationWarning`).
