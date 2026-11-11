@@ -213,6 +213,14 @@ class TestSetNestedValue:
         set_nested_value(obj, 'config["my.key"]', "value")
         assert obj == {"config": {"my.key": "value"}}
 
+    @pytest.mark.parametrize("path", ["", ".", ".."])
+    def test_path_naming_no_field_raises(self, path):
+        """A path with no segments is a ValueError, not an IndexError."""
+        obj = {"foo": "bar"}
+        with pytest.raises(ValueError, match="names no field"):
+            set_nested_value(obj, path, "value")
+        assert obj == {"foo": "bar"}
+
 
 # =============================================================================
 # Key Validation Tests
