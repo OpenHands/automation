@@ -584,6 +584,74 @@ class TestValidateDraft:
         assert response.status_code == 200
         assert response.json()["valid"] is True
 
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {},
+            {"tags": []},
+            {"tags": [" Example Tag ", "example-tag", "Another\tTag"]},
+            {"tags": ["a" * 50] + [f"tag-{i}" for i in range(9)]},
+            {"tags": ["duplicate"] * 11},
+        ],
+        ids=["omitted", "empty", "normalized", "limits", "duplicates"],
+    )
+    async def test_raw_draft_tags_are_valid(self, async_client, fields):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight({**BUNDLE_DRAFT, **fields}, endpoint="/v1"),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert response.json()["errors"] == []
+
+    @pytest.mark.parametrize(
+        ("tags", "field", "code"),
+        [
+            ([f"tag-{i}" for i in range(11)], "tags", "value_error"),
+            (["a" * 51], "tags", "value_error"),
+            (["Bad Tag!"], "tags", "value_error"),
+            ([" "], "tags", "value_error"),
+            ("example-tag", "tags", "list_type"),
+            (None, "tags", "list_type"),
+            ([123], "tags[0]", "string_type"),
+        ],
+    )
+    async def test_raw_draft_tags_errors(self, async_client, tags, field, code):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight({**BUNDLE_DRAFT, "tags": tags}, endpoint="/v1"),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is False
+        assert addressed_errors(response.json()) == [(field, code)]
+
+    async def test_raw_draft_tags_do_not_allow_unknown_fields(self, async_client):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**BUNDLE_DRAFT, "tags": [], "unexpected": "value"}, endpoint="/v1"
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is False
+        assert addressed_errors(response.json()) == [("unexpected", "extra_forbidden")]
+
+    @pytest.mark.parametrize("endpoint", ["/v1/preset/prompt", "/v1/preset/plugin"])
+    async def test_preset_draft_tags_remain_forbidden(self, async_client, endpoint):
+        draft = {**CRON_DRAFT, "tags": ["example-tag"]}
+        if endpoint == "/v1/preset/plugin":
+            draft["plugins"] = [{"source": "github:OpenHands/extensions"}]
+        response = await async_client.post(
+            VALIDATE_URL, json=preflight(draft, endpoint=endpoint)
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is False
+        assert addressed_errors(response.json()) == [("tags", "extra_forbidden")]
+
     async def test_bundle_draft_reports_schema_errors(self, async_client):
         """A body the raw create endpoint would 422 is caught before creation."""
         draft = {**BUNDLE_DRAFT}
