@@ -215,3 +215,34 @@ async def test_only_draft_creator_can_mutate_or_dispatch_materialized_draft(
         .all()
     )
     assert [run.id for run in runs] == [uuid.UUID(first_run["id"])]
+
+
+async def test_raw_draft_tags_survive_dispatch_and_updates(async_client):
+    response = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1",
+            "draft": {**_raw_body(), "tags": [" TEAM ", "team", "qa"]},
+        },
+    )
+    assert response.status_code == 201, response.text
+    draft_id = response.json()["id"]
+    automation_id = None
+    for tags, expected in [
+        (None, ["team", "qa"]),
+        (["Updated"], ["updated"]),
+        ([], []),
+    ]:
+        if tags is not None:
+            response = await async_client.patch(
+                f"/api/automation/v1/drafts/{draft_id}",
+                json={"draft": {**_raw_body(), "tags": tags}},
+            )
+            assert response.status_code == 200, response.text
+        run = await _dispatch(async_client, draft_id)
+        if automation_id is not None:
+            assert run["automation_id"] == automation_id
+        automation_id = run["automation_id"]
+        response = await async_client.get(f"/api/automation/v1/{automation_id}")
+        assert response.status_code == 200, response.text
+        assert response.json()["tags"] == expected
