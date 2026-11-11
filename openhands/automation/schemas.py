@@ -397,6 +397,20 @@ def reject_public_draft_state(state: Any) -> Any:
     return state
 
 
+def reject_explicit_null(value: Any, info: ValidationInfo) -> Any:
+    """Refuse an explicit ``null`` for a PATCH field backed by a NOT NULL column.
+
+    Field validators run only for fields the client sent, so omitting the
+    field still means "leave it unchanged"; sending ``null`` is a 422 instead
+    of a constraint failure at commit.
+    """
+    if value is None:
+        raise ValueError(
+            f"{info.field_name} cannot be null; omit it to leave it unchanged"
+        )
+    return value
+
+
 def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
@@ -790,6 +804,13 @@ class UpdateAutomationRequest(BaseModel):
     def validate_public_state(cls, v: Any) -> Any:
         return reject_public_draft_state(v)
 
+    # state is NOT NULL too, but an explicit null there has always been a
+    # no-op (the handler skips it), so it is left out on purpose.
+    @field_validator("name", "trigger", "tarball_path", "entrypoint", "enabled")
+    @classmethod
+    def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
+        return reject_explicit_null(v, info)
+
     @field_validator("tarball_path")
     @classmethod
     def validate_tarball_path(cls, v: str | None) -> str | None:
@@ -1049,6 +1070,11 @@ class CustomWebhookUpdate(BaseModel):
     signature_scheme: str | None = Field(default=None, max_length=50)
     event_id_header: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
+
+    @field_validator("name", "event_key_expr", "signature_header", "enabled")
+    @classmethod
+    def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
+        return reject_explicit_null(v, info)
 
     @field_validator("signature_scheme")
     @classmethod
