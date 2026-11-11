@@ -87,6 +87,7 @@ from openhands.automation.schemas import (
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
+    continue_conversation_keep_alive,
 )
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.tags import normalize_tag
@@ -381,21 +382,12 @@ async def create_automation_from_plugin_spec(
         session=session,
     )
 
-    keep_alive = body.keep_alive
-    if (
-        isinstance(trigger, EventTrigger)
-        and trigger.destination == "continue_conversation"
-    ):
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would destroy "
-                    "the conversation the next event continues"
-                ),
-            )
-        keep_alive = True
+    # The trigger may come from the manifest, so the rule is applied here
+    # rather than on the request model.
+    try:
+        keep_alive = continue_conversation_keep_alive(trigger, body.keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     state = model_automation_state(body.state, body.enabled)
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
@@ -1047,19 +1039,13 @@ async def update_automation(
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
     trigger = update_data.get("trigger") or auto.trigger or {}
-    if trigger.get("destination") == "continue_conversation":
-        keep_alive = update_data.get("keep_alive", auto.keep_alive)
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would "
-                    "destroy the conversation the next event continues"
-                ),
-            )
-        if keep_alive is not True:
-            update_data["keep_alive"] = True
+    keep_alive = update_data.get("keep_alive", auto.keep_alive)
+    try:
+        settled_keep_alive = continue_conversation_keep_alive(trigger, keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if settled_keep_alive is not keep_alive:
+        update_data["keep_alive"] = settled_keep_alive
 
     disable_event: AutomationDisableEvent | None = None
     skip_pending_reason: str | None = None

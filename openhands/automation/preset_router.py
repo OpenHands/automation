@@ -61,6 +61,7 @@ from openhands.automation.schemas import (
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
+    continue_conversation_keep_alive,
     normalize_automation_state_enabled,
     reject_public_draft_state,
 )
@@ -292,6 +293,15 @@ class CreatePromptAutomationRequest(BaseModel):
             if isinstance(repos, (str, dict)):
                 data["repos"] = [repos]
         return data
+
+    @model_validator(mode="after")
+    def keep_alive_for_continued_conversations(
+        self,
+    ) -> "CreatePromptAutomationRequest":
+        self.keep_alive = continue_conversation_keep_alive(
+            self.trigger, self.keep_alive
+        )
+        return self
 
 
 def _add_file_to_tar(
@@ -971,6 +981,15 @@ class CreatePluginAutomationRequest(BaseModel):
                     "'experiment_id' can only be used with 'variants', not 'plugins'."
                 )
 
+        return self
+
+    @model_validator(mode="after")
+    def keep_alive_for_continued_conversations(
+        self,
+    ) -> "CreatePluginAutomationRequest":
+        self.keep_alive = continue_conversation_keep_alive(
+            self.trigger, self.keep_alive
+        )
         return self
 
 
