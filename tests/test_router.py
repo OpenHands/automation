@@ -5681,13 +5681,13 @@ class TestAutomationChangeEvents:
         assert body["changes"][0]["actor_kind"] == "user"
         assert body["changes"][0]["actor_user_id"] == str(TEST_USER_ID)
 
-    async def test_changes_endpoint_orders_equal_timestamps_by_id(
+    async def test_changes_endpoint_orders_same_second_changes_newest_first(
         self, async_client, async_session
     ):
         automation = await _seed_s3_automation(async_session)
-        same_time = utcnow()
+        same_time = utcnow().replace(microsecond=100_000)
         ids = [uuid.UUID(int=n) for n in (3, 1, 2)]  # inserted out of id order
-        for event_id in ids:
+        for index, event_id in enumerate(ids):
             async_session.add(
                 AutomationChangeEvent(
                     id=event_id,
@@ -5697,7 +5697,9 @@ class TestAutomationChangeEvents:
                     actor_kind="user",
                     action="update",
                     changed_fields=[],
-                    created_at=same_time,
+                    created_at=same_time.replace(
+                        microsecond=same_time.microsecond + index
+                    ),
                 )
             )
         await async_session.commit()
@@ -5709,7 +5711,7 @@ class TestAutomationChangeEvents:
             )
             seen.append(response.json()["changes"][0]["id"])
 
-        assert seen == [str(uuid.UUID(int=n)) for n in (3, 2, 1)]
+        assert seen == [str(uuid.UUID(int=n)) for n in (2, 1, 3)]
 
     async def test_changes_endpoint_other_org_404(self, async_client, async_session):
         automation = Automation(
