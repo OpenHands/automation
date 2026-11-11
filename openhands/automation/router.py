@@ -1636,7 +1636,8 @@ async def list_automation_runs(
     result = await session.execute(
         select(AutomationRun)
         .where(AutomationRun.automation_id == automation_id)
-        .order_by(AutomationRun.created_at.desc())
+        # id breaks exact created_at ties, so offset pages stay stable.
+        .order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc())
         .offset(offset)
         .limit(limit)
     )
@@ -1662,8 +1663,9 @@ async def list_automation_changes(
     Field names only, never values. A soft-deleted automation is a 404, so its
     history is not readable through the API.
 
-    Known limit: rows with the same ``created_at`` (one transaction, or one
-    second on SQLite) come back in a stable but not time order.
+    ``created_at`` is written from Python with microseconds, so changes made in
+    the same second still list newest first on SQLite. Rows written before that
+    (whole seconds on SQLite) can tie; ``id`` keeps their order stable.
     """
     await _get_org_automation(session, automation_id, user.org_id)
 
@@ -1681,8 +1683,8 @@ async def list_automation_changes(
             AutomationChangeEvent.org_id == user.org_id,
             AutomationChangeEvent.automation_id == automation_id,
         )
-        # id breaks ties: rows of one transaction share a timestamp, and SQLite
-        # stores whole seconds, so paging would otherwise be unstable.
+        # id only breaks exact ties (rows from before created_at had a Python
+        # default), so offset pages keep one order across requests.
         .order_by(
             AutomationChangeEvent.created_at.desc(), AutomationChangeEvent.id.desc()
         )

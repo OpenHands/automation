@@ -262,8 +262,8 @@ Preconditions:
 ## Gotchas
 
 - There is no `GET /v1/runs/{id}`: poll `GET /v1/{id}/runs` (`run wait`
-  does). `created_at` has one-second resolution, so runs created in the same
-  second have no guaranteed order; `run wait --run-id` avoids depending on it.
+  does). The run list orders by `created_at` (microseconds) and then `id`;
+  `run wait --run-id` still avoids depending on list order.
 - A run that calls back within a second passes through `RUNNING` faster than
   a poll can see; assert `started_at`, `bash_command_id` and the history
   instead, or use the `sleep` fixture when RUNNING itself is under test.

@@ -170,7 +170,6 @@ Preconditions:
 - **List, page and filter (`F05.list`).** Newest first, stable paging, creator filter, bounds.
   ```sh
   L1=$(control-automation api POST /v1 --json '{"name":"qa-list-1","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
-  sleep 1.2
   L2=$(control-automation api POST /v1 --json '{"name":"qa-list-2","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
   LT=$(control-automation api GET /v1 --expect 200 --check automations.0.id eq "$L2" --check automations.1.id eq "$L1" --quiet --field total)
   control-automation api GET /v1 --query limit=1 --query offset=1 --expect 200 --check automations len-eq 1 --check automations.0.id eq "$L1" --check total eq "$LT" --save F05.list/page
@@ -181,9 +180,9 @@ Preconditions:
   control-automation api GET /v1 --query limit=101 --expect 422
   control-automation api GET /v1 --query offset=-1 --expect 422
   ```
-  The `sleep` is deliberate: `created_at` has one-second precision, and
-  rows in the same second are ordered by random UUID. `others` is empty
-  because the local user is the only user.
+  No `sleep` is needed: `created_at` has microseconds, so back-to-back
+  creates list newest first. `others` is empty because the local user is
+  the only user.
 - **Tags, tag filter and facets (`F05.tags`).** Normalized on write, filtered and counted on read.
   ```sh
   G1=$(control-automation api POST /v1 --json '{"name":"qa-tags-1","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","tags":["QA Tags","qa-tags","qa-extra"]}' --expect 201 --check tags.0 eq qa-tags --check tags.1 eq qa-extra --check tags len-eq 2 --save F05.tags/create --field id)
@@ -336,8 +335,14 @@ Preconditions:
 - `http://` is accepted by the schema regex but refused by the handler;
   the schema's error message lists `http://` and omits `oh-internal://`.
   `https://`, `s3://` and `gs://` are never fetched at create time.
-- `created_at` has one-second precision; ordering within a second is by
-  random UUID.
+- Every ORM-written `created_at` (automations, runs, uploads, webhooks,
+  change rows and the rest) comes from Python with microseconds, so
+  back-to-back writes (a create and an immediate PATCH) list newest first.
+  The raw SQL inserts into `automation_service_metadata` still use
+  `CURRENT_TIMESTAMP`; nothing reads that column. Rows written by a release
+  before that fix have whole-second times on SQLite and tie within a
+  second; ties order by random UUID (`id` desc), stable across pages but
+  not in time order.
 - PATCH with `null` on a NOT NULL column is a 500 today (`F05.patch-null`);
   send only the fields you change, never `null` placeholders.
 - `enabled` is deprecated in favor of `state` but still accepted on create
