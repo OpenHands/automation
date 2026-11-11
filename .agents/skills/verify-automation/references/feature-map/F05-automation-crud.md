@@ -335,8 +335,8 @@ Preconditions:
 - `http://` is accepted by the schema regex but refused by the handler;
   the schema's error message lists `http://` and omits `oh-internal://`.
   `https://`, `s3://` and `gs://` are never fetched at create time.
-- `created_at` of automations, runs, uploads, webhooks and change rows is
-  written from Python with microseconds, so back-to-back writes (a create
+- Every table's `created_at` (automations, runs, uploads, webhooks, change
+  rows and the rest) is written from Python with microseconds, so back-to-back writes (a create
   and an immediate PATCH) list newest first. Rows written by a release
   before that fix have whole-second times on SQLite and tie within a second;
   ties order by random UUID (`id` desc), stable across pages but not in

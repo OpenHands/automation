@@ -193,9 +193,12 @@ class Automation(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # Python default, not only CURRENT_TIMESTAMP: SQLite stores the server
-    # default in whole seconds, so same-second rows would tie in every
-    # newest-first list. See utils/time.py:utcnow.
+    # Every created_at in this module is written from Python (utcnow, with
+    # microseconds); CURRENT_TIMESTAMP is only the fallback for raw SQL. SQLite
+    # stores the server default in whole seconds, so same-second rows would tie
+    # in newest-first lists and compare wrongly against another table's
+    # created_at (e.g. runs vs. the last disable event in utils/unhealthy.py).
+    # Keep one clock for all of them.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -352,7 +355,7 @@ class AutomationRun(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=utcnow,  # sub-second order on SQLite, see Automation.created_at
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -441,6 +444,7 @@ class AutomationDraft(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -486,6 +490,7 @@ class AutomationDisableEvent(Base):
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
         index=True,
@@ -577,7 +582,7 @@ class TarballUpload(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=utcnow,  # sub-second order on SQLite, see Automation.created_at
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -679,7 +684,7 @@ class CustomWebhook(Base):
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=utcnow,  # sub-second order on SQLite, see Automation.created_at
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -771,6 +776,7 @@ class AutomationServiceMetadata(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -808,6 +814,7 @@ class AutomationKVMeta(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -862,6 +869,7 @@ class AutomationKV(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -927,6 +935,7 @@ class AutomationGitSyncState(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -996,6 +1005,7 @@ class AutomationGitSyncOrgConfig(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
