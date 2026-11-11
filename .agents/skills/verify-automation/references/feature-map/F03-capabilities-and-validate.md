@@ -17,19 +17,19 @@ Routes: `GET /api/automation/v1/capabilities`, `POST /api/automation/v1/validate
 
 ## Sub-features
 
-- `F03.caps-default`: on a default local run capabilities answer `ready:true`, `maxAutomationTimeoutSeconds:1800`, `triggerKinds:["cron"]`, no event sources or event types, no `triggers.event`, the sorted feature list (with `customTarball`, `agentProfiles` and `kvStore`), and `repoProviders`: the pinned SDK's providers, sorted (`bitbucket`, `github`, `gitlab` with SDK 1.57.0; `azure_devops` joins from 1.58.0), so the recipe checks shape rather than an exact list.
+- `F03.caps-default`: on a default local run capabilities answer `ready:true`, `maxAutomationTimeoutSeconds:1800`, `triggerKinds:["cron"]`, no event sources or event types, no `triggers.event`, the sorted feature list (with `customTarball`, `agentProfiles`, `kvStore` and `pluginConfigUpdate`, added by #708), and `repoProviders`: the pinned SDK's providers, sorted (`azure_devops`, `bitbucket`, `bitbucket_data_center`, `github`, `gitlab` with SDK 1.62.0), so the recipe checks shape rather than an exact list.
 - `F03.caps-cron`: `triggers.cron.minIntervalSeconds` is `max(60, scheduler interval)` (60 on a run), and `timezones` lists every IANA zone including `UTC`.
 - `F03.auth`: both routes need a key (401 without one).
 - `F03.caps-custom-webhook`: an enabled custom webhook of the caller's org adds its source, the `event` trigger kind, `webhookDelivery` and `triggers.event` (`filterLanguage:"jmespath"`, `filterFunctions`); `eventTypes` stays empty.
 - `F03.caps-webhook-disabled`: disabling that webhook removes the source and everything it added.
-- `F03.caps-builtin-sources`: with `AUTOMATION_WEBHOOK_SECRET` set, `bitbucket_data_center`, `github` and `jira_dc` join the sources and `eventTypes` lists the GitHub patterns.
+- `F03.caps-builtin-sources`: with `AUTOMATION_WEBHOOK_SECRET` set, `azure_devops` (#626; catalog in #687), `bitbucket_data_center`, `github` and `jira_dc` join the sources, `eventTypes` lists the GitHub patterns and `eventTypesBySource` gives each built-in source its own catalog.
 - `F03.caps-config`: `AUTOMATION_SCHEDULER_INTERVAL_SECONDS`, `AUTOMATION_MAX_RUN_DURATION` and `AUTOMATION_KV_SECRET` move `minIntervalSeconds`, `maxAutomationTimeoutSeconds` and the `kvStore` feature.
 - `F03.caps-not-ready`: in cloud mode without `AUTOMATION_SERVICE_KEY` capabilities answer `ready:false` with every list empty and `triggers:{}`.
 - `F03.validate-valid`: a valid preset-prompt draft and a valid raw `/v1` draft answer 200 `{valid:true, errors:[], sampleEventMatched:null}`; the envelope accepts camelCase or snake_case keys.
 - `F03.validate-schema-errors`: an invalid draft answers 200 `valid:false` with Pydantic errors addressed by dotted path (`name` missing, unknown key `extra_forbidden`, `repos[0].url`, `trigger.schedule` invalid cron, `trigger.timezone`, `timeout` over the maximum).
 - `F03.validate-envelope`: a bad `endpoint` or an unknown envelope key is a 422, not a 200.
 - `F03.validate-interval-too-short`: a schedule faster than the deployment's floor gets `interval_too_short` on `trigger.schedule`.
-- `F03.validate-event-source`: an event trigger on a source nothing delivers gets `event_source_not_configured` on `trigger.source`.
+- `F03.validate-event-source`: an event trigger on a source nothing delivers gets `event_source_not_configured` on `trigger.source` ("No event delivery is configured for '<source>' events in this deployment.", wording since #611).
 - `F03.validate-event-type`: with GitHub built in, a pattern GitHub cannot deliver gets `event_type_not_delivered` on `trigger.on`.
 - `F03.validate-sample-event`: for a configured source, `sampleEvent` reports `sampleEventMatched` true or false (event key and filter), and a payload the source cannot parse gets `unparseable_sample_event`.
 - `F03.validate-agent-profile`: on `/v1` and the prompt and plugin presets, `agent_profile_id` with `model` gets `invalid_agent_profile` ("An agent profile already specifies the model"); a non-UUID id is a schema error; in local mode a profile alone is not looked up.
@@ -65,7 +65,7 @@ Preconditions:
 
 - **Default capabilities (`F03.caps-default`).** The full feature list of a local run, which always has a KV secret.
   ```sh
-  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDescription", "automationDrafts", "conversationDispatch", "customTarball", "kvStore", "mcpTools", "pluginSpecAgentProfiles", "presetAgentProfiles", "presetPlugin", "presetPrompt", "repoClone", "repoUpdate", "serviceAccountRunAs"]' --check repoProviders contains github --check repoProviders len-ge 3 --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
+  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDescription", "automationDrafts", "conversationDispatch", "customTarball", "kvStore", "mcpTools", "pluginConfigUpdate", "pluginSpecAgentProfiles", "presetAgentProfiles", "presetPlugin", "presetPrompt", "repoClone", "repoUpdate", "serviceAccountRunAs"]' --check repoProviders contains github --check repoProviders len-ge 3 --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
   ```
 - **Cron constraints (`F03.caps-cron`).** The run's scheduler polls every 5 s, but the floor never goes below 60.
   ```sh
@@ -121,7 +121,7 @@ Preconditions:
   ```
 - **Unconfigured event source (`F03.validate-event-source`).** Without the built-in secret nothing delivers `github` events.
   ```sh
-  control-automation api POST /v1/validate --json '{"endpoint":"/v1/preset/prompt","draft":{"name":"qa","prompt":"hi","trigger":{"type":"event","source":"github","on":"push"}}}' --expect 200 --check valid eq false --check errors.0.field eq trigger.source --check errors.0.code eq event_source_not_configured --check errors.0.message eq "No webhook is configured to deliver 'github' events to this deployment." --save F03.validate-event-source/github
+  control-automation api POST /v1/validate --json '{"endpoint":"/v1/preset/prompt","draft":{"name":"qa","prompt":"hi","trigger":{"type":"event","source":"github","on":"push"}}}' --expect 200 --check valid eq false --check errors.0.field eq trigger.source --check errors.0.code eq event_source_not_configured --check errors.0.message eq "No event delivery is configured for 'github' events in this deployment." --save F03.validate-event-source/github
   ```
 - **Agent profile rules (`F03.validate-agent-profile`).** A profile already carries the model; local mode does not look the profile up.
   ```sh
@@ -139,7 +139,7 @@ Preconditions:
 - **Built-in sources (`F03.caps-builtin-sources`) and GitHub event types (`F03.validate-event-type`).** Restart with the built-in webhook secret, read capabilities, validate a GitHub pattern that cannot be delivered, then restore.
   ```sh
   control-automation restart --service automation --env AUTOMATION_WEBHOOK_SECRET=qa-builtin-secret
-  control-automation api GET /v1/capabilities --expect 200 --quiet --check eventSources eq '["bitbucket_data_center", "github", "jira_dc"]' --check triggerKinds eq '["cron", "event"]' --check eventTypes contains push --check eventTypes contains 'pull_request.*' --check features contains webhookDelivery --save F03.caps-builtin-sources/capabilities
+  control-automation api GET /v1/capabilities --expect 200 --quiet --check eventSources eq '["azure_devops", "bitbucket_data_center", "github", "jira_dc"]' --check triggerKinds eq '["cron", "event"]' --check eventTypes contains push --check eventTypes contains 'pull_request.*' --check eventTypesBySource.azure_devops contains git.pullrequest.created --check eventTypesBySource.github contains push --check features contains webhookDelivery --save F03.caps-builtin-sources/capabilities
   control-automation api POST /v1/validate --json '{"endpoint":"/v1/preset/prompt","draft":{"name":"qa","prompt":"hi","trigger":{"type":"event","source":"github","on":"nonexistent.*"}}}' --expect 200 --check valid eq false --check errors.0.field eq trigger.on --check errors.0.code eq event_type_not_delivered --check errors.0.message eq "This deployment cannot parse 'nonexistent.*' events from GitHub." --save F03.validate-event-type/nonexistent
   control-automation api POST /v1/validate --json '{"endpoint":"/v1/preset/prompt","draft":{"name":"qa","prompt":"hi","trigger":{"type":"event","source":"github","on":"pull_request.opened"}}}' --expect 200 --check valid eq true
   control-automation restart --service automation --reset-env
@@ -179,8 +179,11 @@ Preconditions:
 - Validate is advisory: it does not check `tarball_path` scheme strictness
   (`http://` passes), upload ownership or existence; creation does.
 - Custom webhook sources are per organization and only while enabled; the
-  built-in three need `AUTOMATION_WEBHOOK_SECRET`. `eventTypes` comes from
-  GitHub's catalog only, so a custom-only deployment reports `[]`.
+  four built-in sources (`azure_devops`, `bitbucket_data_center`, `github`,
+  `jira_dc`) need `AUTOMATION_WEBHOOK_SECRET`. `eventTypes` comes from
+  GitHub's catalog only, so a custom-only deployment reports `[]`;
+  `eventTypesBySource` carries every catalog source's types (a custom source
+  has no catalog and no entry).
 - `sampleEventMatched` is `null` (present, not missing) unless the trigger
   is an event trigger on a configured source and the sample parses.
 - In local mode the agent-profile lookup and the model-profile check are
