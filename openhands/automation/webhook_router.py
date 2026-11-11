@@ -169,7 +169,7 @@ async def list_webhooks(
     query = (
         select(CustomWebhook)
         .where(CustomWebhook.org_id == auth.org_id)
-        .order_by(CustomWebhook.created_at.desc())
+        .order_by(CustomWebhook.created_at.desc(), CustomWebhook.id.desc())
         .limit(limit)
         .offset(offset)
     )

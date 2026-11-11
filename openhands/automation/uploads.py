@@ -251,7 +251,9 @@ async def list_uploads(
 
     # Fetch paginated results
     result = await session.execute(
-        base_query.order_by(TarballUpload.created_at.desc()).offset(offset).limit(limit)
+        base_query.order_by(
+            TarballUpload.created_at.desc(), TarballUpload.id.desc()
+        ).offset(offset).limit(limit)
     )
     uploads = result.scalars().all()
 
