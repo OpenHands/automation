@@ -41,6 +41,10 @@ PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "prese
 
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
+    # Windows has no AF_UNIX; without this guard the module fails to import
+    # there and none of its tests run.
+    if not hasattr(socket, "AF_UNIX"):
+        return False
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")
@@ -593,6 +597,51 @@ class TestPresetEntrypoint:
         monkeypatch.setattr("openhands.automation.preset_router.os.name", "nt")
         assert _get_preset_entrypoint() == ".venv/Scripts/python.exe main.py"
 
+    @pytest.mark.parametrize(
+        "generate",
+        [
+            lambda: _generate_tarball("Say hello"),
+            lambda: _generate_plugin_tarball(
+                [PluginSource(source="github:owner/repo")], "Say hello"
+            ),
+        ],
+        ids=["prompt", "plugin"],
+    )
+    @pytest.mark.parametrize(
+        ("os_name", "expected"),
+        [("posix", {"setup.sh"}), ("nt", {"setup.sh", "setup.py"})],
+    )
+    def test_windows_tarballs_carry_setup_py(
+        self, monkeypatch, generate, os_name, expected
+    ):
+        """A Windows agent server cannot run setup.sh, so it gets setup.py too."""
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", os_name)
+        with tarfile.open(fileobj=io.BytesIO(generate()), mode="r:gz") as tar:
+            names = set(tar.getnames())
+            setup_py = tar.extractfile("setup.py") if "setup.py" in names else None
+            setup_py_source = setup_py.read().decode() if setup_py else None
+
+        assert {"setup.sh", "setup.py"} & names == expected
+        if setup_py_source is not None:
+            assert setup_py_source == (PRESETS_DIR / "setup.py").read_text()
+
+    def test_setup_py_mirrors_setup_sh(self):
+        """setup.py must install what setup.sh installs, the same way."""
+        source = (PRESETS_DIR / "setup.py").read_text()
+        compile(source, "setup.py", "exec")
+        setup_sh = (PRESETS_DIR / "prompt" / "setup.sh").read_text()
+        for needle in (
+            "/sdk-version",
+            "cpython>=3.12,<3.14",
+            "openhands-sdk==",
+            "openhands-tools==",
+            "openhands-workspace==",
+            "import openhands.sdk, openhands.tools, openhands.workspace",
+            "Installing dependencies",
+        ):
+            assert needle in setup_sh
+            assert needle in source
+
     def test_prompt_setup_sh_falls_back_when_python3_missing(self):
         setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
         content = setup_sh_path.read_text()
@@ -607,6 +656,7 @@ class TestPresetEntrypoint:
         assert "command -v python" in content
         assert "command -v py" in content
 
+    @pytest.mark.skipif(os.name == "nt", reason="runs setup.sh with bash")
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     @pytest.mark.parametrize(
         "venv_python", [".venv/bin/python", ".venv/Scripts/python.exe"]
@@ -1305,6 +1355,9 @@ class TestReplaceFilesInTarball:
         """A replacement the archive lacks is added; existing files are kept."""
         # Arrange — a prompt preset created without repositories.
         original = _generate_tarball("Same prompt")
+        with tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as tar:
+            original_names = tar.getnames()
+        assert "repos_config.json" not in original_names
 
         # Act
         updated = _replace_files_in_tarball(
@@ -1320,13 +1373,8 @@ class TestReplaceFilesInTarball:
             assert repos_file is not None and prompt_file is not None
             assert json.loads(repos_file.read()) == [{"url": "owner/repo"}]
             assert prompt_file.read().decode() == "Same prompt"
-        assert names == [
-            "finish_tool_hook.py",
-            "main.py",
-            "prompt.txt",
-            "repos_config.json",
-            "setup.sh",
-        ]
+        # The original members depend on the host (Windows adds setup.py).
+        assert names == sorted([*original_names, "repos_config.json"])
 
     def test_none_removes_file(self):
         """A ``None`` replacement drops that file from the archive."""

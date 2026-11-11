@@ -1409,6 +1409,7 @@ def _load_plugin_spec_preset_files() -> dict[str, str]:
                 PLUGIN_SPEC_PRESET_DIR / "prompt_builder.py"
             ).read_text(),
             "setup.sh": (PLUGIN_SPEC_PRESET_DIR / "setup.sh").read_text(),
+            "setup.py": (PRESETS_DIR / "setup.py").read_text(),
         }
     return _PLUGIN_SPEC_PRESET_CACHE
 
@@ -1496,6 +1497,8 @@ def _build_stock_runner_tarball(
         _add_bytes(tar, "main.py", preset_files["main.py"].encode())
         _add_bytes(tar, "prompt_builder.py", preset_files["prompt_builder.py"].encode())
         _add_bytes(tar, "setup.sh", preset_files["setup.sh"].encode(), mode=0o755)
+        if os.name == "nt":
+            _add_bytes(tar, "setup.py", preset_files["setup.py"].encode())
         _add_bytes(tar, "prompt.txt", conversation_prompt(manifest, config).encode())
         _add_json(
             tar,
