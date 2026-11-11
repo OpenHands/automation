@@ -455,7 +455,10 @@ def test_stock_conversation_runner_packages_platform_setup(
         if platform == "nt":
             setup = tar.extractfile("setup.py")
             assert setup is not None
-            assert setup.read() == (plugin_specs.PRESETS_DIR / "setup.py").read_bytes()
+            # As text: a Windows checkout may hold the file with CRLF endings,
+            # and the service reads it with read_text().
+            shared_setup = (plugin_specs.PRESETS_DIR / "setup.py").read_text()
+            assert setup.read().decode() == shared_setup
         else:
             assert "setup.py" not in tar.getnames()
 
