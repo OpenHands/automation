@@ -517,11 +517,12 @@ All errors return JSON with consistent structure:
 | HTTP Status | Error Code | Description |
 |-------------|------------|-------------|
 | 400 | `invalid_request` | Malformed request body |
-| 400 | `invalid_path` | Invalid JSON path syntax |
+| 400 | `invalid_path` | Invalid JSON path syntax, or a PATCH path that names no field (`""`) |
 | 400 | `type_mismatch` | Operation doesn't match value type (e.g., incr on object) |
 | 401 | `unauthorized` | Missing or invalid token |
 | 403 | `token_expired` | JWT token has expired |
 | 404 | `key_not_found` | Key does not exist |
+| 404 | `Automation not found` | The token's (or `?automation_id=`'s) automation does not exist |
 | 409 | `key_exists` | Key already exists (for `?nx=true`) |
 | 409 | `key_not_exists` | Key doesn't exist (for `?xx=true`) |
 

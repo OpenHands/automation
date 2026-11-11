@@ -391,7 +391,7 @@ on 409 — see the example handler below.
 | 201 | Success (create) | - |
 | 400 | Bad request | Fix request (invalid key, etc.) |
 | 401 | Unauthorized | Check token |
-| 404 | Key not found | Handle missing key |
+| 404 | Key not found, or the automation no longer exists (`Automation not found`) | Handle missing key; stop using a token whose automation was deleted |
 | 409 | Conflict | Retry with backoff (see `Retry-After` header) |
 | 413 | Payload too large | Individual value over 64 KB; reduce that value |
 | 503 | Service unavailable | KV store not configured |
