@@ -4,8 +4,8 @@ How an external event becomes automation runs. A sender POSTs to
 `/v1/events/{org_id}/{source}` with no API key: the signature is the
 authentication, checked with the custom webhook's secret and scheme
 (`hmac_sha256_hex`, `standard_webhooks` or `slack_v0`, F10 configures them) or,
-for the built-ins `github`, `jira_dc` and `bitbucket_data_center`, with the
-deployment-wide `AUTOMATION_WEBHOOK_SECRET`. The service derives an event key
+for the built-ins `github`, `jira_dc`, `bitbucket_data_center` and
+`azure_devops`, with the deployment-wide `AUTOMATION_WEBHOOK_SECRET`. The service derives an event key
 (the custom webhook's JMESPath `event_key_expr`, or the provider's detection),
 records the event, deduplicates it on the delivery-id header, matches every
 enabled event automation of that org and source on `on` and the optional
@@ -13,7 +13,8 @@ JMESPath `filter`, and creates one PENDING run per match (`trigger_source:
 event`) whose script receives the event in `AUTOMATION_EVENT_PAYLOAD`. A
 `continue_conversation` trigger folds later events about the same subject into
 that run instead. Built-in forwarders also read
-`/v1/events/{source}/requested-types` to learn which event types to forward.
+`/v1/events/{source}/requested-types` to learn which event types to forward
+(each built-in's whole catalog) and, for `jira_dc`, which orgs to fan out to.
 
 Source: `openhands/automation/event_router.py`, `openhands/automation/ingest.py`, `openhands/automation/providers.py`, `openhands/automation/trigger_matcher.py`, `openhands/automation/filter_eval.py`, `openhands/automation/conversations.py`, `openhands/automation/subjects.py`, `openhands/automation/utils/webhook.py`, `openhands/automation/event_schemas/`, `openhands/automation/dispatcher.py`
 
@@ -41,7 +42,7 @@ Routes: `POST /api/automation/v1/events/{org_id}/{source}`,
 - `F11.disabled-automation`: a disabled automation is not matched; re-enabled, it is.
 - `F11.builtin-github`: with `AUTOMATION_WEBHOOK_SECRET`, a signed `{payload: <pull_request opened>}` matches `on: pull_request.opened` with a filter, a redelivery with the same `X-GitHub-Delivery` matches nothing, a body without `payload` answers 400, an unsupported GitHub event (`check_run`) answers 200 `matched:0`, and the run's `event` is the parsed model with `event_key`.
 - `F11.builtin-jira-bitbucket`: `jira_dc` keys on `payload.webhookEvent` and `bitbucket_data_center` on `payload.eventKey`; a jira payload without `webhookEvent` answers 200 `matched:0`.
-- `F11.requested-types`: `github` lists its 7 parseable event types and 8 detection rules, `jira_dc` lists the `on` patterns of enabled automations (`*` collapses to `["*"]`), a custom source answers 404, and a tampered or missing signature 401.
+- `F11.requested-types`: every built-in answers its full event catalog (#653, #687): `github` its 7 parseable event types and 8 detection rules, `bitbucket_data_center` 16 types with 16 `eventKey == '...'` rules, `azure_devops` 5 with `eventType` rules, `jira_dc` 6 with `webhookEvent` rules plus `org_ids` (the orgs with an enabled `jira_dc` automation); automations' `on` patterns do not change the list; a custom source answers 404, and a tampered or missing signature 401.
 - `F11.builtin-unconfigured`: without `AUTOMATION_WEBHOOK_SECRET` the built-ins answer 404 on both routes, even correctly signed; with it back, they answer 200.
 - `F11.continue-conversation`: with `destination: continue_conversation`, the first event on a subject creates a run, a second event on the same subject while that run is still queued answers `runs_created:[]` and `conversations_continued:[<uuid5>]`, an event without a subject creates an ordinary run, and the run starts with `AUTOMATION_CONVERSATION_ID` set to that id and the second event in `follow_up_turns`.
 
@@ -66,7 +67,7 @@ Routes: `POST /api/automation/v1/events/{org_id}/{source}`,
   fixture dumps both to `qa-env.json` in the run's workspace, which is the
   second view used here. The runs list (`GET /v1/{id}/runs`) shows
   `trigger_source: event` but not the payload.
-- Config: `AUTOMATION_WEBHOOK_SECRET` turns the three built-ins on (one shared
+- Config: `AUTOMATION_WEBHOOK_SECRET` turns the four built-ins on (one shared
   secret); `AUTOMATION_INTEGRATION_EVENT_RETENTION_DAYS` (default 14) bounds the
   dedupe window.
 
@@ -259,18 +260,26 @@ decode to the same key).
   control-automation event requested-types github --tamper --expect 401 --check detail eq 'Invalid signature'
   control-automation event requested-types github --unsigned --expect 401 --check detail eq 'Missing signature header: X-Hub-Signature-256'
   control-automation event requested-types qa-orders --expect 404 --check detail eq 'Unknown builtin webhook source: qa-orders'
-  control-automation event requested-types bitbucket_data_center --expect 200 --check event_detection_rules len-eq 0
+  control-automation event requested-types bitbucket_data_center --expect 200 --check event_types len-eq 16 --check event_types contains 'pr:opened' --check event_detection_rules len-eq 16 --check event_detection_rules.0.event_type eq 'pr:comment:added' --check event_detection_rules.0.jmespath eq "eventKey == 'pr:comment:added'" --check org_ids eq null --save F11.requested-types/bitbucket
+  control-automation event requested-types azure_devops --expect 200 --check event_types len-eq 5 --check event_types contains git.pullrequest.created --check event_detection_rules len-eq 5 --check event_detection_rules.0.jmespath eq "eventType == 'git.pullrequest.created'" --check org_ids eq null
   RT_AID=$(control-automation fixture automation --kind callback --name 'qa jira types' --event-source jira_dc --extra-json '{"trigger":{"type":"event","source":"jira_dc","on":["jira:worklog_updated","jira:issue_deleted"]}}' --field id)
-  control-automation event requested-types jira_dc --expect 200 --check event_types contains 'jira:worklog_updated' --check event_types contains 'jira:issue_deleted' --check event_detection_rules len-eq 0 --save F11.requested-types/jira
+  RT_ORG=$(control-automation api GET "/v1/$RT_AID" --expect 200 --field org_id)
+  control-automation event requested-types jira_dc --expect 200 --check event_types len-eq 6 --check event_types contains 'jira:issue_deleted' --check event_types not-contains 'jira:worklog_updated' --check event_detection_rules len-eq 6 --check event_detection_rules.0.jmespath eq "webhookEvent == 'comment_created'" --check org_ids contains "$RT_ORG" --save F11.requested-types/jira
   control-automation api PATCH "/v1/$RT_AID" --json '{"trigger":{"type":"event","source":"jira_dc","on":"*"}}' --expect 200
-  control-automation event requested-types jira_dc --expect 200 --check event_types len-eq 1 --check event_types.0 eq '*'
+  control-automation event requested-types jira_dc --expect 200 --check event_types len-eq 6 --check event_types not-contains '*'
   control-automation api PATCH "/v1/$RT_AID" --json '{"enabled":false}' --expect 200
-  control-automation event requested-types jira_dc --expect 200 --field event_types | python3 -c 'import json,sys; t=json.load(sys.stdin); assert "*" not in t and "jira:worklog_updated" not in t, t'
+  control-automation event requested-types jira_dc --expect 200 --check event_types len-eq 6 --save F11.requested-types/jira-disabled
   ```
-  `github` always lists its seven parseable families. `jira_dc` lists the `on`
-  patterns of enabled automations (no splitting on `:`), a `*` pattern
-  collapses the list to `["*"]`, and disabling that automation removes its
-  patterns again.
+  Since the event catalogs (#653; Azure DevOps #687), every built-in answers
+  with its whole catalog whatever automations exist: `github` its seven
+  parseable families and eight structural rules; `bitbucket_data_center`
+  (16), `jira_dc` (6) and `azure_devops` (5) one `<field> == '<type>'` rule
+  per type (`eventKey`, `webhookEvent`, `eventType`). An automation's `on`
+  patterns (`jira:worklog_updated`, `*`) do not show up. `org_ids` is set only
+  for `jira_dc`, whose forwarder fans out to every org with an enabled
+  `jira_dc` event automation; the other sources answer `null`. Disabling the
+  test automation does not drop the org from `org_ids` here, because
+  `F11.builtin-jira-bitbucket` leaves `qa jira` enabled in the same org.
 - **Built-ins without the shared secret (`F11.builtin-unconfigured`).** Restart with an empty secret, probe, then restore it.
   ```sh
   control-automation restart --service automation --env AUTOMATION_WEBHOOK_SECRET=
@@ -316,10 +325,12 @@ decode to the same key).
   run's `AUTOMATION_EVENT_PAYLOAD.event` differs by source: the
   `{payload, source_override, event_key}` wrapper for custom webhooks, the
   parsed provider model for GitHub (only modeled fields survive), and
-  `{payload, ..., event_key}` for `jira_dc` and `bitbucket_data_center`.
+  `{payload, ..., event_key}` for `jira_dc`, `bitbucket_data_center` and
+  `azure_devops`.
 - `hmac_sha256_hex` deliveries can be replayed unless the webhook names an
-  `event_id_header`; the built-in `github` dedupes on `X-GitHub-Delivery`,
-  `jira_dc` and `bitbucket_data_center` not at all. The dedupe window is the
+  `event_id_header`; the built-ins `github`, `jira_dc` and
+  `bitbucket_data_center` dedupe on the `X-GitHub-Delivery` header the
+  forwarder sets (#686), `azure_devops` not at all (it gets no delivery id). The dedupe window is the
   event retention (`AUTOMATION_INTEGRATION_EVENT_RETENTION_DAYS`).
 - The built-ins accept any org id in the URL (the secret is deployment-wide);
   runs are created only for that org's automations, so send to the local org
@@ -339,7 +350,8 @@ decode to the same key).
   turn for a started run is posted to the Agent Server conversation instead,
   and the callback fixture never opens one, so that branch falls back to a new
   run here.
-- `requested-types` for `jira_dc` and `bitbucket_data_center` is not scoped
-  to an org: it lists patterns from every org's enabled automations.
+- `requested-types` is not scoped to an org: it lists a built-in's whole
+  catalog, and `jira_dc`'s `org_ids` covers every org's enabled `jira_dc`
+  event automations.
 - Event routes have no rate limit and no API key; a wrong key or no key makes
   no difference to them.

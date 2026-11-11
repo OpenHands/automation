@@ -95,15 +95,15 @@ Preconditions:
   download time.
 - **tarball_path errors (`F05.tarball-path-errors`).** Schema, scheme, format and existence, each refused.
   ```sh
-  control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"ftp://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 422 --check detail.0.loc.1 eq tarball_path --check detail.0.msg contains 'tarball_path must start with s3://, gs://, http://, or https://' --save F05.tarball-path-errors/ftp
+  control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"ftp://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 422 --check detail.0.loc.1 eq tarball_path --check detail.0.msg contains 'tarball_path must start with oh-internal://, s3://, gs://, or https://' --save F05.tarball-path-errors/ftp
   control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"http://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 422 --check detail eq 'Invalid tarball_path. Must be oh-internal://uploads/{uuid} or a public URL (https://, s3://, gs://)' --save F05.tarball-path-errors/http
   control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"oh-internal://uploads/not-a-uuid","entrypoint":"bash run.sh"}' --expect 422 --check detail eq 'Invalid internal upload URL format. Expected: oh-internal://uploads/{uuid}'
   control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"oh-internal://uploads/00000000-0000-4000-8000-000000000000","entrypoint":"bash run.sh"}' --expect 404 --check detail eq 'Upload not found'
   control-automation state sql "SELECT count(*) AS n FROM automations WHERE name = 'qa-bad-tp'" --check rows.0.n eq 0
   ```
   `http://` passes the schema regex and is refused by the handler's scheme
-  check; the schema message never mentions `oh-internal://`, which it
-  nevertheless accepts.
+  check; the schema message lists only the accepted schemes (since #654),
+  so it omits `http://` although the regex lets it through.
 - **Entrypoint rules (`F05.entrypoint-rules`).** Each unsafe form has its own message; spaces are fine.
   ```sh
   control-automation api POST /v1 --json '{"name":"qa-ep","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"/bin/run"}' --expect 422 --check detail.0.msg eq 'Value error, entrypoint must be a relative path, not an absolute path' --save F05.entrypoint-rules/absolute
@@ -158,7 +158,7 @@ Preconditions:
   control-automation api GET "/v1/$KID" --expect 200 --check keep_alive eq true --check trigger.destination eq continue_conversation
   control-automation api POST /v1 --json '{"name":"qa-continue-off","trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","keep_alive":false}' --expect 422 --check detail.0.msg contains "keep_alive cannot be false when destination is 'continue_conversation'"
   ```
-  Presets do not apply this rule; see `F06.continue-keep-alive`.
+  The preset routes apply the same rule (`F06.continue-keep-alive`).
 - **Template idempotency (`F05.template-idempotent`).** The second create with the same template id returns the first automation unchanged.
   ```sh
   TPL="qa-tpl-$(date +%s%N)"
@@ -337,10 +337,12 @@ Preconditions:
 - `POST /v1` checks the template before anything else except the
   profile/model pair: a repeat with an invalid tarball, model or trigger
   still answers 200 with the existing automation. The lookup is per org
-  (not per user) and matches inactive and draft-state rows too; presets
-  share it (`F06.template-shared`). Use a fresh `template.id` per replay.
+  (not per user) and matches inactive rows too (not draft-test artifacts;
+  see `F09.template-after-draft-test`); presets share it
+  (`F06.template-shared`). Use a fresh `template.id` per replay.
 - `http://` is accepted by the schema regex but refused by the handler;
-  the schema's error message lists `http://` and omits `oh-internal://`.
+  the schema's error message lists `oh-internal://`, `s3://`, `gs://` and
+  `https://` only (since #654).
   `https://`, `s3://` and `gs://` are never fetched at create time.
 - Every ORM-written `created_at` (automations, runs, uploads, webhooks,
   change rows and the rest) comes from Python with microseconds, so
