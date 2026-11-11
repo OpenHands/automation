@@ -217,8 +217,8 @@ Preconditions:
   `--unsafe-unredacted` to hand the clear value to the capturing shell.
 - `source` is lowercased before validation and before the uniqueness check,
   so `QA-DUP` collides with `qa-dup`, and the 409 names the lowercased form.
-  `github`, `jira_dc` and `bitbucket_data_center` are reserved; `slack` is not
-  (F17 uses that).
+  `github`, `jira_dc`, `bitbucket_data_center` and `azure_devops` (since
+  #687) are reserved; `slack` is not (F17 uses that).
 - `source` cannot be changed by PATCH; delete and recreate instead (the new
   webhook gets a new secret and the external service must be reconfigured).
 - PATCH applies `exclude_unset`: an omitted field is untouched, an explicit
