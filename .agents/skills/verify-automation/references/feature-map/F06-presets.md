@@ -82,9 +82,9 @@ Preconditions:
   control-automation api GET "/v1/$TBID/tarball" --expect 200 --quiet --check-header content-type eq application/x-tar --check-header content-disposition eq 'attachment; filename="qa-prompt-tar.tar"' --raw-out "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" --save F06.prompt-tarball/download
   test "$(tar tzf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" | sort | paste -sd, -)" = finish_tool_hook.py,main.py,prompt.txt,setup.sh
   test "$(tar xzOf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" prompt.txt)" = "$(printf 'Line one\nLine two with "quotes" and ünïcode')"
-  tar tvzf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" setup.sh | grep -q '^-rwxr-xr-x'
-  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" setup.sh | grep -q 'sdk-version'
-  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" main.py | grep -q 'prompt.txt'
+  tar tvzf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" setup.sh | grep '^-rwxr-xr-x' >/dev/null
+  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" setup.sh | grep 'sdk-version' >/dev/null
+  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-prompt.tar" main.py | grep 'prompt.txt' >/dev/null
   ```
   `tar tzf` (gzip) is required although the response says
   `application/x-tar`. `setup.sh` fetches `/sdk-version` to pick the SDK to
@@ -93,8 +93,8 @@ Preconditions:
   ```sh
   RPID=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa-repos","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"repos":[{"url":"http://github.com/qa-org/qa-repo","ref":"main"},{"url":"qa-org/other","provider":"gitlab"}]}' --expect 201 --check preset_metadata.repos.0.url eq https://github.com/qa-org/qa-repo --check preset_metadata.repos.0.ref eq main --check preset_metadata.repos.1.provider eq gitlab --save F06.repos/list --field id)
   control-automation api GET "/v1/$RPID/tarball" --expect 200 --quiet --raw-out "$AUTOMATION_VERIFY_RUN/qa-repos.tar"
-  tar tzf "$AUTOMATION_VERIFY_RUN/qa-repos.tar" | grep -qx repos_config.json
-  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-repos.tar" repos_config.json | grep -q '"url": "https://github.com/qa-org/qa-repo"'
+  tar tzf "$AUTOMATION_VERIFY_RUN/qa-repos.tar" | grep -x repos_config.json >/dev/null
+  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-repos.tar" repos_config.json | grep '"url": "https://github.com/qa-org/qa-repo"' >/dev/null
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-repos-one","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"repos":"git@github.com:qa-org/qa-repo.git"}' --expect 201 --check preset_metadata.repos len-eq 1 --check preset_metadata.repos.0.url eq git@github.com:qa-org/qa-repo.git
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-repos-short","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"repos":"qa-org/qa-repo"}' --expect 422 --check detail.0.msg contains "requires explicit 'provider' field" --save F06.repos/short-no-provider
   control-automation api POST /v1/preset/prompt --json '{"name":"qa-repos-ftp","prompt":"hi","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"repos":"ftp://qa.invalid/r"}' --expect 422 --check detail.0.loc contains url
@@ -152,7 +152,7 @@ Preconditions:
   control-automation api GET "/v1/uploads/${PLTP#oh-internal://uploads/}" --expect 200 --check name eq plugin-automation-qa-plugin
   control-automation api GET "/v1/$PLID/tarball" --expect 200 --quiet --raw-out "$AUTOMATION_VERIFY_RUN/qa-plugin.tar" --save F06.plugin-create/download
   test "$(tar tzf "$AUTOMATION_VERIFY_RUN/qa-plugin.tar" | sort | paste -sd, -)" = finish_tool_hook.py,main.py,plugins_config.json,prompt.txt,setup.sh
-  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-plugin.tar" plugins_config.json | grep -q '"ref": "v1"'
+  tar xzOf "$AUTOMATION_VERIFY_RUN/qa-plugin.tar" plugins_config.json | grep '"ref": "v1"' >/dev/null
   control-automation api POST /v1/preset/plugin --json '{"name":"qa-plugin-one","prompt":"hi","plugins":{"source":"github:qa-org/qa-plugin"},"trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 201 --check preset_metadata.plugins len-eq 1 --check preset_metadata.plugins.0.source eq github:qa-org/qa-plugin
   ```
 - **Create a plugin-spec automation (`F06.plugin-spec-create`).** The executable manifest path preflights its source before storing an automation.

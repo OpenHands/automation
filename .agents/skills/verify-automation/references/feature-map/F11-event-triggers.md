@@ -267,6 +267,8 @@ decode to the same key).
   control-automation event requested-types jira_dc --expect 200 --check event_types len-eq 6 --check event_types contains 'jira:issue_deleted' --check event_types not-contains 'jira:worklog_updated' --check event_detection_rules len-eq 6 --check event_detection_rules.0.jmespath eq "webhookEvent == 'comment_created'" --check org_ids contains "$RT_ORG" --save F11.requested-types/jira
   control-automation api PATCH "/v1/$RT_AID" --json '{"trigger":{"type":"event","source":"jira_dc","on":"*"}}' --expect 200
   control-automation event requested-types jira_dc --expect 200 --check event_types len-eq 6 --check event_types not-contains '*'
+  control-automation api PATCH "/v1/$RT_AID" --json '{"enabled":false}' --expect 200
+  control-automation event requested-types jira_dc --expect 200 --check event_types len-eq 6 --save F11.requested-types/jira-disabled
   ```
   Since the event catalogs (#653; Azure DevOps #687), every built-in answers
   with its whole catalog whatever automations exist: `github` its seven
@@ -275,7 +277,9 @@ decode to the same key).
   per type (`eventKey`, `webhookEvent`, `eventType`). An automation's `on`
   patterns (`jira:worklog_updated`, `*`) do not show up. `org_ids` is set only
   for `jira_dc`, whose forwarder fans out to every org with an enabled
-  `jira_dc` event automation; the other sources answer `null`.
+  `jira_dc` event automation; the other sources answer `null`. Disabling the
+  test automation does not drop the org from `org_ids` here, because
+  `F11.builtin-jira-bitbucket` leaves `qa jira` enabled in the same org.
 - **Built-ins without the shared secret (`F11.builtin-unconfigured`).** Restart with an empty secret, probe, then restore it.
   ```sh
   control-automation restart --service automation --env AUTOMATION_WEBHOOK_SECRET=

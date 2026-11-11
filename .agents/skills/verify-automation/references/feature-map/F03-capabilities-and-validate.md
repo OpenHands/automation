@@ -17,12 +17,12 @@ Routes: `GET /api/automation/v1/capabilities`, `POST /api/automation/v1/validate
 
 ## Sub-features
 
-- `F03.caps-default`: on a default local run capabilities answer `ready:true`, `maxAutomationTimeoutSeconds:1800`, `triggerKinds:["cron"]`, no event sources or event types, no `triggers.event`, the sorted feature list (with `customTarball`, `agentProfiles`, `kvStore` and `pluginConfigUpdate`, added by #708), and `repoProviders`: the pinned SDK's providers, sorted (`bitbucket`, `github`, `gitlab` with SDK 1.57.0; `azure_devops` joins from 1.58.0), so the recipe checks shape rather than an exact list.
+- `F03.caps-default`: on a default local run capabilities answer `ready:true`, `maxAutomationTimeoutSeconds:1800`, `triggerKinds:["cron"]`, no event sources or event types, no `triggers.event`, the sorted feature list (with `customTarball`, `agentProfiles`, `kvStore` and `pluginConfigUpdate`, added by #708), and `repoProviders`: the pinned SDK's providers, sorted (`azure_devops`, `bitbucket`, `bitbucket_data_center`, `github`, `gitlab` with SDK 1.62.0), so the recipe checks shape rather than an exact list.
 - `F03.caps-cron`: `triggers.cron.minIntervalSeconds` is `max(60, scheduler interval)` (60 on a run), and `timezones` lists every IANA zone including `UTC`.
 - `F03.auth`: both routes need a key (401 without one).
 - `F03.caps-custom-webhook`: an enabled custom webhook of the caller's org adds its source, the `event` trigger kind, `webhookDelivery` and `triggers.event` (`filterLanguage:"jmespath"`, `filterFunctions`); `eventTypes` stays empty.
 - `F03.caps-webhook-disabled`: disabling that webhook removes the source and everything it added.
-- `F03.caps-builtin-sources`: with `AUTOMATION_WEBHOOK_SECRET` set, `azure_devops` (since #687), `bitbucket_data_center`, `github` and `jira_dc` join the sources, `eventTypes` lists the GitHub patterns and `eventTypesBySource` gives each built-in source its own catalog.
+- `F03.caps-builtin-sources`: with `AUTOMATION_WEBHOOK_SECRET` set, `azure_devops` (#626; catalog in #687), `bitbucket_data_center`, `github` and `jira_dc` join the sources, `eventTypes` lists the GitHub patterns and `eventTypesBySource` gives each built-in source its own catalog.
 - `F03.caps-config`: `AUTOMATION_SCHEDULER_INTERVAL_SECONDS`, `AUTOMATION_MAX_RUN_DURATION` and `AUTOMATION_KV_SECRET` move `minIntervalSeconds`, `maxAutomationTimeoutSeconds` and the `kvStore` feature.
 - `F03.caps-not-ready`: in cloud mode without `AUTOMATION_SERVICE_KEY` capabilities answer `ready:false` with every list empty and `triggers:{}`.
 - `F03.validate-valid`: a valid preset-prompt draft and a valid raw `/v1` draft answer 200 `{valid:true, errors:[], sampleEventMatched:null}`; the envelope accepts camelCase or snake_case keys.
