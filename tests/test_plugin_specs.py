@@ -472,6 +472,7 @@ async def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monke
                 "def build_user_prompt(prompt, event_context):\n    return prompt\n"
             ),
             "setup.sh": "#!/usr/bin/env bash\n",
+            "setup.py": "",
         },
     )
 
@@ -755,7 +756,9 @@ def _write_catalog_manifest_with_bundle(root: Path) -> Path:
     )
     scripts_dir = repo_root / "scripts"
     scripts_dir.mkdir()
-    (scripts_dir / "main.py").write_text("print('hello from bundle')\n")
+    # Bytes: write_text would store "\r\n" on Windows, and the bundle keeps
+    # the file as it is on disk.
+    (scripts_dir / "main.py").write_bytes(b"print('hello from bundle')\n")
     return repo_root
 
 
