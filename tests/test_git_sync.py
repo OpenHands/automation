@@ -55,6 +55,7 @@ from openhands.automation.models import (
     TarballUpload,
     UploadStatus,
 )
+from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
 from openhands.automation.storage.local import LocalFileStore
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.tarball_validation import parse_internal_upload_id
@@ -2668,6 +2669,66 @@ class TestImportedAutomationDefaults:
         update_logs = [r for r in caplog.messages if "Updated automation" in r]
         assert update_logs
         assert "Repo Writer <writer@example.com>" in update_logs[0]
+
+    _CONTINUING_YAML = (
+        "name: Hand Written\n"
+        "entrypoint: python main.py\n"
+        "trigger:\n"
+        "  type: event\n"
+        "  source: qa-src\n"
+        "  'on': qa.*\n"
+        "  destination: continue_conversation\n"
+        "  subject_key_expr: id\n"
+    )
+
+    async def test_continuing_import_without_keep_alive_is_kept_alive(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        """Git sync applies the `continue_conversation` rule the API does."""
+        await self._push_hand_written(origin, self._CONTINUING_YAML)
+
+        result = await self._cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        assert result.imported == 1
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.keep_alive is True
+
+    async def test_continuing_import_with_keep_alive_false_is_skipped(
+        self, sqlite_session_factory, git_settings, service_settings, origin, caplog
+    ):
+        await self._push_hand_written(
+            origin, self._CONTINUING_YAML + "keep_alive: false\n"
+        )
+
+        result = await self._cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        assert result.imported == 0
+        assert CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR in caplog.text
+        async with sqlite_session_factory() as session:
+            assert (await session.execute(select(Automation))).first() is None
+
+    async def test_continuing_update_with_keep_alive_false_is_skipped(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin, self._CONTINUING_YAML)
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        await self._push_hand_written(
+            origin,
+            self._CONTINUING_YAML.replace("main.py", "main.py --flag")
+            + "keep_alive: false\n",
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py"
+        assert automation.keep_alive is True
 
 
 class TestFailureBackoffState:
