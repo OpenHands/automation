@@ -53,6 +53,60 @@ async def draft_file_store():
     app.dependency_overrides.pop(get_file_store, None)
 
 
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({}, []),
+        ({"tags": []}, []),
+        (
+            {"tags": [" Example Tag ", "example-tag", "Another\tTag"]},
+            ["example-tag", "another-tag"],
+        ),
+    ],
+    ids=["omitted", "empty", "normalized"],
+)
+async def test_raw_draft_tags_persist(async_client, async_session, fields, expected):
+    response = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={"endpoint": "/v1", "draft": {"name": "Tagged draft", **fields}},
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["draft"]["tags"] == expected
+    async_session.expire_all()
+    stored = await async_session.get(AutomationDraft, uuid.UUID(data["id"]))
+    assert stored is not None
+    assert stored.draft_body["tags"] == expected
+    fetched = await async_client.get(f"/api/automation/v1/drafts/{data['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()["draft"]["tags"] == expected
+
+
+@pytest.mark.parametrize(
+    ("tags", "field", "code"),
+    [
+        ([f"tag-{i}" for i in range(11)], "tags", "value_error"),
+        (["a" * 51], "tags", "value_error"),
+        (["Bad Tag!"], "tags", "value_error"),
+        ([" "], "tags", "value_error"),
+        ("example-tag", "tags", "list_type"),
+        (None, "tags", "list_type"),
+        ([123], "tags[0]", "string_type"),
+    ],
+)
+async def test_raw_draft_tags_rejected(async_client, async_session, tags, field, code):
+    response = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={"endpoint": "/v1", "draft": {"name": "Invalid tags", "tags": tags}},
+    )
+
+    assert response.status_code == 422
+    errors = response.json()["detail"]["errors"]
+    assert [(error["field"], error["code"]) for error in errors] == [(field, code)]
+    assert await async_session.scalar(select(func.count(AutomationDraft.id))) == 0
+
+
 async def test_create_incomplete_draft_saves_partial_body(async_client, async_session):
     response = await async_client.post(
         "/api/automation/v1/drafts",

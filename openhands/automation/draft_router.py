@@ -448,6 +448,7 @@ async def _materialize_raw_draft(
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
     return {
         "name": body.name,
+        "tags": body.tags,
         "description": body.description,
         "prompt": None,
         "preset_metadata": preset_metadata,
