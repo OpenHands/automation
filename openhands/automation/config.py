@@ -550,7 +550,8 @@ class ServiceSettings(BaseSettings):
         # Background workers
         AUTOMATION_ENABLE_BACKGROUND_WORKERS: Start scheduler/dispatcher/watchdog
             in this process (default: True). Set False on request-serving replicas
-            when a dedicated background process owns the loops (see #286).
+            when a dedicated background process owns the loops (see #286). Does
+            not gate git sync or the stream supervisor.
         AUTOMATION_SCHEDULER_INTERVAL_SECONDS: Scheduler poll interval (default: 60)
         AUTOMATION_SCHEDULER_BATCH_SIZE: Scheduler batch size (default: 50)
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
@@ -662,7 +663,8 @@ class ServiceSettings(BaseSettings):
     # Uvicorn runs lifespan once per worker process, so multi-worker / multi-replica
     # deployments should enable this on exactly one dedicated process and disable
     # it on request-serving instances to avoid duplicate polling and sandbox-API
-    # fan-out (see OpenHands/automation#286).
+    # fan-out (see OpenHands/automation#286). Does not gate git sync or the
+    # stream supervisor.
     enable_background_workers: bool = True
     scheduler_interval_seconds: int = 60
     scheduler_batch_size: int = 50
