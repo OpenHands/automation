@@ -1,0 +1,55 @@
+---
+# Keeps one pull request open that moves the openhands-sdk / openhands-workspace
+# pins to the latest SDK release on PyPI. The reusable workflow in
+# OpenHands/release-actions resolves the version and owns the branch (bump-pins),
+# the commit and the pull request; the command below is how this repo writes a
+# version into its own files.
+#
+# The `fix:` title is what makes release-please open a release PR after the bump
+# merges, and that release publishes an openhands-automation built on the new SDK.
+name: bump-pins
+
+on:
+    # Safety net: each run compares PyPI with main and stops when the pins are
+    # already current.
+    schedule:
+        - cron: 17 * * * *
+    # Sent by an upstream publish job so the pull request opens right away, with
+    # client_payload {"expect": "SDK=X.Y.Z"}.
+    repository_dispatch:
+        types: [upstream-released]
+    workflow_dispatch:
+        inputs:
+            expect:
+                description: Release to wait for, e.g. "SDK=1.63.0" (optional)
+                required: false
+                type: string
+                default: ''
+            dry-run:
+                description: Show the commit without pushing or opening a pull request
+                required: false
+                type: boolean
+                default: false
+
+# The reusable workflow acts through the release App token only.
+permissions: {}
+
+jobs:
+    bump-pins:
+        # secrets: inherit forwards the org secrets RELEASE_APP_ID /
+        # RELEASE_APP_PRIVATE_KEY that the reusable workflow needs.
+        secrets: inherit
+        uses: OpenHands/release-actions/.github/workflows/bump-pins.yml@main
+        with:
+            pins: SDK=pypi:openhands-sdk
+            title: 'fix: bump SDK to {SDK}'
+            expect: ${{ inputs.expect || github.event.client_payload.expect || '' }}
+            dry-run: ${{ inputs.dry-run || false }}
+            uv: true
+            # openhands-workspace is released with the SDK under the same version.
+            # --no-cache and --no-config are what the SDK's version-bump workflow
+            # passed here: the lock has to see a release published minutes ago.
+            command: |
+                sed -i -E 's/"openhands-sdk==[^"]*"/"openhands-sdk=='"$PIN_SDK"'"/' pyproject.toml
+                sed -i -E 's/"openhands-workspace==[^"]*"/"openhands-workspace=='"$PIN_SDK"'"/' pyproject.toml
+                git diff --quiet || uv lock --no-cache --no-config
