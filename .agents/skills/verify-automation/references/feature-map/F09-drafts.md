@@ -39,7 +39,7 @@ Routes: `POST /api/automation/v1/drafts`, `GET /api/automation/v1/drafts`,
 - `F09.preset-materialize`: dispatching a prompt or plugin draft generates a fresh `oh-internal://` upload named `draft-prompt-automation-<name>` / `draft-plugin-automation-<name>`, with `setup_script_path=setup.sh` and entrypoint `.venv/bin/python main.py`.
 - `F09.delete`: DELETE is 204; the draft and its materialized automation then answer 404, its pending runs (manual included) become `SKIPPED` with `status_detail.detail` `Automation draft deleted by user`, and a second DELETE is 404.
 - `F09.agent-profile`: a draft keeps `agent_profile_id` on every endpoint. With a `model` it saves with `invalid_agent_profile` on `agent_profile_id` and is not dispatchable; dispatching it materializes the automation with that profile and `model: null`.
-- `F09.template-after-draft-test`: after a draft carrying `template.id` was test-dispatched, creating the real automation from the same template should create a new ACTIVE automation (known bug: it returns 200 with the hidden DRAFT artifact).
+- `F09.template-after-draft-test`: after a draft carrying `template.id` was test-dispatched, creating the real automation from the same template creates a new ACTIVE automation; the hidden DRAFT artifact does not count as an install of the template.
 
 ## How to get to it (agent POV)
 
@@ -251,21 +251,29 @@ Preconditions:
   control-automation api GET "/v1/$QAM" --expect 200 --check agent_profile_id eq 11111111-1111-4111-8111-111111111111 --check model eq null --save F09.agent-profile/materialized
   control-automation api DELETE "/v1/drafts/$QA" --expect 204
   ```
-- **Template enable after a draft test (`F09.template-after-draft-test`), known bug.** The real create should make a new ACTIVE automation; it returns the hidden DRAFT artifact instead.
+- **Template enable after a draft test (`F09.template-after-draft-test`).** The real create makes a new ACTIVE automation instead of returning the hidden DRAFT artifact.
   Requires: `F09.create-raw`
   ```sh
   TD=$(control-automation api POST /v1/drafts --json "{\"endpoint\":\"/v1\",\"draft\":{\"name\":\"qa tpl draft\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}}" --expect 201 --check dispatchable eq true --field id)
   control-automation api POST "/v1/drafts/$TD/dispatch" --expect 201 --quiet
   TMA=$(control-automation api GET "/v1/drafts/$TD" --expect 200 --field materialized_automation_id)
   control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT
-  control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA"  # bug: status eq 200 && response.body.state eq DRAFT
+  TRA=$(control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA" --field id)
+  control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT --check enabled eq false
+  control-automation api DELETE "/v1/drafts/$TD" --expect 204
+  control-automation api GET "/v1/$TMA" --expect 404
+  control-automation api GET "/v1/$TRA" --expect 200 --check state eq ACTIVE
+  control-automation api DELETE "/v1/$TRA" --expect 204
   ```
-  Observed: `200` with `id` equal to the DRAFT artifact (`state=DRAFT`,
-  `enabled=false`), which the normal API then refuses to activate (409), so
-  the user cannot turn the template on without deleting the draft first.
-  `find_existing_template_automation` (`utils/templates.py`) filters on
-  `deleted_at` and `template.id` but not on `state`. The same happens through
-  `POST /v1/preset/prompt` with that template id.
+  Observed: `201` with a new `id` and `state=ACTIVE`; the DRAFT artifact stays
+  as it was and is still removed with its draft (DELETE 204, then 404); the
+  new install is still ACTIVE afterwards and is deleted so a replay on a
+  reused run starts clean.
+  `find_existing_template_automation` (`utils/templates.py`) skips
+  `state=DRAFT` rows, so every template-aware create (`POST /v1`,
+  `/v1/plugin-spec`, `/v1/preset/prompt`, `/v1/preset/plugin`) ignores draft
+  test artifacts, while an installed ACTIVE or INACTIVE automation from the
+  same template is still returned with `200`.
 
 ## Gotchas
 

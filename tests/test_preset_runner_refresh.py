@@ -51,7 +51,11 @@ def _tarball(files: dict[str, str]) -> bytes:
         ("plugin-1.27.0.tar.gz", _load_plugin_preset_files, "plugins_config.json"),
     ],
 )
-def test_a_1_27_0_preset_runs_with_the_current_runner(fixture, load_current, config):
+def test_a_1_27_0_preset_runs_with_the_current_runner(
+    monkeypatch, fixture, load_current, config
+):
+    # A Windows service also adds setup.py; see the test below.
+    monkeypatch.setattr("openhands.automation.preset_router.os.name", "posix")
     stored = (FIXTURES / fixture).read_bytes()
     before = _members(stored)
     # The 1.27.0 runner reads AGENT_SERVER_URL as local mode and cannot attach.
@@ -73,9 +77,35 @@ def test_a_1_27_0_preset_runs_with_the_current_runner(fixture, load_current, con
     assert set(after) == set(before)
 
 
-def test_a_current_preset_keeps_its_content():
+@pytest.mark.parametrize("os_name", ["posix", "nt"])
+def test_a_current_preset_keeps_its_content(monkeypatch, os_name):
+    monkeypatch.setattr("openhands.automation.preset_router.os.name", os_name)
     stored = _generate_tarball("hi")
     assert _members(with_current_preset_runner(stored)) == _members(stored)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "load_current"),
+    [
+        ("prompt-1.27.0.tar.gz", _load_prompt_preset_files),
+        ("plugin-1.27.0.tar.gz", _load_plugin_preset_files),
+    ],
+)
+@pytest.mark.parametrize(("os_name", "gets_setup_py"), [("posix", False), ("nt", True)])
+def test_an_older_preset_gets_setup_py_only_on_windows(
+    monkeypatch, fixture, load_current, os_name, gets_setup_py
+):
+    """A Windows agent server cannot run setup.sh, so the run needs setup.py
+    there even if the automation was created before the service shipped it."""
+    monkeypatch.setattr("openhands.automation.preset_router.os.name", os_name)
+    stored = (FIXTURES / fixture).read_bytes()
+    assert "setup.py" not in _members(stored)
+
+    after = _members(with_current_preset_runner(stored))
+
+    assert ("setup.py" in after) is gets_setup_py
+    if gets_setup_py:
+        assert after["setup.py"][0] == load_current()["setup.py"].encode()
 
 
 def test_a_preset_from_before_the_finish_hook_gets_it():

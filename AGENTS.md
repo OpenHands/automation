@@ -207,6 +207,7 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. Presets also pass a finish-required plugin the service writes into the sandbox and, when their runner supports it, the repositories the app server can clone (`selected_repository`, `additional_repositories`): those on a provider and host the owner is connected to, from `provider_tokens_set` in `GET /api/v1/settings`. The runner clones the rest, and all of them if that read fails. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (a missing route or a body it cannot validate) logs `conversation_start_fallback` and the runner creates the conversation as before, unless the automation selected an agent profile: only the app server can launch one, so that run fails with `agent_profile_unsupported`. Any other refusal fails the run. Local mode and custom tarballs skip this step.
 7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
+   - Native Windows local mode (the run's work dir is a drive path): the agent-server runs commands with cmd.exe, so the tarball, a JSON spec (env vars + entrypoint) and `windows_runner.py` are uploaded into the work dir and `uv run --no-project python <runner> <spec>` does the same steps, running `setup.py` instead of `setup.sh`
 8. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
@@ -322,6 +323,7 @@ Each run swaps in the current `main.py`, `setup.sh` and `finish_tool_hook.py`, s
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
 - Generated presets use `.venv/bin/python main.py` on POSIX (`.venv/Scripts/python.exe main.py` on Windows) as the entrypoint and `setup.sh` as the setup script
+- Prompt and plugin preset tarballs created on Windows also carry `presets/setup.py`, the Python counterpart of their `setup.sh`; keep the two in step
 - Prompt and plugin presets live in separate subdirectories under `openhands/automation/presets/`
 
 ## Private Plugin Sources
@@ -368,7 +370,8 @@ path gained is the catalog contract the presets already had:
 - **`template` provenance** (`TemplateProvenance` in `schemas.py`), accepted by
   all three creation endpoints and stored under `preset_metadata["template"]`.
   `find_existing_template_automation` (`utils/templates.py`) is consulted first,
-  so enabling an entry twice returns the existing automation with a 200.
+  so enabling an entry twice returns the existing non-draft automation with a
+  200 (a draft test's hidden DRAFT artifact is not an install).
   `record_first_run_outcome` keys on the same value, so bundles get first-run
   telemetry for free.
 - **Preflight**: `POST /v1/validate` accepts `"endpoint": "/v1"`. It validates

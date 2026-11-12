@@ -76,7 +76,11 @@ from openhands.automation.models import (
 from openhands.automation.observability_associations import (
     validate_observability_associations,
 )
-from openhands.automation.schemas import Trigger, validate_command_string
+from openhands.automation.schemas import (
+    Trigger,
+    continue_conversation_keep_alive,
+    validate_command_string,
+)
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
@@ -524,6 +528,9 @@ async def _validate_and_resolve_fields(
     await validate_trigger_webhook_compatibility(
         owner.org_id, trigger.model_dump(), session
     )
+
+    # A ValueError skips the directory, like every other invalid field.
+    keep_alive = continue_conversation_keep_alive(trigger, fields.get("keep_alive"))
     observability_associations = validate_observability_associations(
         fields.get("observability_associations")
     )
@@ -611,7 +618,7 @@ async def _validate_and_resolve_fields(
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
         "timeout": timeout,
-        "keep_alive": fields.get("keep_alive"),
+        "keep_alive": keep_alive,
         "enabled": enabled,
         "state": state,
         "prompt": fields.get("prompt"),

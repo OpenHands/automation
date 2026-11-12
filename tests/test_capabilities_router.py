@@ -11,6 +11,7 @@ from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import CustomWebhook
+from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
 from openhands.workspace import GitProvider, RepoSource
 
 
@@ -184,6 +185,7 @@ class TestGetCapabilities:
             "pull_request_review.*",
             "push",
             "release.*",
+            "workflow_run.*",
         ]
         by_source = body["eventTypesBySource"]
         assert set(by_source) == {
@@ -434,6 +436,7 @@ class TestValidateDraft:
                 id="type-the-deployment-cannot-parse",
             ),
             pytest.param("pull_request.*", [], id="wildcard-over-supported-types"),
+            pytest.param("workflow_run.completed", [], id="workflow-run-completed"),
         ],
     )
     async def test_event_types_are_checked_against_what_the_deployment_parses(
@@ -722,6 +725,42 @@ class TestValidateDraft:
         assert addressed_errors(with_model.json()) == [
             ("agent_profile_id", "invalid_agent_profile")
         ]
+
+    @pytest.mark.parametrize(
+        ("endpoint", "draft"),
+        [
+            ("/v1", BUNDLE_DRAFT),
+            ("/v1/preset/prompt", CRON_DRAFT),
+            (
+                "/v1/preset/plugin",
+                {**CRON_DRAFT, "plugins": [{"source": "github:acme/review"}]},
+            ),
+        ],
+    )
+    async def test_continued_conversation_cannot_opt_out_of_keep_alive(
+        self, async_client, endpoint, draft
+    ):
+        """Every creation endpoint refuses the draft its create call would."""
+        draft = {
+            **draft,
+            "trigger": {
+                "type": "event",
+                "source": "github",
+                "on": "issue_comment.created",
+                "destination": "continue_conversation",
+                "subject_key_expr": "issue.number",
+            },
+            "keep_alive": False,
+        }
+
+        response = await async_client.post(
+            VALIDATE_URL, json=preflight(draft, endpoint=endpoint)
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert addressed_errors(body) == [(None, "value_error")]
+        assert CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR in body["errors"][0]["message"]
 
     async def test_unknown_creation_endpoint_is_rejected(self, async_client):
         """Preflight only validates drafts for the endpoints it may name."""

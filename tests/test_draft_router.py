@@ -15,6 +15,7 @@ from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
+    CustomWebhook,
     TarballUpload,
     UploadStatus,
 )
@@ -181,6 +182,65 @@ async def test_incomplete_draft_dispatch_returns_validation_errors(
     draft = await async_session.get(AutomationDraft, uuid.UUID(draft_id))
     assert draft is not None
     assert draft.materialized_automation_id is None
+
+
+@pytest.mark.parametrize(
+    "draft_body",
+    [
+        pytest.param({}, id="prompt"),
+        pytest.param({"plugins": [{"source": "github:owner/plugin"}]}, id="plugin"),
+    ],
+)
+async def test_continuing_preset_draft_follows_the_keep_alive_rule(
+    async_client, async_session, draft_file_store, draft_body
+):
+    """A preset draft settles keep_alive the way its create endpoint does."""
+    endpoint = "/v1/preset/plugin" if draft_body else "/v1/preset/prompt"
+    async_session.add(
+        CustomWebhook(
+            org_id=TEST_ORG_ID,
+            name="Custom",
+            source="custom-test",
+            webhook_secret="whsec_test",
+            event_key_expr="type",
+            signature_header="X-Signature-256",
+        )
+    )
+    await async_session.commit()
+    body = {
+        "name": "Continuing draft",
+        "prompt": "Reply to the issue.",
+        "trigger": {
+            "type": "event",
+            "source": "custom-test",
+            "on": "issue.created",
+            "destination": "continue_conversation",
+            "subject_key_expr": "id",
+        },
+        **draft_body,
+    }
+
+    refused = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={"endpoint": endpoint, "draft": {**body, "keep_alive": False}},
+    )
+    created = await async_client.post(
+        "/api/automation/v1/drafts", json={"endpoint": endpoint, "draft": body}
+    )
+    dispatched = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch",
+        json={"event_payload": {"type": "issue.created", "id": "1"}},
+    )
+
+    assert refused.status_code == 201
+    assert refused.json()["dispatchable"] is False
+    assert [e["code"] for e in refused.json()["validation_errors"]] == ["value_error"]
+    assert dispatched.status_code == 201, dispatched.text
+    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    assert draft is not None
+    automation = await async_session.get(Automation, draft.materialized_automation_id)
+    assert automation is not None
+    assert automation.keep_alive is True
 
 
 async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_run(
@@ -485,6 +545,73 @@ async def test_delete_draft_soft_deletes_materialized_draft_automation_and_run(
     assert run.status == AutomationRunStatus.SKIPPED
     assert run.completed_at == draft.deleted_at
     assert run.status_detail["detail"] == "Automation draft deleted by user"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/api/automation/v1",
+            {
+                "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                "entrypoint": "uv run main.py",
+            },
+        ),
+        ("/api/automation/v1/preset/prompt", {"prompt": "Real prompt."}),
+    ],
+    ids=["bundle", "preset-prompt"],
+)
+async def test_template_create_after_draft_test_leaves_draft_artifact_alone(
+    async_client, async_session, draft_file_store, path, payload
+):
+    """A draft test's DRAFT artifact is not a template install (#735)."""
+    template = {"id": "tpl-draft-tested", "version": "1"}
+    trigger = {"type": "cron", "schedule": "0 9 * * *"}
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Template draft",
+                "prompt": "Test prompt.",
+                "trigger": trigger,
+                "template": template,
+            },
+        },
+    )
+    assert created.json()["dispatchable"] is True
+    draft_id = created.json()["id"]
+    dispatched = await async_client.post(
+        f"/api/automation/v1/drafts/{draft_id}/dispatch"
+    )
+    assert dispatched.status_code == 201
+    draft = await async_session.get(AutomationDraft, uuid.UUID(draft_id))
+    assert draft is not None
+    artifact_id = draft.materialized_automation_id
+
+    real = await async_client.post(
+        path,
+        json={**payload, "name": "Real", "trigger": trigger, "template": template},
+    )
+
+    assert real.status_code == 201
+    assert real.json()["id"] != str(artifact_id)
+    assert real.json()["state"] == "ACTIVE"
+    artifact = await async_client.get(f"/api/automation/v1/{artifact_id}")
+    assert artifact.json()["state"] == "DRAFT"
+    assert artifact.json()["enabled"] is False
+
+    deleted = await async_client.delete(f"/api/automation/v1/drafts/{draft_id}")
+
+    assert deleted.status_code == 204
+    gone = await async_client.get(f"/api/automation/v1/{artifact_id}")
+    assert gone.status_code == 404
+    again = await async_client.post(
+        path,
+        json={**payload, "name": "Again", "trigger": trigger, "template": template},
+    )
+    assert again.status_code == 200
+    assert again.json()["id"] == real.json()["id"]
 
 
 async def test_delete_draft_does_not_delete_linked_non_draft_automation(

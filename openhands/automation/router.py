@@ -87,6 +87,7 @@ from openhands.automation.schemas import (
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
+    continue_conversation_keep_alive,
 )
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.tags import normalize_tag
@@ -386,21 +387,12 @@ async def create_automation_from_plugin_spec(
 
     await require_compatible_trigger(user.org_id, trigger.model_dump(), session)
 
-    keep_alive = body.keep_alive
-    if (
-        isinstance(trigger, EventTrigger)
-        and trigger.destination == "continue_conversation"
-    ):
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would destroy "
-                    "the conversation the next event continues"
-                ),
-            )
-        keep_alive = True
+    # The trigger may come from the manifest, so the rule is applied here
+    # rather than on the request model.
+    try:
+        keep_alive = continue_conversation_keep_alive(trigger, body.keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     state = model_automation_state(body.state, body.enabled)
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
@@ -1054,19 +1046,14 @@ async def update_automation(
     trigger = update_data.get("trigger") or auto.trigger or {}
     if body.trigger is not None or update_data.get("enabled") is True:
         await require_compatible_trigger(user.org_id, trigger, session)
-    if trigger.get("destination") == "continue_conversation":
-        keep_alive = update_data.get("keep_alive", auto.keep_alive)
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would "
-                    "destroy the conversation the next event continues"
-                ),
-            )
-        if keep_alive is not True:
-            update_data["keep_alive"] = True
+
+    keep_alive = update_data.get("keep_alive", auto.keep_alive)
+    try:
+        settled_keep_alive = continue_conversation_keep_alive(trigger, keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if settled_keep_alive is not keep_alive:
+        update_data["keep_alive"] = settled_keep_alive
 
     disable_event: AutomationDisableEvent | None = None
     skip_pending_reason: str | None = None
@@ -1643,7 +1630,8 @@ async def list_automation_runs(
     result = await session.execute(
         select(AutomationRun)
         .where(AutomationRun.automation_id == automation_id)
-        .order_by(AutomationRun.created_at.desc())
+        # id breaks exact created_at ties, so offset pages stay stable.
+        .order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc())
         .offset(offset)
         .limit(limit)
     )
@@ -1669,8 +1657,9 @@ async def list_automation_changes(
     Field names only, never values. A soft-deleted automation is a 404, so its
     history is not readable through the API.
 
-    Known limit: rows with the same ``created_at`` (one transaction, or one
-    second on SQLite) come back in a stable but not time order.
+    ``created_at`` is written from Python with microseconds, so changes made in
+    the same second still list newest first on SQLite. Rows written before that
+    (whole seconds on SQLite) can tie; ``id`` keeps their order stable.
     """
     await _get_org_automation(session, automation_id, user.org_id)
 
@@ -1688,8 +1677,8 @@ async def list_automation_changes(
             AutomationChangeEvent.org_id == user.org_id,
             AutomationChangeEvent.automation_id == automation_id,
         )
-        # id breaks ties: rows of one transaction share a timestamp, and SQLite
-        # stores whole seconds, so paging would otherwise be unstable.
+        # id only breaks exact ties (rows from before created_at had a Python
+        # default), so offset pages keep one order across requests.
         .order_by(
             AutomationChangeEvent.created_at.desc(), AutomationChangeEvent.id.desc()
         )
