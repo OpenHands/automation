@@ -1468,6 +1468,15 @@ class TriggerCapabilities(_SetupContractModel):
     event: EventCapabilities | None = None
 
 
+class EventOption(_SetupContractModel):
+    """Human-readable metadata for a key accepted by an event trigger."""
+
+    key: str
+    label: str
+    group: str
+    kind: Literal["event", "pattern"]
+
+
 class CapabilitiesResponse(_SetupContractModel):
     """What this deployment supports, discovered before a setup form renders."""
 
@@ -1494,6 +1503,10 @@ class CapabilitiesResponse(_SetupContractModel):
             "Event key patterns per offered event source, for each source "
             "that publishes a catalog. A source missing here accepts any key."
         ),
+    )
+    event_options_by_source: dict[str, list[EventOption]] = Field(
+        default_factory=dict,
+        description="Display metadata for known event keys, scoped to offered sources.",
     )
     triggers: TriggerCapabilities
     features: list[str]
