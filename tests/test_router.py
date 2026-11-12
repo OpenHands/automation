@@ -1939,6 +1939,67 @@ class TestListAutomations:
 
         assert response.status_code == 422
 
+    async def _seed_people_and_a_service_run(self, async_session):
+        """Persist the caller's and a teammate's person-run automations, another
+        org's, and a newer one the caller created that runs as a service account."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+        service_run = await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID, name="For SA"
+        )
+        service_run.run_as_kind = AutomationRunAsKind.SERVICE
+        service_run.created_by_user_id = TEST_USER_ID
+        await async_session.commit()
+
+    @pytest.mark.parametrize(
+        ("run_as", "expected"),
+        [("me", ["Mine"]), ("others", ["Teammate"]), ("service", ["For SA"])],
+    )
+    async def test_list_automations_filters_by_run_as(
+        self, async_client, async_session, run_as, expected
+    ):
+        """run_as splits the org by run-as identity: me and others are people
+        only; service is every automation that runs as a service account."""
+        await self._seed_people_and_a_service_run(async_session)
+
+        response = await async_client.get(f"/api/automation/v1?run_as={run_as}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == expected
+        assert data["total"] == len(expected)
+
+    async def test_list_automations_run_as_combines_with_creator_filter(
+        self, async_client, async_session
+    ):
+        """Both filters apply: the caller's service-run automation is created_by=me
+        with run_as=service, and never with run_as=others."""
+        await self._seed_people_and_a_service_run(async_session)
+
+        service = (
+            await async_client.get("/api/automation/v1?created_by=me&run_as=service")
+        ).json()
+        others = (
+            await async_client.get("/api/automation/v1?created_by=me&run_as=others")
+        ).json()
+
+        assert [a["name"] for a in service["automations"]] == ["For SA"]
+        assert others == {"automations": [], "total": 0}
+
+    async def test_list_automations_rejects_unknown_run_as_filter(self, async_client):
+        """An unknown run_as value is a 422, not a silently unfiltered list."""
+        response = await async_client.get("/api/automation/v1?run_as=team")
+
+        assert response.status_code == 422
+
+    async def test_list_automations_run_as_is_documented_in_openapi(self, async_client):
+        spec = (await async_client.get("/api/automation/openapi.json")).json()
+        params = {
+            p["name"]: p
+            for p in spec["paths"]["/api/automation/v1"]["get"]["parameters"]
+        }
+
+        assert params["run_as"]["description"]
+
 
 class TestGetAutomation:
     """Tests for GET /v1/{id} endpoint."""
