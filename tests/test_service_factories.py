@@ -38,8 +38,8 @@ async def _factory(session: AsyncSession, org_id: uuid.UUID, slug: str) -> Facto
     return factory
 
 
-def _params(org_id: uuid.UUID, ids: list[uuid.UUID]) -> list[tuple[str, str]]:
-    return [("org_id", str(org_id))] + [("id", str(i)) for i in ids]
+def _params(org_id: uuid.UUID, ids: list[uuid.UUID]) -> httpx.QueryParams:
+    return httpx.QueryParams([("org_id", str(org_id)), *(("id", str(i)) for i in ids)])
 
 
 # --- Lookup ---

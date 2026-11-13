@@ -10,6 +10,8 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import MagicMock
 
 import jwt
 import pytest
@@ -53,7 +55,7 @@ FACTORY_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 
 
 def _token(**overrides) -> str:
-    values = dict(
+    values: dict[str, Any] = dict(
         org_id=uuid.UUID(VECTOR_CLAIMS["org_id"]),
         factory_id=FACTORY_ID,
         automation_id=uuid.UUID(VECTOR_CLAIMS["automation_id"]),
@@ -151,8 +153,13 @@ def test_a_different_service_key_gives_a_token_that_does_not_verify():
 # --- What a dispatched run gets ---
 
 
+@pytest.fixture
+def mock_client():
+    return MagicMock()
+
+
 def _settings(**overrides) -> Settings:
-    values = dict(
+    values: dict[str, Any] = dict(
         openhands_api_base_url="https://test.example.com",
         service_key="test-service-key",
         base_url="http://localhost:8000",
