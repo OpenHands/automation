@@ -263,7 +263,7 @@ async def create_automation(
     # query and leaves the new upload unreferenced rather than adopting it.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.org_id, body.template.id
+            session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
@@ -357,7 +357,7 @@ async def create_automation_from_plugin_spec(
     """Create an automation from an executable plugin specification."""
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.org_id, body.template.id
+            session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
