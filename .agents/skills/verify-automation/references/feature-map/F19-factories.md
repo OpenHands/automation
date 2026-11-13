@@ -102,8 +102,8 @@ Preconditions:
   control-automation api PATCH "/v1/$AID" --json '{"factory_id":null}' --expect 200 --check factory_id eq null
   control-automation api DELETE "/v1/factories/$F1" --expect 204 --save F19.delete/deleted
   control-automation api GET "/v1/factories/$F1" --expect 404 --check detail eq 'Factory not found'
-  control-automation api POST /v1/factories --json '{"name":"QA Factory One"}' --expect 201 --check id ne "$F1"
-  control-automation api DELETE "/v1/factories/$F1" --expect 204
+  F1B=$(control-automation api POST /v1/factories --json '{"name":"QA Factory One"}' --expect 201 --check id ne "$F1" --field id)
+  control-automation api DELETE "/v1/factories/$F1B" --expect 204
   control-automation api DELETE "/v1/factories/$F2" --expect 204
   ```
   Leaves no factory behind. A soft-deleted automation does not block the
