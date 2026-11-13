@@ -110,7 +110,7 @@ async def _build_status_response(
 @router.get("/status")
 async def get_git_sync_status(
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> GitSyncStatusResponse:
     """Report the caller's org's git sync configuration and last-sync state."""
     git_settings = await resolve_effective_git_sync_settings(session, user.org_id)
@@ -121,7 +121,7 @@ async def get_git_sync_status(
 async def update_git_sync_config(
     data: GitSyncConfigUpdateRequest,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> GitSyncStatusResponse:
     """Configure, reconfigure or pause/resume the org's sync without a restart.
 
@@ -180,7 +180,7 @@ async def update_git_sync_config(
 async def check_git_sync_config(
     data: GitSyncConfigUpdateRequest,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> GitSyncCheckResponse:
     """Test whether a configuration can reach its repo, without saving it.
 
@@ -245,7 +245,7 @@ async def _run_sync_cycle_background(
 async def trigger_git_sync(
     request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> GitSyncTriggerResponse:
     """Trigger a sync cycle for the caller's org now, instead of at the next poll.
 

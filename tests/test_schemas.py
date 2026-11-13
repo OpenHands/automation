@@ -9,7 +9,7 @@ underlying ensure_utc helper) fix this at the serialisation layer.
 
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import ValidationError
@@ -17,9 +17,12 @@ from pydantic import ValidationError
 from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunResponse,
+    AutomationState,
+    CreateAutomationRequest,
     CronTrigger,
     RunCompleteRequest,
     RunStatus,
+    UpdateAutomationRequest,
 )
 from openhands.automation.utils.time import ensure_utc
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
@@ -66,6 +69,127 @@ class TestCronTriggerValidation:
     def test_rejects_invalid_timezone(self):
         with pytest.raises(ValidationError, match="Invalid timezone"):
             CronTrigger(schedule="0 9 * * *", timezone="Not/A_Timezone")
+
+
+class TestAutomationStateEnabledValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "State validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_string_false_for_inactive_state(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {**base_payload, "state": "INACTIVE", "enabled": "false"}
+        )
+
+        assert request.state == AutomationState.INACTIVE
+        assert request.enabled is False
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_string_false_for_active_state(self, request_cls, base_payload):
+        with pytest.raises(ValidationError, match="enabled must be true"):
+            request_cls.model_validate(
+                {**base_payload, "state": "ACTIVE", "enabled": "false"}
+            )
+
+
+class TestObservabilityAssociationValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "Association validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_valid_associations(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {
+                **base_payload,
+                "observability_associations": {
+                    "scm.repository.full_name": "repository.full_name",
+                    "scm.pull_request.number": "pull_request.number",
+                },
+            }
+        )
+
+        assert request.observability_associations == {
+            "scm.repository.full_name": "repository.full_name",
+            "scm.pull_request.number": "pull_request.number",
+        }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_invalid_association_expression(self, request_cls, base_payload):
+        with pytest.raises(ValidationError, match="Invalid observability association"):
+            request_cls.model_validate(
+                {
+                    **base_payload,
+                    "observability_associations": {
+                        "scm.repository.full_name": "repository.["
+                    },
+                }
+            )
+
+
+class TestAutomationDescriptionValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "Description validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_description(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {**base_payload, "description": "Summarizes weekly support trends."}
+        )
+
+        assert request.description == "Summarizes weekly support trends."
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_description_over_2000_characters(self, request_cls, base_payload):
+        with pytest.raises(ValidationError, match="at most 2000 characters"):
+            request_cls.model_validate({**base_payload, "description": "x" * 2001})
 
 
 class TestRunCompleteRequest:
@@ -183,6 +307,7 @@ class TestAutomationResponseUtcSerialisation:
         defaults: dict[str, Any] = dict(
             id=uuid.uuid4(),
             user_id=uuid.uuid4(),
+            created_by_user_id=uuid.uuid4(),
             org_id=uuid.uuid4(),
             model=None,
             name="Test",

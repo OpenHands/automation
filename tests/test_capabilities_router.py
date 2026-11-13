@@ -1,14 +1,18 @@
 """Tests for the capabilities and preflight validation endpoints."""
 
 import dataclasses
+import json
 import uuid
 
+import httpx
 import pytest
 
 from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import CustomWebhook
+from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
+from openhands.workspace import GitProvider, RepoSource
 
 
 # Test UUID matching mock_authenticated_user fixture
@@ -36,6 +40,38 @@ EVENT_DRAFT = {
         "filter": "icontains(comment.body, '@openhands')",
     },
 }
+
+SLACK_TEAM_ID = "T12345678"
+SLACK_BOT_USER_ID = "U87654321"
+
+
+def slack_apps_env(org_id: uuid.UUID = TEST_ORG_ID) -> str:
+    return json.dumps(
+        [
+            {
+                "org_id": str(org_id),
+                "app_token": "xapp-1",
+                "bot_token": "xoxb-1",
+                "team_id": SLACK_TEAM_ID,
+                "bot_user_id": SLACK_BOT_USER_ID,
+            }
+        ]
+    )
+
+
+def slack_mention_event(text: str = "<@U87654321> hello") -> dict:
+    return {
+        "team_id": SLACK_TEAM_ID,
+        "event_id": "Ev123",
+        "event": {
+            "type": "app_mention",
+            "user": "U111",
+            "channel": "C222",
+            "ts": "1700000000.000100",
+            "text": text,
+        },
+    }
+
 
 BUNDLE_DRAFT = {
     "name": "PR reviewer",
@@ -113,6 +149,19 @@ def configured_deployment(ready_deployment, monkeypatch):
 class TestGetCapabilities:
     """Tests for GET /v1/capabilities endpoint."""
 
+    async def test_agent_profiles_are_offered_without_an_agent_server(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """In cloud mode the OpenHands app server resolves the profile."""
+        monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        assert "agentProfiles" in response.json()["features"]
+        assert "pluginSpecAgentProfiles" in response.json()["features"]
+        assert "presetAgentProfiles" in response.json()["features"]
+
     async def test_configured_deployment_advertises_event_support(
         self, async_client, configured_deployment
     ):
@@ -123,7 +172,12 @@ class TestGetCapabilities:
         body = response.json()
         assert body["ready"] is True
         assert body["triggerKinds"] == ["cron", "event"]
-        assert body["eventSources"] == ["bitbucket_data_center", "github", "jira_dc"]
+        assert body["eventSources"] == [
+            "azure_devops",
+            "bitbucket_data_center",
+            "github",
+            "jira_dc",
+        ]
         assert body["eventTypes"] == [
             "issue_comment.*",
             "issues.*",
@@ -131,13 +185,45 @@ class TestGetCapabilities:
             "pull_request_review.*",
             "push",
             "release.*",
+            "workflow_run.*",
         ]
+        by_source = body["eventTypesBySource"]
+        assert set(by_source) == {
+            "azure_devops",
+            "bitbucket_data_center",
+            "github",
+            "jira_dc",
+        }
+        assert by_source["github"] == body["eventTypes"]
+        assert by_source["azure_devops"] == [
+            "git.pullrequest.created",
+            "git.pullrequest.merged",
+            "git.pullrequest.updated",
+            "ms.vss-code.git-pullrequest-comment-event",
+            "workitem.commented",
+        ]
+        assert "comment_created" in by_source["jira_dc"]
+        assert "jira:issue_updated" in by_source["jira_dc"]
+        assert "pr:opened" in by_source["bitbucket_data_center"]
+        assert "pr:comment:added" in by_source["bitbucket_data_center"]
         assert body["triggers"]["event"]["filterLanguage"] == "jmespath"
         assert "icontains" in body["triggers"]["event"]["filterFunctions"]
         assert "UTC" in body["triggers"]["cron"]["timezones"]
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
+        assert "automationDescription" in body["features"]
+        assert "repoUpdate" in body["features"]
+        assert "pluginConfigUpdate" in body["features"]
+        assert "serviceAccountRunAs" in body["features"]
+        # The list follows the pinned SDK's providers, so an SDK bump that adds
+        # one (Azure DevOps in 1.58.0) is advertised without a change here.
+        assert body["repoProviders"] == sorted(p.value for p in GitProvider)
+        assert "github" in body["repoProviders"]
+        # A client sends an advertised name back as a repo's provider, so each
+        # one must be a value RepoSource accepts.
+        for name in body["repoProviders"]:
+            assert RepoSource(url="https://example.com/org/repo", provider=name)
 
     async def test_advertises_the_configured_timeout_ceiling(
         self, async_client, ready_deployment, monkeypatch
@@ -150,6 +236,44 @@ class TestGetCapabilities:
 
         assert response.status_code == 200
         assert response.json()["maxAutomationTimeoutSeconds"] == 900
+
+    async def test_configured_stream_source_advertises_event_support(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """A Slack Socket Mode app can deliver events without webhook config."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
+        monkeypatch.setenv("AUTOMATION_SLACK_APPS", slack_apps_env())
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        body = response.json()
+        assert body["triggerKinds"] == ["cron", "event"]
+        assert body["eventSources"] == ["slack"]
+        assert "webhookDelivery" not in body["features"]
+
+    async def test_validate_accepts_configured_stream_source(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """Preflight uses the stream event key shape for Slack Socket Mode."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
+        monkeypatch.setenv("AUTOMATION_SLACK_APPS", slack_apps_env())
+        clear_config_cache()
+        draft = with_trigger(
+            EVENT_DRAFT,
+            source="slack",
+            on="app_mention",
+            filter=f"team_id == '{SLACK_TEAM_ID}'",
+        )
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(draft, sampleEvent=slack_mention_event()),
+        )
+
+        body = response.json()
+        assert body["valid"] is True
+        assert body["sampleEventMatched"] is True
 
     async def test_deployment_without_webhook_secret_withdraws_event_support(
         self, async_client, ready_deployment, monkeypatch
@@ -164,6 +288,7 @@ class TestGetCapabilities:
         assert body["triggerKinds"] == ["cron"]
         assert body["eventSources"] == []
         assert body["eventTypes"] == []
+        assert body["eventTypesBySource"] == {}
         assert "event" not in body["triggers"]
         assert "webhookDelivery" not in body["features"]
 
@@ -197,6 +322,7 @@ class TestGetCapabilities:
         body = response.json()
         assert body["eventSources"] == ["linear"]
         assert body["triggerKinds"] == ["cron", "event"]
+        assert "webhookDelivery" in body["features"]
 
     async def test_cloud_deployment_without_service_key_is_not_ready(
         self, async_client, monkeypatch
@@ -212,6 +338,7 @@ class TestGetCapabilities:
         assert body["ready"] is False
         assert body["triggerKinds"] == []
         assert body["features"] == []
+        assert body["repoProviders"] == []
         assert body["triggers"] == {}
 
     async def test_advertised_cron_floor_follows_the_scheduler_interval(
@@ -239,6 +366,18 @@ class TestValidateDraft:
             "errors": [],
             "sampleEventMatched": None,
         }
+
+    async def test_description_is_valid_in_preflight(self, async_client):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**CRON_DRAFT, "description": "Summarizes weekly support trends."}
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert response.json()["errors"] == []
 
     @pytest.mark.parametrize(
         ("draft", "expected_error"),
@@ -297,6 +436,7 @@ class TestValidateDraft:
                 id="type-the-deployment-cannot-parse",
             ),
             pytest.param("pull_request.*", [], id="wildcard-over-supported-types"),
+            pytest.param("workflow_run.completed", [], id="workflow-run-completed"),
         ],
     )
     async def test_event_types_are_checked_against_what_the_deployment_parses(
@@ -304,6 +444,64 @@ class TestValidateDraft:
     ):
         """An event that cannot be parsed would never fire the automation."""
         draft = with_trigger(EVENT_DRAFT, on=event_pattern)
+
+        response = await async_client.post(VALIDATE_URL, json=preflight(draft))
+
+        body = response.json()
+        assert addressed_errors(body) == expected_errors
+        assert body["valid"] == (expected_errors == [])
+
+    @pytest.mark.parametrize(
+        ("source", "event_pattern", "expected_errors"),
+        [
+            pytest.param("jira_dc", "comment_created", [], id="jira-dc-comment"),
+            pytest.param("jira_dc", "jira:issue_*", [], id="jira-dc-wildcard"),
+            pytest.param(
+                "jira_dc",
+                "jira:worklog_updated",
+                [("trigger.on", "event_type_not_delivered")],
+                id="jira-dc-unsubscribed",
+            ),
+            pytest.param(
+                "bitbucket_data_center", "pr:opened", [], id="bitbucket-dc-pr"
+            ),
+            pytest.param(
+                "bitbucket_data_center",
+                "pull_request.opened",
+                [("trigger.on", "event_type_not_delivered")],
+                id="bitbucket-dc-github-key",
+            ),
+            # Azure DevOps keys are dotted, so the whole pattern is compared.
+            pytest.param(
+                "azure_devops", "git.pullrequest.created", [], id="azure-devops-pr"
+            ),
+            pytest.param(
+                "azure_devops", "git.pullrequest.*", [], id="azure-devops-wildcard"
+            ),
+            pytest.param(
+                "azure_devops",
+                "pr.*",
+                [("trigger.on", "event_type_not_delivered")],
+                id="azure-devops-bitbucket-key",
+            ),
+            pytest.param(
+                "azure_devops",
+                "git.push",
+                [("trigger.on", "event_type_not_delivered")],
+                id="azure-devops-no-hook",
+            ),
+        ],
+    )
+    async def test_data_center_event_types_are_checked_against_their_catalog(
+        self,
+        async_client,
+        configured_deployment,
+        source,
+        event_pattern,
+        expected_errors,
+    ):
+        """Each source's own catalog decides which event keys can fire."""
+        draft = with_trigger(EVENT_DRAFT, source=source, on=event_pattern)
 
         response = await async_client.post(VALIDATE_URL, json=preflight(draft))
 
@@ -387,6 +585,74 @@ class TestValidateDraft:
         assert response.status_code == 200
         assert response.json()["valid"] is True
 
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {},
+            {"tags": []},
+            {"tags": [" Example Tag ", "example-tag", "Another\tTag"]},
+            {"tags": ["a" * 50] + [f"tag-{i}" for i in range(9)]},
+            {"tags": ["duplicate"] * 11},
+        ],
+        ids=["omitted", "empty", "normalized", "limits", "duplicates"],
+    )
+    async def test_raw_draft_tags_are_valid(self, async_client, fields):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight({**BUNDLE_DRAFT, **fields}, endpoint="/v1"),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert response.json()["errors"] == []
+
+    @pytest.mark.parametrize(
+        ("tags", "field", "code"),
+        [
+            ([f"tag-{i}" for i in range(11)], "tags", "value_error"),
+            (["a" * 51], "tags", "value_error"),
+            (["Bad Tag!"], "tags", "value_error"),
+            ([" "], "tags", "value_error"),
+            ("example-tag", "tags", "list_type"),
+            (None, "tags", "list_type"),
+            ([123], "tags[0]", "string_type"),
+        ],
+    )
+    async def test_raw_draft_tags_errors(self, async_client, tags, field, code):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight({**BUNDLE_DRAFT, "tags": tags}, endpoint="/v1"),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is False
+        assert addressed_errors(response.json()) == [(field, code)]
+
+    async def test_raw_draft_tags_do_not_allow_unknown_fields(self, async_client):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**BUNDLE_DRAFT, "tags": [], "unexpected": "value"}, endpoint="/v1"
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is False
+        assert addressed_errors(response.json()) == [("unexpected", "extra_forbidden")]
+
+    @pytest.mark.parametrize("endpoint", ["/v1/preset/prompt", "/v1/preset/plugin"])
+    async def test_preset_draft_tags_remain_forbidden(self, async_client, endpoint):
+        draft = {**CRON_DRAFT, "tags": ["example-tag"]}
+        if endpoint == "/v1/preset/plugin":
+            draft["plugins"] = [{"source": "github:OpenHands/extensions"}]
+        response = await async_client.post(
+            VALIDATE_URL, json=preflight(draft, endpoint=endpoint)
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is False
+        assert addressed_errors(response.json()) == [("tags", "extra_forbidden")]
+
     async def test_bundle_draft_reports_schema_errors(self, async_client):
         """A body the raw create endpoint would 422 is caught before creation."""
         draft = {**BUNDLE_DRAFT}
@@ -412,6 +678,157 @@ class TestValidateDraft:
         body = response.json()
         assert body["valid"] is False
         assert addressed_errors(body) == [("trigger.schedule", "interval_too_short")]
+
+    async def test_accepts_a_profile_of_the_callers_organization(
+        self, async_client, agent_profiles_api
+    ):
+        """A setup form with a profile selected gets past preflight."""
+        draft = {**BUNDLE_DRAFT, "agent_profile_id": agent_profiles_api.profile_id}
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(draft, endpoint="/v1"),
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.json()["valid"] is True
+
+    async def test_a_profile_already_seen_is_not_looked_up_again(
+        self, async_client, agent_profiles_api
+    ):
+        """A form validates on every edit, so a known selection costs one lookup."""
+        draft = {**BUNDLE_DRAFT, "agent_profile_id": agent_profiles_api.profile_id}
+        body = preflight(draft, endpoint="/v1")
+
+        responses = [
+            await async_client.post(
+                VALIDATE_URL, json=body, headers=agent_profiles_api.caller_auth
+            )
+            for _ in range(3)
+        ]
+
+        assert all(response.json()["valid"] for response in responses)
+        assert len(agent_profiles_api.requests) == 1
+
+    async def test_reports_a_profile_the_organization_does_not_have(
+        self, async_client, agent_profiles_api
+    ):
+        draft = {**BUNDLE_DRAFT, "agent_profile_id": str(uuid.uuid4())}
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(draft, endpoint="/v1"),
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        body = response.json()
+        assert addressed_errors(body) == [("agent_profile_id", "invalid_agent_profile")]
+
+    async def test_keeps_its_other_verdicts_when_profiles_cannot_be_checked(
+        self, async_client, agent_profiles_api
+    ):
+        """An OpenHands API failure leaves the profile unjudged, not the draft."""
+        agent_profiles_api.response = httpx.Response(500)
+        draft = {
+            **with_trigger(BUNDLE_DRAFT, schedule="*/10 * * * * *"),
+            "agent_profile_id": agent_profiles_api.profile_id,
+        }
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(draft, endpoint="/v1"),
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 200
+        assert addressed_errors(response.json()) == [
+            ("trigger.schedule", "interval_too_short")
+        ]
+
+    @pytest.mark.parametrize(
+        ("endpoint", "draft"),
+        [
+            ("/v1/preset/prompt", CRON_DRAFT),
+            (
+                "/v1/preset/plugin",
+                {**CRON_DRAFT, "plugins": [{"source": "github:acme/review"}]},
+            ),
+        ],
+    )
+    async def test_checks_a_presets_profile(
+        self, async_client, agent_profiles_api, endpoint, draft
+    ):
+        known = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**draft, "agent_profile_id": agent_profiles_api.profile_id},
+                endpoint=endpoint,
+            ),
+            headers=agent_profiles_api.caller_auth,
+        )
+        unknown = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**draft, "agent_profile_id": str(uuid.uuid4())}, endpoint=endpoint
+            ),
+            headers=agent_profiles_api.caller_auth,
+        )
+        with_model = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {
+                    **draft,
+                    "agent_profile_id": agent_profiles_api.profile_id,
+                    "model": "active-profile",
+                },
+                endpoint=endpoint,
+            ),
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert known.json()["valid"] is True
+        assert addressed_errors(unknown.json()) == [
+            ("agent_profile_id", "invalid_agent_profile")
+        ]
+        assert addressed_errors(with_model.json()) == [
+            ("agent_profile_id", "invalid_agent_profile")
+        ]
+
+    @pytest.mark.parametrize(
+        ("endpoint", "draft"),
+        [
+            ("/v1", BUNDLE_DRAFT),
+            ("/v1/preset/prompt", CRON_DRAFT),
+            (
+                "/v1/preset/plugin",
+                {**CRON_DRAFT, "plugins": [{"source": "github:acme/review"}]},
+            ),
+        ],
+    )
+    async def test_continued_conversation_cannot_opt_out_of_keep_alive(
+        self, async_client, endpoint, draft
+    ):
+        """Every creation endpoint refuses the draft its create call would."""
+        draft = {
+            **draft,
+            "trigger": {
+                "type": "event",
+                "source": "github",
+                "on": "issue_comment.created",
+                "destination": "continue_conversation",
+                "subject_key_expr": "issue.number",
+            },
+            "keep_alive": False,
+        }
+
+        response = await async_client.post(
+            VALIDATE_URL, json=preflight(draft, endpoint=endpoint)
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert addressed_errors(body) == [(None, "value_error")]
+        assert CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR in body["errors"][0]["message"]
 
     async def test_unknown_creation_endpoint_is_rejected(self, async_client):
         """Preflight only validates drafts for the endpoints it may name."""

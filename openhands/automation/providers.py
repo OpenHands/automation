@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 
 DEFAULT_VERIFIER: Final[str] = "hmac_sha256_hex"
 DEFAULT_BUILTIN_SIGNATURE_HEADER: Final[str] = "X-Hub-Signature-256"
+# The OpenHands server forwards every built-in source's delivery id in GitHub's
+# header name, as it signs every source into GitHub's signature header.
+DEFAULT_BUILTIN_EVENT_ID_HEADER: Final[str] = "X-GitHub-Delivery"
 
 STANDARD_WEBHOOKS_TOLERANCE_SECONDS: Final[int] = 300
 STANDARD_WEBHOOKS_ID_HEADER: Final[str] = "webhook-id"
@@ -279,6 +282,9 @@ VERIFIERS.update(
 
 def _register_builtin_providers() -> None:
     """Register the built-in providers. Called at module load."""
+    from openhands.automation.event_schemas.azure_devops import (
+        parse_azure_devops_event,
+    )
     from openhands.automation.event_schemas.bitbucket_data_center import (
         parse_bitbucket_data_center_event,
     )
@@ -286,12 +292,19 @@ def _register_builtin_providers() -> None:
     from openhands.automation.event_schemas.jira_dc import parse_jira_dc_event
 
     # All forwarded by the OpenHands server, which signs with the single shared
-    # AUTOMATION_WEBHOOK_SECRET into GitHub's header name. Only GitHub names its
-    # deliveries; the other two are recorded without being deduplicated.
+    # AUTOMATION_WEBHOOK_SECRET into GitHub's header name and names the
+    # delivery the same way: GitHub's own delivery id, Bitbucket DC's request
+    # id, the body signature it already dedupes Jira DC on. It sends no id for
+    # Azure DevOps, whose events are recorded without being deduplicated.
     for source, parse, event_id_header in (
-        ("bitbucket_data_center", parse_bitbucket_data_center_event, None),
-        ("github", parse_github_event_auto, "X-GitHub-Delivery"),
-        ("jira_dc", parse_jira_dc_event, None),
+        ("azure_devops", parse_azure_devops_event, None),
+        (
+            "bitbucket_data_center",
+            parse_bitbucket_data_center_event,
+            DEFAULT_BUILTIN_EVENT_ID_HEADER,
+        ),
+        ("github", parse_github_event_auto, DEFAULT_BUILTIN_EVENT_ID_HEADER),
+        ("jira_dc", parse_jira_dc_event, DEFAULT_BUILTIN_EVENT_ID_HEADER),
     ):
         register_provider(
             Provider(

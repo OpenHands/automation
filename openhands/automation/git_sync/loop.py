@@ -6,15 +6,18 @@ the source of truth for anything not yet pushed.
 """
 
 import asyncio
+import hashlib
 import logging
 import shutil
 import tarfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final, NamedTuple
 
+from fastapi import HTTPException
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import or_, select, update
 from sqlalchemy.engine import CursorResult
@@ -29,10 +32,12 @@ from openhands.automation.config import (
     normalize_git_sync_path,
 )
 from openhands.automation.git_sync.client import (
+    GitAuthError,
     GitSyncError,
     commit_and_push,
     diff_names,
     ensure_repo,
+    last_commit_author,
     pull,
 )
 from openhands.automation.git_sync.config_override import (
@@ -40,6 +45,11 @@ from openhands.automation.git_sync.config_override import (
     effective_interval_for,
     effective_settings_for,
     get_or_create_org_config,
+)
+from openhands.automation.git_sync.plugin_spec import (
+    PLUGIN_SPEC_RUNTIME,
+    validate_synced_plugin_entrypoint,
+    validate_synced_plugin_spec,
 )
 from openhands.automation.git_sync.serializer import (
     METADATA_FILENAME,
@@ -51,6 +61,7 @@ from openhands.automation.git_sync.serializer import (
     decrypt_file_tree,
     deserialize_automation,
     encrypt_file_tree,
+    is_encrypted,
     is_generated_path,
     serialize_automation,
 )
@@ -58,16 +69,33 @@ from openhands.automation.models import (
     Automation,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
+    AutomationState,
     TarballUpload,
     UploadStatus,
 )
-from openhands.automation.schemas import Trigger, validate_command_string
+from openhands.automation.observability_associations import (
+    validate_observability_associations,
+)
+from openhands.automation.schemas import (
+    Trigger,
+    continue_conversation_keep_alive,
+    validate_command_string,
+)
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
+from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.change_events import GIT_SYNC_ACTOR, set_audit_actor
+from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+    parse_automation_enabled,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
+    get_org_upload,
     is_valid_external_url,
     parse_internal_upload_id,
 )
@@ -264,6 +292,14 @@ def _remove_exported_automation(directory: Path) -> None:
         directory.rmdir()
 
 
+# Resolves the author of the commit behind an imported directory, for the log.
+CommitAuthor = Callable[[], Awaitable[str]]
+
+
+async def _unknown_author() -> str:
+    return "unknown author"
+
+
 # --- Import owner -------------------------------------------------------------
 
 
@@ -316,10 +352,7 @@ async def _read_tarball_bytes(
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, automation.org_id)
     if upload is None:
         raise TarballUnavailableError(
             f"automation {automation.id} references missing upload {upload_id}"
@@ -388,27 +421,24 @@ async def _stored_tarball_matches(
 
 
 async def _delete_superseded_upload(
-    session: AsyncSession, tarball_path: str, pending_storage_deletes: list[str]
+    session: AsyncSession, automation: Automation, pending_storage_deletes: list[str]
 ) -> None:
     """Mark the upload an automation just stopped pointing at for removal.
 
     Without this, every git-side edit left the previous upload row and file
     referenced by nothing, so routine PR edits accumulated a tarball copy per
     merge with no reaper to collect them. Mirrors the cleanup
-    `regenerate_preset_prompt_tarball` does for prompt edits.
+    `regenerate_preset_tarball` does for prompt and repository edits.
 
     Soft-deletes the record in the current transaction; the storage object is
     only queued on `pending_storage_deletes` and removed after the cycle's
     commit. Deleting before the commit destroyed the object irreversibly while
     a rollback revived the record, stranding it pointing at a missing object.
     """
-    upload_id = parse_internal_upload_id(tarball_path)
+    upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, automation.org_id)
     if upload is None or upload.deleted_at is not None:
         return
 
@@ -456,9 +486,7 @@ async def _resolve_tarball_path(
             slug,
         )
         if existing is not None:
-            await _delete_superseded_upload(
-                session, existing.tarball_path, pending_storage_deletes
-            )
+            await _delete_superseded_upload(session, existing, pending_storage_deletes)
         return new_path
 
     tarball_source = fields.get("tarball_source") or {}
@@ -496,30 +524,102 @@ async def _validate_and_resolve_fields(
         raise ValueError("automation.yaml missing required 'name' or 'entrypoint'")
 
     trigger = _TRIGGER_ADAPTER.validate_python(fields.get("trigger") or {})
-    entrypoint = validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
+    # A ValueError skips the directory, like every other invalid field.
+    keep_alive = continue_conversation_keep_alive(trigger, fields.get("keep_alive"))
+    observability_associations = validate_observability_associations(
+        fields.get("observability_associations")
+    )
+    # Export omits an empty list, so a missing key means no tags.
+    raw_tags = fields.get("tags") or []
+    if not isinstance(raw_tags, list):
+        raise ValueError("automation.yaml 'tags' must be a list")
+    tags = normalize_tags(raw_tags)
+    entrypoint = (
+        validate_synced_plugin_entrypoint(raw_entrypoint)
+        if fields.get("plugin_spec") is not None
+        else validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
+    )
     setup_script_path = validate_command_string(
         fields.get("setup_script_path"), "setup_script_path"
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
-    tarball_path = await _resolve_tarball_path(
-        session, fields, deserialized, slug, existing, pending_storage_deletes, owner
+
+    raw_state = fields.get("state")
+    raw_enabled = fields.get("enabled")
+
+    requested_enabled = parse_automation_enabled(raw_enabled)
+    if raw_state is None and raw_enabled is None:
+        # Neither key given (or both empty in YAML): an update keeps the current
+        # value, and a new folder imports INACTIVE so a person turns it on.
+        # Anyone who can push to the repo could otherwise start an automation
+        # as its owner.
+        state = existing.state if existing is not None else AutomationState.INACTIVE
+        requested_enabled = automation_state_enabled(state)
+    else:
+        if requested_enabled is None:
+            requested_enabled = True
+        state = model_automation_state(raw_state, requested_enabled)
+    enabled = automation_state_enabled(state)
+
+    if existing is not None and state == AutomationState.DRAFT != existing.state:
+        raise ValueError("existing automations cannot be moved to draft state")
+    if (
+        raw_state is not None
+        and raw_enabled is not None
+        and requested_enabled != enabled
+    ):
+        raise ValueError("enabled must be true only when state is ACTIVE")
+
+    agent_profile_id = (
+        uuid.UUID(fields["agent_profile_id"])
+        if fields.get("agent_profile_id")
+        else None
     )
+    try:
+        validate_agent_profile_selection(agent_profile_id, fields.get("model"))
+    except HTTPException as exc:
+        raise ValueError(exc.detail) from exc
+    plugin_spec = fields.get("plugin_spec")
+    if plugin_spec is not None:
+        plugin_spec = validate_synced_plugin_spec(plugin_spec)
+        source = fields.get("tarball_source") or {}
+        if (
+            deserialized.tarball_bytes is not None
+            or source.get("url") != PLUGIN_SPEC_RUNTIME
+        ):
+            raise ValueError(
+                "plugin_spec requires plugin-spec://runtime without tarball files"
+            )
+        tarball_path = PLUGIN_SPEC_RUNTIME
+    else:
+        tarball_path = await _resolve_tarball_path(
+            session,
+            fields,
+            deserialized,
+            slug,
+            existing,
+            pending_storage_deletes,
+            owner,
+        )
 
     return {
         "name": name,
+        "description": fields.get("description"),
         "model": fields.get("model"),
+        "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
+        "observability_associations": observability_associations,
+        "tags": tags,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
         "timeout": timeout,
-        "keep_alive": fields.get("keep_alive"),
-        # `dict.get`'s default only applies when the key is absent. A hand edit
-        # leaving "enabled:" empty is valid YAML parsing to None, and
-        # bool(None) would silently disable a live automation on import.
-        "enabled": True if fields.get("enabled") is None else bool(fields["enabled"]),
+        "keep_alive": keep_alive,
+        "enabled": enabled,
+        "state": state,
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,
+        "plugin_spec": plugin_spec,
     }
 
 
@@ -531,6 +631,7 @@ async def _create_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     if owner is None:
         # A ValueError skips just this directory (see the import loop) rather
@@ -542,7 +643,14 @@ async def _create_automation_from_git(
     values = await _validate_and_resolve_fields(
         session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
     )
-    automation = Automation(user_id=owner.user_id, org_id=owner.org_id, **values)
+    # The admin who saved the Git Sync config both creates it and is its
+    # run-as identity.
+    automation = Automation(
+        user_id=owner.user_id,
+        created_by_user_id=owner.user_id,
+        org_id=owner.org_id,
+        **values,
+    )
     session.add(automation)
     await session.flush()
 
@@ -557,7 +665,19 @@ async def _create_automation_from_git(
             dirty=False,
         )
     )
-    logger.info("Imported new automation %s from git (slug=%r)", automation.id, slug)
+    logger.info(
+        "Imported new automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        slug,
+        await commit_author(),
+    )
+
+
+def _same_trigger(stored: dict, validated: dict) -> bool:
+    try:
+        return _TRIGGER_ADAPTER.validate_python(stored).model_dump() == validated
+    except ValidationError:
+        return False
 
 
 async def _update_automation_from_git(
@@ -567,6 +687,7 @@ async def _update_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     new_hash = compute_content_hash(dir_files)
     if new_hash == state.content_hash:
@@ -591,12 +712,21 @@ async def _update_automation_from_git(
         existing=automation,
     )
     for column, value in values.items():
+        if column == "trigger" and _same_trigger(automation.trigger, value):
+            # A stored trigger may lack defaults the validated one carries;
+            # do not rewrite it, so the audit row does not list it.
+            continue
         setattr(automation, column, value)
 
     state.content_hash = new_hash
     state.last_synced_commit = head
     state.last_synced_at = utcnow()
-    logger.info("Updated automation %s from git (slug=%r)", automation.id, state.slug)
+    logger.info(
+        "Updated automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        state.slug,
+        await commit_author(),
+    )
 
 
 async def _changed_slugs_since(
@@ -705,6 +835,13 @@ async def _import_from_git(
             continue
 
         dir_files = await asyncio.to_thread(_read_directory_files, directory)
+
+        # Looked up only when a create or update logs it, not for every
+        # directory the diff touched.
+        async def commit_author(directory: Path = directory) -> str:
+            author = await last_commit_author(workdir, directory, timeout)
+            return author or "unknown author"
+
         # A rolled-back savepoint revives the soft-deleted upload rows queued
         # inside it, so their storage paths must not stay pending for deletion.
         pending_snapshot = len(pending_storage_deletes)
@@ -728,6 +865,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
                     result.imported += 1
                 else:
@@ -738,6 +876,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
         except (ValidationError, ValueError) as e:
             del pending_storage_deletes[pending_snapshot:]
@@ -769,6 +908,7 @@ async def _import_from_git(
         automation = await session.get(Automation, state.automation_id)
         if automation is not None and automation.deleted_at is None:
             automation.enabled = False
+            automation.state = AutomationState.INACTIVE
             automation.deleted_at = utcnow()
             result.deleted_in_db += 1
             logger.info("Soft-deleted automation %s (removed from git)", automation.id)
@@ -889,6 +1029,10 @@ def _exported_content_is_current(
     Compares decrypted plaintext, not the bytes on disk: Fernet uses a fresh IV
     per encryption, so identical content re-encrypts to different ciphertext
     and every cycle would look changed. Only serializer-owned paths count.
+
+    With a key set, a file still on disk as plaintext is stale too, though it
+    decrypts (passes through) to the same content: it was written before the
+    key was, and skipping it would leave it readable in the repo.
     """
     if not directory.is_dir():
         return False
@@ -899,6 +1043,8 @@ def _exported_content_is_current(
             if is_generated_path(name)
         }
         if encryption_key:
+            if not all(is_encrypted(content) for content in on_disk.values()):
+                return False
             on_disk = decrypt_file_tree(on_disk, encryption_key)
     except Exception:
         # Unreadable or undecryptable (rotated key, corrupted commit): treat as
@@ -917,6 +1063,36 @@ async def _export_dirty_automations(
     encryption_key: str,
     result: SyncCycleResult,
 ) -> bool:
+    # Repair exports from versions that silently omitted plugin_spec.
+    plugin_states = (
+        (
+            await session.execute(
+                select(AutomationGitSyncState)
+                .join(Automation, Automation.id == AutomationGitSyncState.automation_id)
+                .where(
+                    AutomationGitSyncState.org_id == org_id,
+                    AutomationGitSyncState.dirty.is_(False),
+                    Automation.tarball_path == PLUGIN_SPEC_RUNTIME,
+                    Automation.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for state in plugin_states:
+        directory = sync_root / state.slug
+        try:
+            files = await asyncio.to_thread(_read_directory_files, directory)
+            if encryption_key:
+                files = decrypt_file_tree(files, encryption_key)
+            metadata = deserialize_automation(files)
+        except (OSError, ValueError):
+            logger.warning("Could not inspect legacy plugin export %r", state.slug)
+            continue
+        if metadata is not None and "plugin_spec" not in metadata.fields:
+            state.dirty = True
+    await session.flush()
     states = (
         (
             await session.execute(
@@ -1092,6 +1268,16 @@ async def run_sync_cycle(
             org_config = await get_or_create_org_config(session, org_id)
             org_config.last_error = str(e)[:2000]
             org_config.last_error_at = utcnow()
+            # Only auth failures, which won't clear on the next tick, build the
+            # streak behind `_is_due`'s backoff and `_cycle`'s quiet logging. A
+            # transient one (outage, timeout) resets it, so the org is back on
+            # its plain interval as soon as the provider recovers.
+            if isinstance(e, GitAuthError):
+                org_config.consecutive_auth_failures = (
+                    org_config.consecutive_auth_failures or 0
+                ) + 1
+            else:
+                org_config.consecutive_auth_failures = 0
             await session.commit()
         raise
     finally:
@@ -1139,6 +1325,8 @@ async def _run_sync_cycle_leased(
     # single-writer lock for the whole transaction, and a push can take up to
     # git_sync_git_timeout_seconds.
     async with session_factory() as session:
+        # Imports, updates and deletes from the repo are audited as Git sync.
+        set_audit_actor(session, GIT_SYNC_ACTOR)
         org_config = await get_or_create_org_config(session, org_id)
         last_commit = org_config.last_synced_commit
         owner = _import_owner(org_config)
@@ -1209,18 +1397,71 @@ async def _run_sync_cycle_leased(
         # `last_error` to go with it.
         org_config.last_error = None
         org_config.last_error_at = None
+        # A success clears the backoff: the next cycle runs at the normal
+        # interval again, which is what makes recovery automatic once a token
+        # or repo is fixed -- no manual re-enable.
+        org_config.consecutive_auth_failures = 0
         await session.commit()
 
     return result
 
 
+def _retry_backoff_seconds(
+    interval_seconds: int, consecutive_auth_failures: int, backoff_cap_seconds: float
+) -> float:
+    """The un-jittered wait an org owes before its next cycle.
+
+    Healthy it is the plain interval. After auth failures the wait grows
+    exponentially -- ``interval * 2**failures`` -- capped at
+    ``backoff_cap_seconds``, so a revoked token or deleted repo is re-probed at
+    most that often instead of every interval, and still self-heals on the next
+    capped probe after it is fixed. ``_is_due`` jitters this and floors it at
+    the interval.
+    """
+    if consecutive_auth_failures <= 0:
+        return float(interval_seconds)
+    # Bound the shift so `2**failures` can't overflow into an enormous float on
+    # a long-broken org; the cap makes anything past a handful of failures moot.
+    shift = min(consecutive_auth_failures, 30)
+    return min(float(interval_seconds * (2**shift)), backoff_cap_seconds)
+
+
+def _jitter_fraction(org_id: uuid.UUID, reference: datetime) -> float:
+    """A deterministic fraction in ``[0, 1)`` keyed on the org and its attempt.
+
+    Deterministic on purpose: ``_is_due`` is re-evaluated every tick across a
+    whole wait window, and fresh randomness each tick would let any low roll
+    fire early, collapsing the wait toward zero. Keying on ``org_id`` spreads
+    different orgs apart; keying on the attempt time re-rolls the offset each
+    round so a herd doesn't stay phase-locked.
+    """
+    seed = f"{org_id}:{reference.timestamp():.0f}".encode()
+    digest = hashlib.blake2b(seed, digest_size=8).digest()
+    return int.from_bytes(digest, "big") / (1 << 64)
+
+
 def _is_due(
-    org_config: AutomationGitSyncOrgConfig, interval_seconds: int, now: datetime
+    org_config: AutomationGitSyncOrgConfig,
+    interval_seconds: int,
+    now: datetime,
+    backoff_cap_seconds: float,
 ) -> bool:
-    """Whether the org's interval has elapsed since its last cycle ended.
+    """Whether the org's (backed-off, jittered) wait has elapsed since its last
+    cycle.
 
     A failed cycle counts as an attempt too: a repo that is down waits out the
-    interval like a healthy one instead of being retried every tick.
+    interval like a healthy one instead of being retried every tick. After
+    repeated auth failures the wait grows exponentially (see
+    ``_retry_backoff_seconds``) so a persistently broken repo is probed ever
+    less often, up to ``backoff_cap_seconds``.
+
+    While backing off, the wait carries equal jitter -- a deterministic offset
+    in ``[0.5, 1.0)`` of the ceiling -- so orgs knocked out together (a mass
+    token expiry) don't all hit the cap boundary on the same tick and retry as
+    a synchronized herd. The result is floored at the interval: backing off
+    must never retry a failing org sooner than a healthy one, which a cap
+    below the interval (an hourly or daily sync) would otherwise do. Healthy
+    orgs are not jittered -- their independent ``last_run_at`` keeps them apart.
     """
     attempts = [
         ensure_utc(at)
@@ -1229,7 +1470,13 @@ def _is_due(
     ]
     if not attempts:
         return True
-    return now - max(attempts) >= timedelta(seconds=interval_seconds)
+    last_attempt = max(attempts)
+    failures = org_config.consecutive_auth_failures or 0
+    wait = _retry_backoff_seconds(interval_seconds, failures, backoff_cap_seconds)
+    if failures > 0:
+        wait *= 0.5 + 0.5 * _jitter_fraction(org_config.org_id, last_attempt)
+        wait = max(wait, float(interval_seconds))
+    return now - last_attempt >= timedelta(seconds=wait)
 
 
 async def git_sync_loop(
@@ -1260,7 +1507,9 @@ async def git_sync_loop(
 
     async def _cycle() -> None:
         now = utcnow()
-        due: list[tuple[uuid.UUID, GitSyncSettings]] = []
+        # (org_id, effective settings, auth-failure streak before this cycle).
+        # The streak decides how loud a fresh auth failure is logged below.
+        due: list[tuple[uuid.UUID, GitSyncSettings, int]] = []
         async with session_factory() as session:
             if service_settings.is_local_mode:
                 await get_or_create_org_config(session, _get_local_user().org_id)
@@ -1286,16 +1535,44 @@ async def git_sync_loop(
                         org_config.org_id,
                     )
                     continue
-                if _is_due(org_config, interval, now):
-                    due.append((org_config.org_id, effective))
+                if _is_due(
+                    org_config,
+                    interval,
+                    now,
+                    effective.git_sync_failure_backoff_cap_seconds,
+                ):
+                    due.append(
+                        (
+                            org_config.org_id,
+                            effective,
+                            org_config.consecutive_auth_failures or 0,
+                        )
+                    )
 
         # One org's failure must not stop the others, so each gets its own
         # try: `run_periodic_loop` only guards the tick as a whole.
-        for org_id, effective in due:
+        for org_id, effective, prior_auth_failures in due:
             try:
                 result = await run_sync_cycle(
                     session_factory, org_id, effective, service_settings
                 )
+            except GitAuthError:
+                # Auth failures are persistent (revoked token, repo gone). Log
+                # the full traceback for the first few, then -- once past the
+                # threshold -- one WARNING per cycle instead, so a permanently
+                # broken repo stops flooding the logs while still being visible.
+                threshold = effective.git_sync_auth_failure_backoff_threshold
+                if threshold > 0 and prior_auth_failures + 1 >= threshold:
+                    logger.warning(
+                        "Git sync for org %s keeps failing authentication "
+                        "(%d consecutive); backing off and suppressing the "
+                        "traceback until its token or repo recovers",
+                        org_id,
+                        prior_auth_failures + 1,
+                    )
+                else:
+                    logger.exception("Git sync cycle failed for org %s (auth)", org_id)
+                continue
             except GitSyncError:
                 logger.exception("Git sync cycle failed for org %s", org_id)
                 continue

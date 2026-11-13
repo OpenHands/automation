@@ -19,6 +19,7 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     CustomWebhook,
 )
 from openhands.automation.providers import (
@@ -80,6 +81,7 @@ async def get_webhook_config(
                 is_builtin=True,
                 signature_header=provider.signature_header,
                 signature_scheme=provider.verifier,
+                event_id_header=provider.event_id_header,
             )
         return None
 
@@ -100,6 +102,8 @@ async def get_webhook_config(
             signature_header=webhook.signature_header,
             # A cleared column reads as the default.
             signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
+            # NULL means this source does not identify deliveries.
+            event_id_header=webhook.event_id_header,
         )
     return None
 
@@ -134,6 +138,7 @@ async def get_event_automations(
     base_filters = [
         Automation.org_id == org_id,
         Automation.enabled == True,  # noqa: E712
+        Automation.state == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 
@@ -176,6 +181,38 @@ async def get_event_automations(
     return result_pairs
 
 
+def _enabled_event_automation_filters(source: str) -> list[Any]:
+    """Filters selecting enabled, active event automations on a source."""
+    from sqlalchemy import func, literal
+
+    if using_sqlite():
+        trigger_filter = and_(
+            func.json_extract(Automation.trigger, "$.type") == literal("event"),
+            func.json_extract(Automation.trigger, "$.source") == literal(source),
+        )
+    else:
+        trigger_filter = and_(
+            Automation.trigger.op("->>")("type") == literal("event"),
+            Automation.trigger.op("->>")("source") == literal(source),
+        )
+    return [
+        Automation.enabled == True,  # noqa: E712
+        Automation.state == AutomationState.ACTIVE,
+        Automation.deleted_at.is_(None),
+        trigger_filter,
+    ]
+
+
+async def get_event_automation_org_ids(source: str, session: AsyncSession) -> list[str]:
+    """Organizations with an enabled event automation on a source."""
+    result = await session.execute(
+        select(Automation.org_id)
+        .where(*_enabled_event_automation_filters(source))
+        .distinct()
+    )
+    return sorted(str(org_id) for org_id in result.scalars().all())
+
+
 def _event_type_from_pattern(pattern: str) -> str:
     return pattern.split(".", 1)[0].strip()
 
@@ -193,26 +230,8 @@ async def get_requested_event_types(
     event type. Unsupported requested types are omitted when a supported set is
     provided.
     """
-    from sqlalchemy import func, literal
-
-    base_filters = [
-        Automation.enabled == True,  # noqa: E712
-        Automation.deleted_at.is_(None),
-    ]
-
-    if using_sqlite():
-        trigger_filter = and_(
-            func.json_extract(Automation.trigger, "$.type") == literal("event"),
-            func.json_extract(Automation.trigger, "$.source") == literal(source),
-        )
-    else:
-        trigger_filter = and_(
-            Automation.trigger.op("->>")("type") == literal("event"),
-            Automation.trigger.op("->>")("source") == literal(source),
-        )
-
     result = await session.execute(
-        select(Automation.trigger).where(*base_filters, trigger_filter)
+        select(Automation.trigger).where(*_enabled_event_automation_filters(source))
     )
 
     supported = (
@@ -243,6 +262,9 @@ async def create_automation_run(
     session: AsyncSession,
     event_payload: dict[str, Any] | None = None,
     subject_key: str | None = None,
+    trigger_event_id: uuid.UUID | None = None,
+    observability_parent_span_context: str | None = None,
+    observability_associations: dict[str, Any] | None = None,
 ) -> AutomationRun:
     """
     Create a PENDING automation run for an event-triggered automation.
@@ -263,9 +285,13 @@ async def create_automation_run(
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
+        trigger_source="event",
         event_payload=event_payload,
         telemetry_distinct_id=automation.telemetry_distinct_id,
         subject_key=subject_key,
+        trigger_event_id=trigger_event_id,
+        observability_parent_span_context=observability_parent_span_context,
+        observability_associations=observability_associations,
     )
     session.add(run)
     return run

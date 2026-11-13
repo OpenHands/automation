@@ -3,29 +3,41 @@
 import json
 import logging
 import uuid
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError
 from typing import Any
 
 import httpx
 from fastapi import Request
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from openhands.automation import __version__
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import get_config
 from openhands.automation.middleware import (
     TelemetryRequestContext,
     build_telemetry_request_context,
 )
-from openhands.automation.models import Automation, AutomationRun
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunAsKind,
+)
 from openhands.automation.utils.service_metadata import (
     get_service_metadata,
     set_service_metadata,
 )
 from openhands.automation.utils.time import ensure_utc
-from openhands.automation.utils.version import get_server_version_info
+from openhands.automation.utils.version import (
+    ServerVersionInfo,
+    get_sdk_version,
+    get_server_version_info,
+)
 
 
 logger = logging.getLogger("automation.telemetry")
+_telemetry_http_client: httpx.AsyncClient | None = None
 AUTOMATION_BACKEND_ID_PROPERTY = "automation_backend_id"
 FRONTEND_DISTINCT_ID_PROPERTY = "frontend_distinct_id"
 POSTHOG_CAPTURE_PATH = "/capture/"
@@ -33,6 +45,23 @@ TELEMETRY_CONSENT_METADATA_KEY = "posthog_frontend_consent_by_distinct_id"
 TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
 
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
+
+
+def get_telemetry_http_client() -> httpx.AsyncClient:
+    """Return the process-wide client used for PostHog capture requests."""
+    global _telemetry_http_client
+    if _telemetry_http_client is None:
+        _telemetry_http_client = httpx.AsyncClient(timeout=2.0)
+    return _telemetry_http_client
+
+
+async def close_telemetry_http_client() -> None:
+    """Close the shared telemetry client and clear it for future lifespans."""
+    global _telemetry_http_client
+    client = _telemetry_http_client
+    _telemetry_http_client = None
+    if client is not None:
+        await client.aclose()
 
 
 async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
@@ -238,6 +267,20 @@ def _resolve_distinct_id(
     )
 
 
+@lru_cache(maxsize=1)
+def _installed_sdk_version() -> str:
+    # Only successful lookups are cached: lru_cache does not memoize exceptions.
+    return get_sdk_version()
+
+
+def _server_version_properties() -> ServerVersionInfo:
+    try:
+        sdk_version = _installed_sdk_version()
+    except PackageNotFoundError:
+        return get_server_version_info(missing_sdk_version="unknown")
+    return {"package_version": __version__, "sdk_version": sdk_version}
+
+
 def _base_properties(
     *,
     request_context: TelemetryRequestContext,
@@ -247,10 +290,16 @@ def _base_properties(
     backend_distinct_id: str,
 ) -> dict[str, Any]:
     settings = get_config().service
+    # A self-hosted (OHE) deployment runs in cloud mode but is not remote; the
+    # override labels its events correctly.
+    deployment_mode = settings.telemetry_deployment_mode or (
+        "local" if settings.is_local_mode else "cloud"
+    )
     properties: dict[str, Any] = {
-        "deployment_mode": "local" if settings.is_local_mode else "cloud",
+        "deployment_mode": deployment_mode,
+        "deployment_kind": "remote" if deployment_mode == "cloud" else "local",
         "automation_service": "openhands_automation",
-        **get_server_version_info(missing_sdk_version="unknown"),
+        **_server_version_properties(),
     }
 
     properties[AUTOMATION_BACKEND_ID_PROPERTY] = backend_distinct_id
@@ -267,6 +316,10 @@ def _base_properties(
             {
                 "automation_id": str(automation.id),
                 "automation_enabled": automation.enabled,
+                # None on a row not flushed yet: the column default is not applied.
+                "run_as_kind": (
+                    automation.run_as_kind or AutomationRunAsKind.USER
+                ).value,
                 "trigger_type": _trigger_type(automation),
                 "timeout_seconds": automation.timeout,
             }
@@ -307,6 +360,43 @@ def _base_properties(
             )
             properties["duration_ms"] = duration_ms
 
+    return properties
+
+
+def automation_created_event() -> str:
+    """Name of the automation-created event on this deployment.
+
+    Self-hosted Enterprise reports it as ``ohe_automation_created`` (OHE-3657);
+    every other deployment keeps ``automation_created``.
+    """
+    if get_config().service.telemetry_deployment_mode == "self_hosted":
+        return "ohe_automation_created"
+    return "automation_created"
+
+
+async def automation_created_properties(
+    session: AsyncSession, automation: Automation
+) -> dict[str, Any]:
+    """Properties every ``automation_created`` capture carries.
+
+    ``is_first_automation_in_org`` is true when no other automation row exists
+    in the organization, so the first creation marks activation (OHE-3657).
+    Never raises: a failed count leaves the flag out rather than failing the
+    request.
+    """
+    properties: dict[str, Any] = {"automation_name": automation.name}
+    try:
+        others = await session.scalar(
+            select(func.count())
+            .select_from(Automation)
+            .where(
+                Automation.org_id == automation.org_id,
+                Automation.id != automation.id,
+            )
+        )
+        properties["is_first_automation_in_org"] = (others or 0) == 0
+    except Exception:
+        logger.debug("Failed to count automations for telemetry", exc_info=True)
     return properties
 
 
@@ -408,9 +498,8 @@ async def _capture_automation_event(
         "properties": event_properties,
     }
 
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        response = await client.post(
-            f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
-            json=payload,
-        )
-        response.raise_for_status()
+    response = await get_telemetry_http_client().post(
+        f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
+        json=payload,
+    )
+    response.raise_for_status()

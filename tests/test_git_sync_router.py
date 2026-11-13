@@ -16,7 +16,11 @@ from openhands.automation.config import (
 )
 from openhands.automation.git_sync import SyncCycleResult
 from openhands.automation.git_sync.router import _background_sync_tasks
-from openhands.automation.models import AutomationGitSyncOrgConfig
+from openhands.automation.models import (
+    Automation,
+    AutomationGitSyncOrgConfig,
+    AutomationGitSyncState,
+)
 
 
 # The org `async_client` authenticates as (see conftest.py).
@@ -116,6 +120,51 @@ class TestGitSyncConfig:
         # The key itself is never echoed back in any response.
         assert "encryption_key" not in body
         assert "token" not in body
+
+    async def test_changing_the_encryption_key_marks_the_orgs_automations_dirty(
+        self, async_client, async_session
+    ):
+        """The export only rewrites dirty automations, so without this a newly
+        set key left every already-synced one readable in the repo (#551)."""
+        states = {}
+        for org_id in (ORG_ID, OTHER_ORG_ID):
+            automation = Automation(
+                user_id=uuid.uuid4(),
+                org_id=org_id,
+                name=f"synced-{org_id}",
+                trigger={"type": "cron", "schedule": "0 9 * * 1"},
+                tarball_path="https://example.com/a.tar.gz",
+                entrypoint="python main.py",
+            )
+            async_session.add(automation)
+            await async_session.flush()
+            states[org_id] = AutomationGitSyncState(
+                automation_id=automation.id, org_id=org_id, slug="synced", dirty=False
+            )
+            async_session.add(states[org_id])
+        await async_session.commit()
+
+        async def dirty_count(json: dict) -> int:
+            response = await async_client.put(
+                "/api/automation/v1/git-sync/config", json=json
+            )
+            assert response.status_code == 200
+            return response.json()["dirty_count"]
+
+        async def mark_clean() -> None:
+            states[ORG_ID].dirty = False
+            await async_session.commit()
+
+        assert await dirty_count({"branch": "develop"}) == 0
+        assert await dirty_count({"encryption_key": "the-key"}) == 1
+        await mark_clean()
+        assert await dirty_count({"encryption_key": "the-key"}) == 0
+        assert await dirty_count({"encryption_key": "another-key"}) == 1
+        await mark_clean()
+        assert await dirty_count({"encryption_key": None}) == 1
+
+        await async_session.refresh(states[OTHER_ORG_ID])
+        assert states[OTHER_ORG_ID].dirty is False
 
     async def test_omitted_fields_are_left_unchanged(self, async_client):
         await async_client.put(
@@ -576,6 +625,40 @@ class TestOrgScoping:
             await first.commit()
             await asyncio.wait_for(waiter, timeout=5)
             await second.commit()
+
+    @pytest.mark.parametrize(
+        ("update", "resets"),
+        [
+            ({"token": "fresh-token"}, True),
+            ({"repo_url": "https://example.com/other.git"}, True),
+            ({"branch": "develop"}, True),
+            ({"token": None}, True),
+            ({"token": "old-token"}, False),
+            ({"path": "elsewhere"}, False),
+            ({"interval_seconds": 600}, False),
+        ],
+    )
+    async def test_repo_or_token_change_clears_the_auth_backoff(
+        self, async_client, async_session, update, resets
+    ):
+        """A corrected repo or token resumes its normal interval straight away
+        instead of waiting out a backoff earned by the old config."""
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/repo.git", "token": "old-token"},
+        )
+        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        assert row is not None
+        row.consecutive_auth_failures = 5
+        await async_session.commit()
+
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json=update
+        )
+        assert response.status_code == 200
+
+        await async_session.refresh(row)
+        assert row.consecutive_auth_failures == (0 if resets else 5)
 
     async def test_records_who_configured_the_org(
         self, async_client, async_session, mock_authenticated_user

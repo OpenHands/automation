@@ -1,0 +1,6 @@
+import os
+
+# A local Agent Canvas run is handed the Agent Server URL. A run on OpenHands
+# Cloud or Enterprise is handed the OpenHands API instead.
+_CLOUD_API_URL = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
+IS_CLOUD = bool(_CLOUD_API_URL) and not os.environ.get("AGENT_SERVER_URL")

@@ -8,9 +8,14 @@ import subprocess
 
 import pytest
 
+import openhands.automation.git_sync.client as client_module
 from openhands.automation.git_sync.client import (
+    GitAuthError,
     GitSyncError,
+    _auth_config_args,
+    _looks_like_auth_failure,
     _non_interactive_env,
+    _run_git,
     check_remote_access,
     commit_and_push,
     current_head,
@@ -32,6 +37,20 @@ def origin(tmp_path):
 
 def _repo_url(path) -> str:
     return f"file://{path}"
+
+
+def _ext_helper(tmp_path, name: str, stderr_line: str) -> list[str]:
+    """Args that make `git` fail offline with a controlled stderr line.
+
+    git's `ext::` transport runs an arbitrary command as the remote helper. A
+    tiny script that prints to stderr and exits non-zero gives a real, non-mocked
+    git failure with fully deterministic output -- no network, no fixture repo --
+    so `_run_git`'s own failure path (not a monkeypatched stand-in) is exercised.
+    """
+    script = tmp_path / name
+    script.write_text(f'#!/bin/sh\necho "{stderr_line}" >&2\nexit 128\n')
+    script.chmod(0o755)
+    return ["-c", "protocol.ext.allow=always", "ls-remote", f"ext::{script}"]
 
 
 class TestEnsureRepo:
@@ -338,13 +357,13 @@ class TestNonInteractive:
         `env=` from the subprocess call would silently allow that again.
         """
         captured: dict[str, str] = {}
-        real_exec = asyncio.create_subprocess_exec
+        real_run = subprocess.run
 
-        async def spy(*args, **kwargs):
+        def spy(args, **kwargs):
             captured.update(kwargs.get("env") or {})
-            return await real_exec(*args, **kwargs)
+            return real_run(args, **kwargs)
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+        monkeypatch.setattr(subprocess, "run", spy)
 
         workdir = tmp_path / "clone"
         await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
@@ -361,6 +380,48 @@ class TestNonInteractive:
         assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
         # Still inherits the ambient environment (PATH, HOME, ...).
         assert "PATH" in env
+
+
+class TestSubprocessRunner:
+    """#491: clone/fetch over SSH stalled under `asyncio.create_subprocess_exec`."""
+
+    async def test_clone_and_fetch_do_not_use_asyncio_subprocesses(
+        self, tmp_path, origin, monkeypatch
+    ):
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("git must not run via asyncio.create_subprocess_exec")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+
+        workdir = tmp_path / "clone"
+        await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
+        await pull(workdir, "main", token="", timeout=30)
+
+    async def test_a_slow_git_command_does_not_block_the_event_loop(
+        self, tmp_path, monkeypatch
+    ):
+        hang = tmp_path / "hang.sh"
+        hang.write_text("#!/bin/sh\nsleep 30\n")
+        hang.chmod(0o755)
+        monkeypatch.setenv("GIT_SSH_COMMAND", str(hang))
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        try:
+            with pytest.raises(GitSyncError, match="timed out after 1.0s"):
+                await check_remote_access(
+                    "ssh://git@example.invalid/org/repo.git", "main", "", timeout=1.0
+                )
+        finally:
+            task.cancel()
+        # The loop kept running while git waited in its worker thread.
+        assert ticks >= 10
 
 
 class TestCurrentHead:
@@ -408,13 +469,13 @@ class TestCheckRemoteAccess:
         """`ls-remote` and nothing else: a check must not clone, and must not
         run any command that could write to the remote."""
         commands: list[list[str]] = []
-        real_exec = asyncio.create_subprocess_exec
+        real_run = subprocess.run
 
-        async def spy(*args, **kwargs):
+        def spy(args, **kwargs):
             commands.append(list(args))
-            return await real_exec(*args, **kwargs)
+            return real_run(args, **kwargs)
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+        monkeypatch.setattr(subprocess, "run", spy)
         monkeypatch.chdir(tmp_path)
 
         await check_remote_access(_repo_url(origin), "main", token="", timeout=30)
@@ -422,3 +483,238 @@ class TestCheckRemoteAccess:
         assert len(commands) == 1
         assert commands[0][1] == "ls-remote"
         assert list(tmp_path.iterdir()) == [origin]
+
+
+class TestErrorClassification:
+    def test_git_auth_error_is_a_git_sync_error(self):
+        # Existing `except GitSyncError` handlers must still catch auth failures.
+        assert issubclass(GitAuthError, GitSyncError)
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: could not read Username for 'https://github.com': "
+            "terminal prompts disabled",
+            "remote: Support for password authentication was removed.\n"
+            "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+            # GitHub over HTTPS: its own remote line plus git's.
+            "remote: Repository not found.\n"
+            "fatal: repository 'https://github.com/x/y.git/' not found",
+            # GitLab: only git's own line names the 404.
+            "remote: The project you were looking for could not be found or "
+            "you don't have permission to view it.\n"
+            "fatal: repository 'https://gitlab.com/x/y.git/' not found",
+            # GitHub over SSH.
+            "ERROR: Repository not found.\n"
+            "fatal: Could not read from remote repository.",
+            "fatal: unable to access '...': The requested URL returned error: 403",
+            "git@github.com: Permission denied (publickey).",
+        ],
+    )
+    def test_auth_failures_are_recognised(self, stderr):
+        assert _looks_like_auth_failure(stderr) is True
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: unable to access '...': Could not resolve host: github.com",
+            "error: RPC failed; curl 56 recv failure: Connection reset by peer",
+            "fatal: not a git repository (or any of the parent directories)",
+            "fatal: the remote end hung up unexpectedly",
+            # Local filesystem permissions: no token to fix.
+            "fatal: could not create work tree dir '/workspace/x': Permission denied",
+            "fatal: Unable to create '/workspace/x/.git/index.lock': Permission denied",
+        ],
+    )
+    def test_transient_failures_are_not_misclassified(self, stderr):
+        assert _looks_like_auth_failure(stderr) is False
+
+    async def test_missing_local_repo_raises_transient_not_auth(
+        self, tmp_path, monkeypatch
+    ):
+        """A clone of a nonexistent local repo is a plain GitSyncError, not a
+        GitAuthError -- there is no credential problem to back off on."""
+        monkeypatch.chdir(tmp_path)
+        workdir = tmp_path / "clone"
+        with pytest.raises(GitSyncError) as exc_info:
+            await ensure_repo(
+                workdir, _repo_url(tmp_path / "nope"), "main", token="", timeout=30
+            )
+        assert not isinstance(exc_info.value, GitAuthError)
+
+    async def test_run_git_maps_auth_stderr_to_gitautherror(self, tmp_path):
+        """The wiring seam itself: a real git failure whose stderr looks like an
+        auth/access problem must come out of `_run_git` as `GitAuthError`, not a
+        plain `GitSyncError`. The classifier is unit-tested above, but only this
+        exercises the branch in `_run_git` that raises the distinct type -- the
+        line the whole backoff feature hangs off. Uses git's `ext::` transport to
+        drive a deterministic, offline non-zero exit with controlled stderr."""
+        args = _ext_helper(
+            tmp_path,
+            "auth.sh",
+            "fatal: Authentication failed for 'https://example.com/x.git'",
+        )
+        with pytest.raises(GitAuthError):
+            await _run_git(args, cwd=None, timeout=30)
+
+    async def test_run_git_keeps_transient_stderr_as_gitsyncerror(self, tmp_path):
+        """The other side of the same seam: a genuine git failure with transient
+        stderr must stay a plain `GitSyncError` and not be misrouted to the auth
+        backoff path."""
+        args = _ext_helper(
+            tmp_path,
+            "trans.sh",
+            "fatal: unable to access: Could not resolve host",
+        )
+        with pytest.raises(GitSyncError) as exc_info:
+            await _run_git(args, cwd=None, timeout=30)
+        assert not isinstance(exc_info.value, GitAuthError)
+
+
+class TestAuthScheme:
+    """Basic auth as `x-access-token` is what GitHub, GitLab and Azure DevOps
+    accept for a token; Bitbucket Data Center rejects that username but takes
+    the token as a Bearer credential. The client falls back without any
+    configuration and remembers what worked for the token."""
+
+    REJECTED = (
+        b"fatal: could not read Username for 'https://bitbucket.example.com': "
+        b"terminal prompts disabled\n"
+    )
+
+    @pytest.fixture(autouse=True)
+    def _forget_accepted_schemes(self):
+        remembered = getattr(client_module, "_accepted_auth_scheme", {})
+        remembered.clear()
+        yield
+        remembered.clear()
+
+    @pytest.fixture
+    def rejecting_exec(self, monkeypatch):
+        """Run git for real, except that the listed auth schemes are refused the
+        way a remote refuses them: a 401 turns into git's username prompt, which
+        the non-interactive env converts into this exact stderr."""
+        state = {"rejected": {"basic"}, "headers": []}
+        real_run = subprocess.run
+
+        def spy(args, **kwargs):
+            headers = [
+                arg.removeprefix("http.extraHeader=")
+                for arg in args
+                if isinstance(arg, str) and arg.startswith("http.extraHeader=")
+            ]
+            header = headers[0] if headers else None
+            state["headers"].append(header)
+            scheme = header.split()[1].lower() if header else None
+            if scheme in state["rejected"]:
+                return subprocess.CompletedProcess(
+                    args, 128, b"", TestAuthScheme.REJECTED
+                )
+            stripped = [
+                arg
+                for index, arg in enumerate(args)
+                if not (
+                    (isinstance(arg, str) and arg.startswith("http.extraHeader="))
+                    or (arg == "-c" and str(args[index + 1]).startswith("http.extra"))
+                )
+            ]
+            return real_run(stripped, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", spy)
+        return state
+
+    def test_basic_header_names_x_access_token(self):
+        [flag, header] = _auth_config_args("tok")
+        assert flag == "-c"
+        assert (
+            header == "http.extraHeader=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46dG9r"
+        )
+
+    def test_bearer_header_carries_the_token_itself(self):
+        [_, header] = _auth_config_args("tok", client_module._AUTH_BEARER)
+        assert header == "http.extraHeader=AUTHORIZATION: Bearer tok"
+
+    def test_no_token_sends_no_header(self):
+        assert _auth_config_args("") == []
+
+    async def test_retries_with_bearer_when_basic_is_rejected(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        exists = await check_remote_access(
+            _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+
+        assert exists is False  # the empty bare origin has no branch yet
+        assert rejecting_exec["headers"] == [
+            "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46ZGMtdG9rZW4=",
+            "AUTHORIZATION: Bearer dc-token",
+        ]
+
+    async def test_remembers_the_scheme_that_worked_for_the_token(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        await check_remote_access(
+            _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+        rejecting_exec["headers"].clear()
+
+        workdir = tmp_path / "clone"
+        await ensure_repo(
+            workdir, _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+
+        # The clone is the only command that carries the token; it went
+        # straight to Bearer.
+        assert [h for h in rejecting_exec["headers"] if h] == [
+            "AUTHORIZATION: Bearer dc-token"
+        ]
+
+    async def test_a_different_token_starts_with_basic_again(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        await check_remote_access(
+            _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+        rejecting_exec["headers"].clear()
+        rejecting_exec["rejected"] = set()
+
+        await check_remote_access(
+            _repo_url(origin), "main", token="gh-token", timeout=30
+        )
+
+        assert rejecting_exec["headers"] == [
+            "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2gtdG9rZW4="
+        ]
+
+    async def test_raises_the_first_attempts_auth_error_when_both_are_rejected(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        rejecting_exec["rejected"] = {"basic", "bearer"}
+
+        with pytest.raises(GitAuthError) as exc_info:
+            await check_remote_access(
+                _repo_url(origin), "main", token="bad-token", timeout=30
+            )
+
+        assert "could not read Username" in str(exc_info.value)
+        assert "bad-token" not in str(exc_info.value)
+        assert len(rejecting_exec["headers"]) == 2
+        assert client_module._accepted_auth_scheme == {}
+
+    async def test_a_transient_failure_is_not_retried_with_another_scheme(
+        self, tmp_path, rejecting_exec
+    ):
+        rejecting_exec["rejected"] = set()
+
+        with pytest.raises(GitSyncError) as exc_info:
+            await check_remote_access(
+                _repo_url(tmp_path / "nothing-here"), "main", token="tok", timeout=30
+            )
+
+        assert not isinstance(exc_info.value, GitAuthError)
+        assert len(rejecting_exec["headers"]) == 1
+
+    async def test_without_a_token_no_scheme_is_tried(self, origin, rejecting_exec):
+        await check_remote_access(_repo_url(origin), "main", token="", timeout=30)
+
+        assert rejecting_exec["headers"] == [None]

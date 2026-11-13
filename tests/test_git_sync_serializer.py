@@ -97,6 +97,21 @@ class TestComputeSlug:
 
 
 class TestSerializeAutomation:
+    def test_plugin_spec_config_and_pins_survive_export(self):
+        spec = {
+            "plugin": {"source": "github:OpenHands/extensions", "ref": "abc123"},
+            "config": {"repos": ["OpenHands/docs"]},
+            "required_plugins": [],
+        }
+        automation = _make_automation(
+            tarball_path="plugin-spec://runtime", plugin_spec=spec
+        )
+        files = serialize_automation(automation, None)
+        restored = deserialize_automation(files)
+        assert restored is not None
+        assert restored.fields["plugin_spec"] == spec
+        assert restored.tarball_bytes is None
+
     def test_internal_tarball_extracted_under_tarball_dir(self):
         automation = _make_automation()
         tarball_bytes = _make_tarball(
@@ -124,15 +139,35 @@ class TestSerializeAutomation:
         assert files["tarball/main.py"] == b"print(1)"
 
     def test_automation_yaml_fields(self):
-        automation = _make_automation(prompt="do the thing")
+        automation = _make_automation(
+            description="Summarizes weekly support trends.",
+            prompt="do the thing",
+            observability_associations={
+                "scm.repository.full_name": "repository.full_name",
+                "scm.pull_request.number": "pull_request.number",
+            },
+        )
         files = serialize_automation(automation, _make_tarball({"main.py": b"x"}))
 
         import yaml
 
         fields = yaml.safe_load(files["automation.yaml"])
         assert fields["name"] == "My Automation"
+        assert fields["description"] == "Summarizes weekly support trends."
         assert fields["prompt"] == "do the thing"
+        assert fields["observability_associations"] == {
+            "scm.repository.full_name": "repository.full_name",
+            "scm.pull_request.number": "pull_request.number",
+        }
         assert fields["tarball_source"] == {"type": "internal", "url": None}
+
+    def test_null_description_is_omitted(self):
+        automation = _make_automation(description=None)
+
+        files = serialize_automation(automation, _make_tarball({"main.py": b"x"}))
+
+        fields = yaml.safe_load(files["automation.yaml"])
+        assert "description" not in fields
 
     def test_external_url_skips_tarball_dir(self):
         automation = _make_automation(tarball_path="https://example.com/x.tar.gz")
@@ -173,7 +208,12 @@ class TestSerializeAutomation:
 
 class TestDeserializeAutomation:
     def test_roundtrip(self):
-        automation = _make_automation()
+        automation = _make_automation(
+            description="Runs the weekly support report.",
+            observability_associations={
+                "scm.repository.full_name": "repository.full_name",
+            },
+        )
         tarball_bytes = _make_tarball({"main.py": b"print(1)"})
         files = serialize_automation(automation, tarball_bytes)
 
@@ -181,7 +221,11 @@ class TestDeserializeAutomation:
 
         assert result is not None
         assert result.fields["name"] == "My Automation"
+        assert result.fields["description"] == "Runs the weekly support report."
         assert result.fields["entrypoint"] == "python main.py"
+        assert result.fields["observability_associations"] == {
+            "scm.repository.full_name": "repository.full_name",
+        }
         assert result.tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(result.tarball_bytes)) as tar:
             main_py = tar.extractfile("main.py")
@@ -387,3 +431,11 @@ class TestCanonicalTarballBytes:
             {"b.py": (b"y", 0o755), "a.py": (b"x", 0o644)}
         )
         assert canonical_tarball_bytes(first) == canonical_tarball_bytes(second)
+
+
+def test_profile_reference_survives_git_round_trip():
+    selected = uuid.uuid4()
+    automation = _make_automation(agent_profile_id=selected)
+    restored = deserialize_automation(serialize_automation(automation, None))
+    assert restored is not None
+    assert restored.fields["agent_profile_id"] == str(selected)

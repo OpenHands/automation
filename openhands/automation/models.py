@@ -3,11 +3,13 @@
 import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -48,15 +50,57 @@ class AutomationRunStatus(enum.Enum):
     SKIPPED = "SKIPPED"
 
 
+class AutomationState(StrEnum):
+    """State of an automation definition."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DRAFT = "DRAFT"
+
+
+class AutomationRunAsKind(StrEnum):
+    """What kind of identity an automation runs as (``Automation.user_id``)."""
+
+    USER = "user"
+    SERVICE = "service"
+
+
+class AutomationChangeActorKind(StrEnum):
+    """Who made a recorded change to an automation."""
+
+    USER = "user"
+    SERVICE = "service"
+    GIT_SYNC = "git_sync"
+    # The service itself: the scheduler, the watchdog, the unhealthy check.
+    SYSTEM = "system"
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
     __tablename__ = "automations"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # SERVICE: user_id is a service account of the org. Managers (not the
+    # service account itself) may then edit and enable the automation.
+    run_as_kind: Mapped[AutomationRunAsKind] = mapped_column(
+        Enum(AutomationRunAsKind, native_enum=False, length=16),
+        nullable=False,
+        default=AutomationRunAsKind.USER,
+        server_default=AutomationRunAsKind.USER.name,  # ORM stores member names
+    )
+    # The person who created the automation. Set once on create; a run-as
+    # change keeps it. Every create path sets it; the default (the run-as user)
+    # is right for an automation created to run as its creator.
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        nullable=False,
+        default=lambda ctx: ctx.get_current_parameters()["user_id"],
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     telemetry_distinct_id: Mapped[str | None] = mapped_column(
         String(256), nullable=True
     )
@@ -76,9 +120,26 @@ class Automation(Base):
     # Profile IDs belong to the configured Agent Server, not to this database.
     agent_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
+    # Executable plugin-backed automation spec. When set, the dispatcher fetches
+    # the plugin source at run time and packages it as the run tarball.
+    plugin_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    # Optional high-cardinality trace associations. Keys are observability
+    # metadata names; values are JMESPath expressions evaluated against the
+    # triggering event payload when an event run is created.
+    observability_associations: Mapped[dict[str, str] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
+    # User-facing labels for grouping and filtering, normalized by tags.py.
+    # Never NULL, so the tag facet query can expand every row.
+    tags: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'")
+    )
 
     # Path to SDK code tarball (e.g., S3 or GCS URL)
     tarball_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -97,8 +158,18 @@ class Automation(Base):
     # means the automation service owns explicit cleanup.
     keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
 
-    # Whether the automation is enabled (can be triggered)
-    enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+    # Deprecated: use state instead. Kept for backwards
+    # compatibility; only ACTIVE rows have enabled=True. Will be removed in a
+    # future release.
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+
+    state: Mapped[AutomationState] = mapped_column(
+        Enum(AutomationState, native_enum=False, length=20),
+        nullable=False,
+        default=AutomationState.ACTIVE,
+        server_default=AutomationState.ACTIVE.value,
+        index=True,
+    )
 
     # Current disabled-state metadata. AutomationDisableEvent keeps history.
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -109,7 +180,7 @@ class Automation(Base):
 
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+        DateTime(timezone=True), nullable=True
     )
 
     # Last time the scheduler fired this automation
@@ -119,11 +190,18 @@ class Automation(Base):
 
     # Last time the scheduler polled/checked this automation
     last_polled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+        DateTime(timezone=True), nullable=True
     )
 
+    # Every created_at in this module is written from Python (utcnow, with
+    # microseconds); CURRENT_TIMESTAMP is only the fallback for raw SQL. SQLite
+    # stores the server default in whole seconds, so same-second rows would tie
+    # in newest-first lists and compare wrongly against another table's
+    # created_at (e.g. runs vs. the last disable event in utils/unhealthy.py).
+    # Keep one clock for all of them.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -197,7 +275,7 @@ class AutomationRun(Base):
     # Pre-computed deadline: started_at + max_duration. Set when transitioning
     # to RUNNING, used by the staleness watchdog for efficient indexed queries.
     timeout_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+        DateTime(timezone=True), nullable=True
     )
 
     # The sandbox ID used for execution (for status verification)
@@ -229,6 +307,35 @@ class AutomationRun(Base):
     # local mode). Set immediately after `_start_bash` returns.
     bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # How this run was created: manual, cron, event, or null for legacy rows.
+    trigger_source: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+
+    # The person who started a manual run. Null for cron and event runs, and
+    # for runs from before it was recorded.
+    triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    # Integration event row that created this run, for event-triggered runs.
+    trigger_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("integration_events.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Serialized Laminar span context captured from the triggering event, so the
+    # asynchronous dispatcher can continue the same trace when it picks up the run.
+    observability_parent_span_context: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+
+    # Evaluated high-cardinality observability associations for this run. These
+    # are attached once to the run-created span for trace searchability.
+    observability_associations: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event
@@ -241,9 +348,14 @@ class AutomationRun(Base):
     # from the final conversation action.
     run_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Runtime attributes resolved during dispatch, such as mutable plugin refs
+    # pinned to commit SHAs and the manifest used for this specific run.
+    resolved_runtime: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -269,6 +381,7 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
+        Index("ix_automation_runs_status_trigger_source", "status", "trigger_source"),
         # Partial: only live subjects are ever looked up, and only
         # `continue_conversation` runs set one.
         Index(
@@ -288,6 +401,69 @@ class AutomationRun(Base):
             postgresql_where=(sandbox_cleanup_due_at.isnot(None)),
             sqlite_where=(sandbox_cleanup_due_at.isnot(None)),
         ),
+    )
+
+
+class AutomationDraft(Base):
+    """Editable automation setup state, including incomplete form drafts."""
+
+    __tablename__ = "automation_drafts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Creation endpoint this draft body targets: /v1, /v1/preset/prompt, etc.
+    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Partial request body owned by the setup UI. It may be incomplete and is
+    # only promoted to an Automation after full endpoint-schema validation.
+    draft_body: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    validation_errors: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    dispatchable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+    source_automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
+    )
+    materialized_automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
+    )
+    last_test_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automation_runs.id", ondelete="SET NULL"), nullable=True
+    )
+
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_automation_drafts_org_updated_at", "org_id", "updated_at"),
+        Index("ix_automation_drafts_org_deleted_at", "org_id", "deleted_at"),
+        Index("ix_automation_drafts_source_automation_id", "source_automation_id"),
+        Index(
+            "ix_automation_drafts_materialized_automation_id",
+            "materialized_automation_id",
+        ),
+        Index("ix_automation_drafts_last_test_run_id", "last_test_run_id"),
     )
 
 
@@ -314,6 +490,7 @@ class AutomationDisableEvent(Base):
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
         index=True,
@@ -324,6 +501,53 @@ class AutomationDisableEvent(Base):
         back_populates="disable_events",
     )
     run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
+
+
+class AutomationChangeEvent(Base):
+    """Audit record of who changed an automation and which fields.
+
+    Holds field NAMES only, never values, so a prompt, secret or URL cannot
+    leak through the audit trail. One row per automation per transaction,
+    written by the ``before_flush`` hook in ``utils/change_events.py``: every
+    ORM insert, update and soft delete is recorded, with no call at the write
+    site. Core ``update(Automation)`` statements bypass the hook; the two that
+    disable an automation call ``record_core_disable``.
+
+    ``automation_id`` has no foreign key, so a row outlives its automation.
+    ``org_id`` is copied from the automation, so reads stay org-scoped without
+    a join.
+    """
+
+    __tablename__ = "automation_change_events"
+    __table_args__ = (
+        Index(
+            "ix_automation_change_events_automation_created",
+            "automation_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # NULL for Git sync, which has no acting user.
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    actor_kind: Mapped[AutomationChangeActorKind] = mapped_column(
+        Enum(AutomationChangeActorKind, native_enum=False, length=16),
+        nullable=False,
+    )
+    # create | update | enable | disable | run_as_change | delete, git_sync_ prefixed
+    # for Git sync, or the label a session set (utils/change_events.py)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    changed_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    # Each flush sets its own microsecond value, so a create and an update in
+    # the same second still list newest first (see Automation.created_at).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
 
 
 class TarballUpload(Base):
@@ -358,6 +582,7 @@ class TarballUpload(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -392,6 +617,11 @@ class CustomWebhook(Base):
     - Stripe: "Stripe-Signature"
     - Slack: "X-Slack-Signature"
     - Generic: "X-Signature-256" (default)
+
+    The event_id_header field names the HTTP header carrying the provider's own
+    delivery id, used to drop redeliveries. It is optional: a source that does
+    not identify its deliveries leaves it NULL, and its events are recorded and
+    routed but never deduplicated.
     """
 
     __tablename__ = "custom_webhooks"
@@ -444,9 +674,17 @@ class CustomWebhook(Base):
         server_default=DEFAULT_SIGNATURE_SCHEME,
     )
 
+    # HTTP header naming the provider's own delivery id, used to drop
+    # redeliveries (e.g. GitHub's "X-GitHub-Delivery"). NULL means this source
+    # does not identify its deliveries: events are recorded and routed, never
+    # deduplicated. Optional so a webhook can opt in to the existing
+    # `integration_events` dedupe path without the router hard-coding a source.
+    event_id_header: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -538,6 +776,45 @@ class AutomationServiceMetadata(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
+class AutomationKVMeta(Base):
+    """Per-automation metadata row for the KV store.
+
+    One row per automation, holding the single global ``version`` counter that
+    backs the API's ``$version`` / ``if_version`` optimistic concurrency
+    semantics. It is deliberately a separate row from the per-key values so
+    that every write to an automation's state can take a single, well-known
+    lock first (see ``AutomationKV`` and ``openhands/automation/kv_router.py``).
+
+    The row is created lazily on the automation's first write.
+    """
+
+    __tablename__ = "automation_kv_meta"
+
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    # Global per-automation state version. Incremented once per successful
+    # write (batch or single-key) and returned to clients as ``$version``.
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -550,24 +827,24 @@ class AutomationServiceMetadata(Base):
 
 
 class AutomationKV(Base):
-    """Single-document state store for automation persistence.
+    """Per-key state store for automation persistence.
 
-    Each automation has exactly ONE row containing its entire state as an
-    encrypted JSON document. The API presents a key-value interface, but
-    "keys" are top-level fields within this single document.
+    One row per ``(automation_id, key)`` pair, holding that key's value as an
+    encrypted JSON document. The API exposes an independent key-value
+    interface, so the storage scales by key: a value is limited by
+    ``KVSettings.kv_max_value_size`` on its own, never by the combined size of
+    every key an automation owns.
 
-    Single-Document Design (Deadlock Prevention):
-        By storing all state in one row per automation, we eliminate multi-key
-        deadlock scenarios. All operations on an automation's state serialize
-        through a single row lock. There's no possibility of lock ordering
-        issues because there's only one lock to acquire.
-
-        Trade-off: Every operation reads/writes the entire state blob. This is
-        acceptable because automation state is intended to be small (cursors,
-        counters, configs) and access is infrequent (scheduled runs).
+    Concurrency and atomicity:
+        A write takes the automation's ``AutomationKVMeta`` row lock first, then
+        locks the affected key rows in sorted-key order. Locking the metadata
+        row first serializes all writers for one automation, and the sorted key
+        order gives multi-key batch operations a deterministic lock order, so
+        batch writes stay all-or-nothing and deadlock-safe without collapsing
+        every value into one document.
 
     Storage Design:
-        We store encrypted state as a Fernet token (URL-safe base64 text)
+        We store each encrypted value as a Fernet token (URL-safe base64 text)
         produced by the SDK's :class:`Cipher`. See
         ``openhands/automation/utils/kv.py`` for the full encryption rationale.
     """
@@ -579,18 +856,20 @@ class AutomationKV(Base):
         Uuid,
         ForeignKey("automations.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,  # ONE row per automation
     )
 
-    # Fernet token (URL-safe base64 text) containing the entire state document
-    # as JSON. Produced by openhands.sdk.utils.cipher.Cipher.encrypt and
-    # consumed by Cipher.decrypt. The decrypted JSON is a dict where keys are
-    # the "KV keys" exposed via the API.
-    # Example decrypted: {"config": {...}, "counter": 42, "queue": [...]}
-    state_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # The user-visible KV key (1-255 chars). System keys such as ``$version``
+    # live on AutomationKVMeta.version, not here.
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Fernet token (URL-safe base64 text) containing this key's value as JSON.
+    # Produced by openhands.sdk.utils.cipher.Cipher.encrypt and consumed by
+    # Cipher.decrypt. Decrypted example: {"database": {"host": "localhost"}}
+    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -602,11 +881,12 @@ class AutomationKV(Base):
     )
 
     __table_args__ = (
-        # Index for efficient lookup by automation_id (unique constraint
-        # is already defined on the column, this ensures index exists)
+        # One row per (automation, key) and the index that drives point reads,
+        # range scans and paginated key listings for one automation.
         Index(
-            "ix_automation_kv_automation_id",
+            "ix_automation_kv_automation_id_key",
             "automation_id",
+            "key",
             unique=True,
         ),
     )
@@ -655,6 +935,7 @@ class AutomationGitSyncState(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -715,8 +996,16 @@ class AutomationGitSyncOrgConfig(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Consecutive GitAuthError cycles; reset by a success, a transient failure,
+    # or a change to the repo URL, branch or token. Drives the retry backoff and
+    # the quiet-after-N-auth-failures logging in `git_sync/loop.py`.
+    consecutive_auth_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )

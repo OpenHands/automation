@@ -1,14 +1,11 @@
 """Async wrapper around the `git` CLI.
 
-Commands run as a blocking `subprocess.run` inside a thread-pool executor, via
-an argument list, never a shell string. This is deliberate, not incidental:
-`asyncio.create_subprocess_exec` reliably stalls at 0 bytes transferred for
-`clone`/`fetch` over an SSH remote on this stack (reproduced with both PIPE
-and real file-handle stdout/stderr -- small commands like `ls-remote` are
-unaffected, so it is specific to the long-lived duplex data stream a git
-child process keeps open through its own `ssh` child). A classic blocking
-subprocess in a worker thread sidesteps that class of bug entirely and is
-what a plain shell invocation does under the hood anyway.
+Commands run as a blocking `subprocess.run` in the default thread-pool
+executor, with an argument list, never a shell string. `clone`/`fetch` over SSH
+were reported to stall with no data transferred when spawned through
+`asyncio.create_subprocess_exec` (#491, macOS), while the same command in a
+shell or via `subprocess.run` completed; a worker thread avoids asyncio's
+subprocess machinery altogether.
 
 The auth token goes per-invocation through `-c http.extraHeader`, so it
 reaches neither the checkout nor a log line; credentials an operator embeds in
@@ -19,6 +16,7 @@ encrypted -- see secret_store.py.
 
 import asyncio
 import base64
+import hashlib
 import logging
 import os
 import re
@@ -35,6 +33,50 @@ _URL_CREDENTIALS_RE: Final[re.Pattern[str]] = re.compile(r"(?<=://)[^/@\s]+(?=@)
 
 class GitSyncError(Exception):
     """Raised when a git subprocess invocation fails or times out."""
+
+
+class GitAuthError(GitSyncError):
+    """A git failure that will not fix itself on the next retry.
+
+    Credentials were missing or rejected, or the remote refused access: a
+    revoked/expired token, or a repo that was deleted or made private. Kept
+    distinct from a transient ``GitSyncError`` (network blip, timeout, remote
+    5xx) so the sync loop can back off and go quiet on a persistently broken
+    repo instead of retrying every interval and logging a full traceback each
+    time. Subclass, so existing ``except GitSyncError`` handlers still catch it.
+    """
+
+
+# Substrings git prints to stderr when the failure is authentication/access,
+# not a transient fault. Matched case-insensitively against redacted stderr.
+_AUTH_FAILURE_MARKERS: Final[tuple[str, ...]] = (
+    "could not read username",
+    "could not read password",
+    "terminal prompts disabled",
+    "authentication failed",
+    "invalid username or password",
+    # Only SSH's: a bare "permission denied" is also a local filesystem error
+    # (read-only workspace, foreign-owned index.lock), which is no token issue.
+    "permission denied (publickey",
+    # GitHub's `remote:`/`ERROR:` line, the only hint on SSH.
+    "repository not found",
+    "returned error: 403",
+    "returned error: 401",
+    "access denied",
+)
+
+# git's own line for an HTTP 404 on any host: `fatal: repository '<url>' not found`.
+_REPO_NOT_FOUND_RE: Final[re.Pattern[str]] = re.compile(
+    r"repository '[^']*' not found", re.IGNORECASE
+)
+
+
+def _looks_like_auth_failure(stderr: str) -> bool:
+    """Whether git's stderr describes an auth/access failure vs a transient one."""
+    haystack = stderr.lower()
+    return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS) or bool(
+        _REPO_NOT_FOUND_RE.search(stderr)
+    )
 
 
 def redact_url_credentials(text: str) -> str:
@@ -69,9 +111,25 @@ def _non_interactive_env() -> dict[str, str]:
     }
 
 
-def _auth_config_args(token: str) -> list[str]:
+# How the token is sent. Basic auth as `x-access-token` is what GitHub, GitLab
+# and Azure DevOps accept for a token. Bitbucket Data Center requires the Basic
+# username to be the token's owner, which the service does not know, but takes
+# the same token as a Bearer credential. The scheme a token was accepted with
+# is remembered, so a Data Center remote pays the extra round trip once.
+_AUTH_BASIC: Final = "basic"
+_AUTH_BEARER: Final = "bearer"
+_accepted_auth_scheme: dict[str, str] = {}
+
+
+def _token_key(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _auth_config_args(token: str, scheme: str = _AUTH_BASIC) -> list[str]:
     if not token:
         return []
+    if scheme == _AUTH_BEARER:
+        return ["-c", f"http.extraHeader=AUTHORIZATION: Bearer {token}"]
     header = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return ["-c", f"http.extraHeader=AUTHORIZATION: basic {header}"]
 
@@ -83,8 +141,48 @@ async def _run_git(
     timeout: float,
     token: str = "",
 ) -> str:
-    """Run a git command, returning stdout. Raises GitSyncError on failure."""
-    full_args = ["git", *_auth_config_args(token), *args]
+    """Run a git command, returning stdout. Raises GitSyncError on failure.
+
+    With a token, an auth failure is retried once with the other auth scheme
+    (see `_accepted_auth_scheme`); the first attempt's error is raised when
+    both are rejected.
+    """
+    if not token:
+        return await _run_git_once(args, cwd=cwd, timeout=timeout, token=token)
+
+    key = _token_key(token)
+    first = _accepted_auth_scheme.get(key, _AUTH_BASIC)
+    second = _AUTH_BEARER if first == _AUTH_BASIC else _AUTH_BASIC
+    try:
+        return await _run_git_once(
+            args, cwd=cwd, timeout=timeout, token=token, scheme=first
+        )
+    except GitAuthError as first_error:
+        logger.info(
+            "git %s rejected %s auth for the configured token; retrying with %s",
+            args[0],
+            first,
+            second,
+        )
+        try:
+            out = await _run_git_once(
+                args, cwd=cwd, timeout=timeout, token=token, scheme=second
+            )
+        except GitAuthError:
+            raise first_error from None
+    _accepted_auth_scheme[key] = second
+    return out
+
+
+async def _run_git_once(
+    args: list[str],
+    *,
+    cwd: Path | None,
+    timeout: float,
+    token: str = "",
+    scheme: str = _AUTH_BASIC,
+) -> str:
+    full_args = ["git", *_auth_config_args(token, scheme), *args]
     # Excludes the auth header and redacts URL credentials: this string reaches
     # the user-visible error banner via `git_sync_last_error`.
     logged_args = ["git", *(redact_url_credentials(arg) for arg in args)]
@@ -95,18 +193,16 @@ async def _run_git(
             full_args,
             cwd=str(cwd) if cwd else None,
             env=_non_interactive_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
         )
 
-    loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(None, _blocking_run)
+        result = await asyncio.get_running_loop().run_in_executor(None, _blocking_run)
     except FileNotFoundError as e:
         raise GitSyncError("git executable not found") from e
     except subprocess.TimeoutExpired:
-        # subprocess.run already killed the process before raising this.
+        # subprocess.run has already killed and reaped the process.
         raise GitSyncError(
             f"git command timed out after {timeout}s: {' '.join(logged_args)}"
         ) from None
@@ -114,13 +210,16 @@ async def _run_git(
     if result.returncode != 0:
         # git echoes the remote URL back in its own failure messages, so stderr
         # needs the same redaction as the argv.
-        details = redact_url_credentials(
-            result.stderr.decode(errors="replace").strip()
-        )
-        raise GitSyncError(
+        details = redact_url_credentials(result.stderr.decode(errors="replace").strip())
+        message = (
             f"git command failed ({result.returncode}): {' '.join(logged_args)}\n"
             f"{details}"
         )
+        # Auth/access failures are persistent; the loop backs off on GitAuthError
+        # rather than retrying every interval against a repo it can't reach.
+        if _looks_like_auth_failure(details):
+            raise GitAuthError(message)
+        raise GitSyncError(message)
     return result.stdout.decode(errors="replace")
 
 
@@ -155,6 +254,23 @@ async def current_head(workdir: Path) -> str | None:
     try:
         out = await _run_git(
             ["rev-parse", "--verify", "-q", "HEAD"], cwd=workdir, timeout=30.0
+        )
+    except GitSyncError:
+        return None
+    return out.strip() or None
+
+
+async def last_commit_author(workdir: Path, path: Path, timeout: float) -> str | None:
+    """`Name <email>` of the last commit that touched `path`, or `None`.
+
+    For the import log: the sync's own export commits carry the configured
+    author, so this tells a person's edit from the sync's. Best effort.
+    """
+    try:
+        out = await _run_git(
+            ["log", "-1", "--format=%an <%ae>", "--", str(path)],
+            cwd=workdir,
+            timeout=timeout,
         )
     except GitSyncError:
         return None
