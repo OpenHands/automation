@@ -1,0 +1,15 @@
+5 cron runs fire at once; the org sandbox limit is 2. A sandbox finishes 2 passes after it starts.
+AUTOMATION_MAX_CONCURRENT_RUNS=0  AUTOMATION_DEFER_BACKOFF_BASE_SECONDS=1
+
+pass 1: cron-1=RUNNING  cron-2=RUNNING  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 2: cron-1=RUNNING  cron-2=RUNNING  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 3: cron-1=COMPLETED  cron-2=COMPLETED  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 4: cron-1=COMPLETED  cron-2=COMPLETED  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 5: cron-1=COMPLETED  cron-2=COMPLETED  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 6: cron-1=COMPLETED  cron-2=COMPLETED  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 7: cron-1=COMPLETED  cron-2=COMPLETED  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 8: cron-1=COMPLETED  cron-2=COMPLETED  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+pass 9: cron-1=COMPLETED  cron-2=COMPLETED  cron-3=SKIPPED  cron-4=SKIPPED  cron-5=SKIPPED
+
+sandbox API 429s: 3   events: automation_run_skipped
+RESULT: 2/5 completed, 3/5 SKIPPED for good (status_detail.kind=['concurrency_limit']); their cron fire is lost
