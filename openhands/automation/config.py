@@ -396,7 +396,9 @@ class GitSyncSettings(BaseSettings):
         AUTOMATION_GIT_SYNC_LOCAL_WORKDIR: Local working directory for the
             clone. Defaults to "{workspace_base}/git-sync" when empty.
         AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS: Timeout for individual git
-            subprocess invocations (default: 60).
+            subprocess invocations (default: 300). A first clone of a
+            normal-sized repo over a slow link can take minutes. Each org can
+            override it from the Git Sync config (`git_timeout_seconds`).
         AUTOMATION_GIT_SYNC_SECRET: Key that wraps the per-org git token and
             encryption key at rest (see `git_sync/secret_store.py`). Falls
             back to AUTOMATION_KV_SECRET, then (local mode only) to a key
@@ -425,7 +427,7 @@ class GitSyncSettings(BaseSettings):
     git_sync_author_name: str = "OpenHands Automation"
     git_sync_author_email: str = "automation@openhands.dev"
     git_sync_local_workdir: str = ""
-    git_sync_git_timeout_seconds: float = 60.0
+    git_sync_git_timeout_seconds: float = 300.0
     git_sync_secret: str = ""
 
     # After this many consecutive auth failures, the loop stops logging a full
