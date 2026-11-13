@@ -1,19 +1,18 @@
 """FastAPI router for factories: named groups that automations can belong to.
 
-An automation joins a factory through ``PATCH /v1/{automation_id}`` (see
-``router.update_automation``); this router manages the factories themselves.
+An automation joins a factory when it is created (``factory_id`` on the create
+endpoints) or through ``PATCH /v1/{automation_id}``; this router manages the
+factories themselves.
 """
 
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session, using_sqlite
-from openhands.automation.factories import slugify_factory_name
 from openhands.automation.models import Automation, Factory
 from openhands.automation.schemas import (
     FactoryCreate,
@@ -49,7 +48,6 @@ def _to_response(factory: Factory, automation_count: int) -> FactoryResponse:
     return FactoryResponse(
         id=factory.id,
         name=factory.name,
-        slug=factory.slug,
         automation_count=automation_count,
         created_at=factory.created_at,
         updated_at=factory.updated_at,
@@ -59,12 +57,11 @@ def _to_response(factory: Factory, automation_count: int) -> FactoryResponse:
 async def _get_org_factory(
     session: AsyncSession,
     org_id: uuid.UUID,
+    factory_id: uuid.UUID,
     *,
-    slug: str | None = None,
-    factory_id: uuid.UUID | None = None,
     lock: str | None = None,
 ) -> Factory:
-    """Fetch a factory of the caller's org by slug or id, or raise 404.
+    """Fetch a factory of the caller's org by id, or raise 404.
 
     ``lock`` is ``"update"`` or ``"share"`` and takes a row lock on PostgreSQL.
     Deleting a factory locks it for update and assigning an automation locks it
@@ -72,11 +69,7 @@ async def _get_org_factory(
     automations and the row's removal. SQLite has a single writer and no row
     locks.
     """
-    query = select(Factory).where(Factory.org_id == org_id)
-    if slug is not None:
-        query = query.where(Factory.slug == slug)
-    if factory_id is not None:
-        query = query.where(Factory.id == factory_id)
+    query = select(Factory).where(Factory.org_id == org_id, Factory.id == factory_id)
     if lock is not None and not using_sqlite():
         query = query.with_for_update(read=lock == "share")
     factory = (await session.execute(query)).scalars().first()
@@ -87,12 +80,24 @@ async def _get_org_factory(
     return factory
 
 
-async def get_org_factory_for_assignment(
-    session: AsyncSession, org_id: uuid.UUID, factory_id: uuid.UUID
-) -> Factory:
-    """The factory an automation is being assigned to; 404 when it does not
-    exist or belongs to another org."""
-    return await _get_org_factory(session, org_id, factory_id=factory_id, lock="share")
+async def authorize_factory_change(
+    session: AsyncSession, user: AuthenticatedUser, factory_id: uuid.UUID | None
+) -> None:
+    """Check that ``user`` may put an automation in ``factory_id``, or take it
+    out of its factory when ``factory_id`` is None.
+
+    Membership is a factory-level act: features built on factories hand a
+    factory's automations access to the factory's data. It needs
+    ``manage_automations`` (403), even for the automation's creator, and the
+    factory must belong to the caller's org (404).
+    """
+    if "manage_automations" not in user.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins and owners can change an automation's factory",
+        )
+    if factory_id is not None:
+        await _get_org_factory(session, user.org_id, factory_id, lock="share")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -102,23 +107,9 @@ async def create_factory(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
     """Create a factory. A fresh install has none."""
-    try:
-        slug = data.slug or slugify_factory_name(data.name)
-    except ValueError as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        ) from exc
-
-    factory = Factory(org_id=user.org_id, name=data.name, slug=slug)
+    factory = Factory(org_id=user.org_id, name=data.name)
     session.add(factory)
-    try:
-        await session.commit()
-    except IntegrityError:
-        await session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Factory slug '{slug}' already exists in this org",
-        )
+    await session.commit()
     await session.refresh(factory)
     return _to_response(factory, 0)
 
@@ -150,27 +141,27 @@ async def list_factories(
     )
 
 
-@router.get("/{slug}")
+@router.get("/{factory_id}")
 async def get_factory(
-    slug: str,
+    factory_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
-    """Get a factory by slug."""
-    factory = await _get_org_factory(session, user.org_id, slug=slug)
+    """Get a factory."""
+    factory = await _get_org_factory(session, user.org_id, factory_id)
     count = await _count_live(session, factory.id)
     return _to_response(factory, count)
 
 
-@router.patch("/{slug}")
+@router.patch("/{factory_id}")
 async def rename_factory(
-    slug: str,
+    factory_id: uuid.UUID,
     data: FactoryUpdate,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
-    """Rename a factory. The slug never changes."""
-    factory = await _get_org_factory(session, user.org_id, slug=slug)
+    """Rename a factory."""
+    factory = await _get_org_factory(session, user.org_id, factory_id)
     factory.name = data.name
     await session.flush()
     await session.refresh(factory)
@@ -178,9 +169,9 @@ async def rename_factory(
     return _to_response(factory, count)
 
 
-@router.delete("/{slug}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{factory_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_factory(
-    slug: str,
+    factory_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
@@ -189,7 +180,7 @@ async def delete_factory(
     Soft-deleted automations that still reference it are detached in the same
     transaction.
     """
-    factory = await _get_org_factory(session, user.org_id, slug=slug, lock="update")
+    factory = await _get_org_factory(session, user.org_id, factory_id, lock="update")
     live = await _count_live(session, factory.id)
     if live:
         raise HTTPException(

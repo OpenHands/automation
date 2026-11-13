@@ -1,6 +1,6 @@
 """Add factories: a named group that automations can belong to.
 
-- factories holds the groups. The slug is unique per org.
+- factories holds the groups.
 - automations.factory_id links an automation to at most one factory. It is
   NULL for every existing row, so nothing is backfilled. Deleting a factory
   sets it back to NULL.
@@ -28,7 +28,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("org_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("slug", sa.String(length=63), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -42,9 +41,6 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index(
-        "ix_factories_org_slug", "factories", ["org_id", "slug"], unique=True
     )
 
     # Batch mode: SQLite cannot add a foreign key with ALTER TABLE.
@@ -65,5 +61,4 @@ def downgrade() -> None:
         batch.drop_index("ix_automations_factory_id")
         batch.drop_constraint("fk_automations_factory_id", type_="foreignkey")
         batch.drop_column("factory_id")
-    op.drop_index("ix_factories_org_slug", table_name="factories")
     op.drop_table("factories")

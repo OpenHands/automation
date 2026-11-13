@@ -33,7 +33,7 @@ from openhands.automation.auth import (
 )
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
-from openhands.automation.factory_router import get_org_factory_for_assignment
+from openhands.automation.factory_router import authorize_factory_change
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
@@ -258,6 +258,8 @@ async def create_automation(
     ``run_as_user_id`` creates it as a service account of the org (managers only).
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
+    if body.factory_id is not None:
+        await authorize_factory_change(session, user, body.factory_id)
 
     # Enabling the same template twice returns the existing automation rather
     # than a duplicate. Before tarball validation, so a repeat enable costs one
@@ -311,6 +313,7 @@ async def create_automation(
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
         tags=body.tags,
+        factory_id=body.factory_id,
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
@@ -356,6 +359,8 @@ async def create_automation_from_plugin_spec(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""
+    if body.factory_id is not None:
+        await authorize_factory_change(session, user, body.factory_id)
     if body.template is not None:
         existing = await find_existing_template_automation(
             session, user.org_id, body.template.id
@@ -404,6 +409,7 @@ async def create_automation_from_plugin_spec(
         prompt=None,
         preset_metadata=preset_metadata,
         plugin_spec=runtime_fields["plugin_spec"],
+        factory_id=body.factory_id,
         model=runtime_fields["model"],
         agent_profile_id=runtime_fields["agent_profile_id"],
         trigger=trigger.model_dump(),
@@ -885,19 +891,9 @@ async def update_automation(
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
-    # Membership is a factory-level act: features built on factories hand a
-    # factory's automations access to the factory's data. The creator exception
-    # of _assert_can_manage therefore does not apply.
+    # The creator exception of _assert_can_manage does not apply to factory_id.
     if "factory_id" in update_data:
-        if "manage_automations" not in user.permissions:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admins and owners can change an automation's factory",
-            )
-        if update_data["factory_id"] is not None:
-            await get_org_factory_for_assignment(
-                session, user.org_id, update_data["factory_id"]
-            )
+        await authorize_factory_change(session, user, update_data["factory_id"])
     # Same ownership check as create. Only a new value is checked: resending the
     # stored path cannot grant anything the row does not already have, and that
     # upload need not be owned by the editor or still be live.

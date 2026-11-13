@@ -94,7 +94,7 @@ them honest: [../maintenance.md](../maintenance.md).
 | F16 | [The run's contract with the Agent Server](F16-agent-server-contract.md) | bash command and output, uploads cleanup, conversation tags, model profiles, agent-server failures | Agent Server `/api/...` | baseline; `llm`, `pypi` | 8 |
 | F17 | [Stream sources (Slack Socket Mode)](F17-stream-sources.md) | stream supervisor, config parsing, retries, kill switch, Socket Mode delivery | the stream supervisor (no route) | baseline; a real Slack app for two blocked bullets | 7 |
 | F18 | [Usage totals for the OpenHands server](F18-usage-report.md) | instance-wide automation count behind the service key, unconfigured and wrong-key refusals | `GET /v1/usage` | baseline | 3 |
-| F19 | [Factories](F19-factories.md) | factory create, slug rules, rename, assign an automation, list filter, delete, change audit | `/v1/factories`, `factory_id` on `/v1/{id}` | baseline | 7 |
+| F19 | [Factories](F19-factories.md) | factory create, rename, create or assign an automation, list filter, delete, change audit | `/v1/factories`, `factory_id` on `/v1`, `/v1/{id}` | baseline | 7 |
 
 ## Not mapped
 

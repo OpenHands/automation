@@ -418,6 +418,13 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
     name: str = Field(..., min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory to create the automation in. Requires manage_automations "
+            "(members get 403); an unknown or other-org factory returns 404."
+        ),
+    )
     plugin: AutomationPluginSource
     config: dict[str, Any] = Field(default_factory=dict)
     trigger: Trigger | None = None
