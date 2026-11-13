@@ -336,86 +336,202 @@ class TestPermissionEnforcement:
         await async_session.commit()
         return automation
 
-    async def test_update_as_non_creator_manager_returns_403(
-        self, async_client, async_session
+    @pytest.fixture(params=["owner", "admin"])
+    def manager_client(self, request, async_client, mock_authenticated_user):
+        """``async_client`` acting as an org owner, then as an org admin."""
+        mock_authenticated_user.role = request.param
+        return async_client
+
+    async def test_manager_can_edit_other_users_automation(
+        self, manager_client, async_session
     ):
-        """A manager cannot edit another user's automation definition."""
+        """An admin or owner edits a teammate's automation; it still runs as
+        the teammate, and the change is attributed to the editor."""
         automation = await self._other_users_automation(async_session)
 
-        response = await async_client.patch(
+        response = await manager_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"prompt": "Do something else"},
+            json={
+                "name": "Renamed by admin",
+                "trigger": {"type": "cron", "schedule": "0 10 * * *"},
+                "entrypoint": "uv run other.py",
+                "timeout": 120,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["name"] == "Renamed by admin"
+        assert data["trigger"]["schedule"] == "0 10 * * *"
+        assert data["entrypoint"] == "uv run other.py"
+        assert data["user_id"] == str(self._OTHER_USER_ID)
+        assert data["run_as_kind"] == "user"
+        await async_session.refresh(automation)
+        assert automation.user_id == self._OTHER_USER_ID
+        assert automation.created_by_user_id == self._OTHER_USER_ID
+
+        changes = await manager_client.get(
+            f"/api/automation/v1/{automation.id}/changes"
+        )
+        latest = changes.json()["changes"][0]
+        assert latest["actor_user_id"] == str(TEST_USER_ID)
+        assert latest["actor_kind"] == "user"
+        assert "name" in latest["changed_fields"]
+
+    async def test_manager_can_edit_other_users_preset_prompt(
+        self, manager_client, async_session, preset_store
+    ):
+        """The prompt edit rebuilds the tarball under the run-as identity."""
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, prompt="Original prompt"
+        )
+        automation.user_id = self._OTHER_USER_ID
+        await async_session.commit()
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Edited by admin"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["prompt"] == "Edited by admin"
+        assert response.json()["user_id"] == str(self._OTHER_USER_ID)
+        upload = await async_session.get(
+            TarballUpload, parse_internal_upload_id(response.json()["tarball_path"])
+        )
+        assert upload is not None
+        assert upload.user_id == self._OTHER_USER_ID
+
+    async def test_manager_resending_creators_model_keeps_it(
+        self, manager_client, async_session, mock_authenticated_user
+    ):
+        """The editor's own model profiles do not decide the creator's."""
+        automation = await self._other_users_automation(async_session)
+        automation.model = "creators-profile"
+        await async_session.commit()
+        mock_authenticated_user.model_profile_names = ["admins-profile"]
+        mock_authenticated_user.active_model_profile_name = "admins-profile"
+
+        resent = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Renamed", "model": "creators-profile"},
+        )
+        assert resent.status_code == 200, resent.text
+        assert resent.json()["model"] == "creators-profile"
+
+        cleared = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"model": None}
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["model"] is None
+
+    async def test_manager_tarball_edit_hands_upload_to_the_creator(
+        self, manager_client, async_session
+    ):
+        """The run-as identity owns the code it runs, so the editor cannot
+        delete the upload from under the automation."""
+        automation = await self._other_users_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["user_id"] == str(self._OTHER_USER_ID)
+        await async_session.refresh(upload)
+        assert upload.user_id == self._OTHER_USER_ID
+        deleted = await manager_client.delete(f"/api/automation/v1/uploads/{upload.id}")
+        assert deleted.status_code == 404
+
+    async def test_manager_cannot_use_another_users_upload(
+        self, manager_client, async_session
+    ):
+        """A new tarball_path is still checked against the caller."""
+        automation = await self._other_users_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=self._OTHER_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 403, response.text
+
+    @pytest.mark.parametrize("body", [{"enabled": False}, {"state": "INACTIVE"}])
+    async def test_manager_can_turn_off_other_users_automation(
+        self, manager_client, async_session, body
+    ):
+        automation = await self._other_users_automation(async_session, enabled=True)
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}", json=body
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is False
+        assert data["state"] == "INACTIVE"
+
+    @pytest.mark.parametrize("body", [{"enabled": True}, {"state": "ACTIVE"}])
+    async def test_manager_can_turn_on_other_users_automation(
+        self, manager_client, async_session, body
+    ):
+        automation = await self._other_users_automation(async_session, enabled=False)
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}", json=body
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["enabled"] is True
+        assert data["state"] == "ACTIVE"
+        assert data["user_id"] == str(self._OTHER_USER_ID)
+
+    async def test_manager_can_delete_other_users_automation(
+        self, manager_client, async_session
+    ):
+        automation = await self._other_users_automation(async_session)
+
+        response = await manager_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 204
+
+    @pytest.mark.parametrize(
+        "body", [{"enabled": False}, {"enabled": True}, {"state": "ACTIVE"}]
+    )
+    async def test_member_cannot_toggle_other_users_automation(
+        self, readonly_client, async_session, body
+    ):
+        automation = await self._other_users_automation(
+            async_session, enabled=body.get("enabled") is False
+        )
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json=body
         )
 
         assert response.status_code == 403
-        assert "creator" in response.json()["detail"]
 
-    async def test_disable_as_non_creator_manager_succeeds(
-        self, async_client, async_session
+    async def test_member_can_turn_own_automation_back_on(
+        self, readonly_client, async_session
     ):
-        """A manager can turn off another user's automation."""
-        automation = await self._other_users_automation(async_session, enabled=True)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"enabled": False}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["enabled"] is False
-        assert data["state"] == "INACTIVE"
-
-    async def test_set_inactive_state_as_non_creator_manager_succeeds(
-        self, async_client, async_session
-    ):
-        """A manager can use the state API to turn off another user's automation."""
-        automation = await self._other_users_automation(async_session, enabled=True)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"state": "INACTIVE"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["enabled"] is False
-        assert data["state"] == "INACTIVE"
-
-    async def test_enable_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """A manager cannot turn another user's automation back on."""
         automation = await self._other_users_automation(async_session, enabled=False)
+        automation.user_id = TEST_USER_ID
+        await async_session.commit()
 
-        response = await async_client.patch(
+        response = await readonly_client.patch(
             f"/api/automation/v1/{automation.id}", json={"enabled": True}
         )
 
-        assert response.status_code == 403
-
-    async def test_activate_state_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """A manager cannot reactivate another user's automation via state."""
-        automation = await self._other_users_automation(async_session, enabled=False)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"state": "ACTIVE"}
-        )
-
-        assert response.status_code == 403
-
-    async def test_disable_with_edits_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """Turning off cannot carry other edits along with it."""
-        automation = await self._other_users_automation(async_session)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}",
-            json={"enabled": False, "name": "Renamed"},
-        )
-
-        assert response.status_code == 403
+        assert response.status_code == 200
+        assert response.json()["state"] == "ACTIVE"
 
 
 class TestServiceOwnedAutomations:
@@ -846,6 +962,78 @@ class TestCreateAutomation:
 
         assert second.status_code == 201
         assert second.json()["id"] != first.json()["id"]
+
+    @staticmethod
+    def _template_row(state: AutomationState) -> Automation:
+        return Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="From template",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            state=state,
+            enabled=state == AutomationState.ACTIVE,
+            preset_metadata={"template": {"id": "tpl-drafted", "version": "1"}},
+        )
+
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            (
+                "/api/automation/v1",
+                {
+                    "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                    "entrypoint": "uv run main.py",
+                },
+            ),
+            ("/api/automation/v1/preset/prompt", {"prompt": "Review PRs."}),
+        ],
+        ids=["bundle", "preset-prompt"],
+    )
+    async def test_draft_test_artifact_does_not_count_as_template_install(
+        self, async_client, async_session, path, payload
+    ):
+        """A DRAFT row from a draft test dispatch does not block the real create."""
+        draft_artifact = self._template_row(AutomationState.DRAFT)
+        async_session.add(draft_artifact)
+        await async_session.commit()
+
+        response = await async_client.post(
+            path,
+            json={
+                **payload,
+                "name": "Real",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "template": {"id": "tpl-drafted", "version": "1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["id"] != str(draft_artifact.id)
+        assert response.json()["state"] == "ACTIVE"
+
+    async def test_inactive_template_install_still_returns_existing(
+        self, async_client, async_session
+    ):
+        """A disabled install is still an install: the create replays it, 200."""
+        installed = self._template_row(AutomationState.INACTIVE)
+        async_session.add(installed)
+        await async_session.commit()
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "Again",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                "entrypoint": "uv run main.py",
+                "template": {"id": "tpl-drafted", "version": "1"},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["id"] == str(installed.id)
 
     async def test_create_automation_rejects_oversized_template_config(
         self, async_client
@@ -2053,6 +2241,89 @@ class TestUpdateAutomation:
         assert fetched.status_code == 200
         assert fetched.json()["description"] is None
 
+    @pytest.mark.parametrize(
+        "field", ["name", "entrypoint", "tarball_path", "trigger", "enabled"]
+    )
+    async def test_update_automation_null_on_required_field_is_422(
+        self, async_client, async_session, field
+    ):
+        """Explicit null on a NOT NULL column is a 422 naming it, not a 500."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Required Fields",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        url = f"/api/automation/v1/{automation.id}"
+        before = (await async_client.get(url)).json()
+        stored_before = getattr(automation, field)
+
+        response = await async_client.patch(url, json={field: None})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"][0]["loc"] == ["body", field]
+        await async_session.refresh(automation)
+        assert getattr(automation, field) is not None
+        assert getattr(automation, field) == stored_before
+        after = await async_client.get(url)
+        assert after.status_code == 200
+        assert after.json()[field] == before[field]
+
+    async def test_update_automation_null_state_is_ignored(
+        self, async_client, async_session
+    ):
+        """state: null stays a no-op, as it always was."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Null State",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        url = f"/api/automation/v1/{automation.id}"
+
+        response = await async_client.patch(url, json={"state": None})
+
+        assert response.status_code == 200, response.text
+        await async_session.refresh(automation)
+        assert automation.state == AutomationState.ACTIVE
+        assert automation.enabled is True
+        fetched = await async_client.get(url)
+        assert fetched.json()["state"] == "ACTIVE"
+        assert fetched.json()["enabled"] is True
+
+    async def test_update_automation_state_with_null_enabled_uses_state(
+        self, async_client, async_session
+    ):
+        """A null enabled next to a state is derived from the state, as before."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="State Wins",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"state": "INACTIVE", "enabled": None},
+        )
+
+        assert response.status_code == 200, response.text
+        await async_session.refresh(automation)
+        assert automation.state == AutomationState.INACTIVE
+        assert automation.enabled is False
+
     async def test_update_automation_schedule(self, async_client, async_session):
         """PATCH updates the trigger schedule."""
         automation = Automation(
@@ -2655,10 +2926,11 @@ class TestUpdateAutomation:
             "prompt": "Same prompt",
         }
 
-    async def test_update_repos_as_non_creator_returns_403(
-        self, async_client, async_session
+    async def test_update_repos_as_non_creator_member_returns_403(
+        self, readonly_client, async_session
     ):
-        """Changing repositories edits the definition, so only the creator may."""
+        """Changing repositories edits the definition, which a member may do
+        only for an automation they created."""
         # Arrange — a teammate's preset in the same organization.
         automation = Automation(
             user_id=OTHER_USER_ID,
@@ -2673,7 +2945,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         # Act
-        response = await async_client.patch(
+        response = await readonly_client.patch(
             f"/api/automation/v1/{automation.id}", json={"repos": []}
         )
 
@@ -5505,8 +5777,6 @@ class TestAutomationChangeEvents:
             f"/api/automation/v1/{automation.id}", json={"enabled": True}
         )
 
-        # Both PATCHes run in the test's one transaction, so the rows share
-        # created_at; match them by action instead of by order.
         events = {e.action: e for e in await self._events(async_session, automation.id)}
         assert set(events) == {"disable", "enable"}
         assert events["disable"].changed_fields == [
@@ -5563,6 +5833,34 @@ class TestAutomationChangeEvents:
         assert body["changes"][0]["changed_fields"] == ["name"]
         assert body["changes"][0]["actor_kind"] == "user"
         assert body["changes"][0]["actor_user_id"] == str(TEST_USER_ID)
+
+    async def test_changes_endpoint_lists_back_to_back_changes_newest_first(
+        self, async_client, async_session
+    ):
+        # Issue #739: CURRENT_TIMESTAMP gave these rows one created_at (one
+        # transaction here, one second on SQLite) and the uuid4 tie-break
+        # shuffled them.
+        automation = await _seed_s3_automation(async_session)
+        patches = [
+            {"name": "Renamed"},
+            {"description": "Described"},
+            {"entrypoint": "uv run other.py"},
+        ]
+        for body in patches:
+            response = await async_client.patch(
+                f"/api/automation/v1/{automation.id}", json=body
+            )
+            assert response.status_code == 200
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+
+        changes = response.json()["changes"]
+        assert [c["changed_fields"] for c in changes[:3]] == [
+            ["entrypoint"],
+            ["description"],
+            ["name"],
+        ]
+        assert changes[3]["action"] == "create"
 
     async def test_changes_endpoint_orders_equal_timestamps_by_id(
         self, async_client, async_session

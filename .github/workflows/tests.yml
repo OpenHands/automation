@@ -26,7 +26,7 @@ jobs:
                   set -euo pipefail
                   artifacts="$(git ls-tree -r --name-only HEAD -- .pr)"
                   if [ -n "$artifacts" ]; then
-                    echo "::error::Release PR contains temporary .pr artifacts. Merge the cleanup PR and let release-please update this PR before merging."
+                    echo "::error::Release PR contains temporary .pr artifacts. Refresh the release PR (rerun the latest release workflow on its target branch) so release-please removes them, then let this check rerun before merging."
                     printf '%s\n' "$artifacts"
                     exit 1
                   fi
@@ -60,3 +60,35 @@ jobs:
                   title: Coverage Report
                   create-new-comment: false
                   hide-report: false
+
+    # Agent Canvas runs this service natively on Windows. The Windows path
+    # (windows_runner.py, the cmd.exe branch of execute_in_context, setup.py in
+    # the stock runner tarballs) only runs for real there: on Ubuntu its tests
+    # fake os.name.
+    windows-tests:
+        runs-on: windows-latest
+        permissions:
+            contents: read
+        env:
+            # Agent Canvas starts the service with Python's UTF-8 mode on.
+            PYTHONUTF8: '1'
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v7
+              with:
+                  enable-cache: true
+                  python-version: '3.12'
+
+            - name: Install deps
+              run: uv sync --frozen --group dev
+
+            - name: Run the Windows path's tests
+              run: >-
+                  uv run python -m pytest -v
+                  tests/test_windows_runner.py
+                  tests/test_execution.py
+                  tests/test_preset_runner_refresh.py
+                  tests/test_plugin_specs.py

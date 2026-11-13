@@ -97,6 +97,21 @@ class TestComputeSlug:
 
 
 class TestSerializeAutomation:
+    def test_plugin_spec_config_and_pins_survive_export(self):
+        spec = {
+            "plugin": {"source": "github:OpenHands/extensions", "ref": "abc123"},
+            "config": {"repos": ["OpenHands/docs"]},
+            "required_plugins": [],
+        }
+        automation = _make_automation(
+            tarball_path="plugin-spec://runtime", plugin_spec=spec
+        )
+        files = serialize_automation(automation, None)
+        restored = deserialize_automation(files)
+        assert restored is not None
+        assert restored.fields["plugin_spec"] == spec
+        assert restored.tarball_bytes is None
+
     def test_internal_tarball_extracted_under_tarball_dir(self):
         automation = _make_automation()
         tarball_bytes = _make_tarball(
