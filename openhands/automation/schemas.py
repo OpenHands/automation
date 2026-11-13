@@ -20,6 +20,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.factories import normalize_factory_slug
 from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
@@ -777,6 +778,14 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
     )
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory this automation belongs to. Null removes it from its "
+            "factory; omit to leave it unchanged. Requires manage_automations, "
+            "even for the automation's creator."
+        ),
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -1202,6 +1211,7 @@ class AutomationResponse(BaseModel):
     trigger: dict
     observability_associations: dict[str, str] | None = None
     tags: list[str] = Field(default_factory=list)
+    factory_id: uuid.UUID | None = None
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1227,6 +1237,67 @@ class AutomationResponse(BaseModel):
 
 class AutomationListResponse(BaseModel):
     automations: list[AutomationResponse]
+    total: int
+
+
+class FactoryCreate(BaseModel):
+    """Request to create a factory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+    slug: str | None = Field(
+        default=None,
+        description=(
+            "Identifier in URLs: lowercase letters, numbers and single hyphens, "
+            "unique within the org and immutable. Derived from the name when "
+            "omitted."
+        ),
+    )
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, value: str | None) -> str | None:
+        return None if value is None else normalize_factory_slug(value)
+
+
+class FactoryUpdate(BaseModel):
+    """Request to rename a factory. The slug cannot change."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+
+class FactoryResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    slug: str
+    automation_count: int = Field(
+        ..., description="Live (not soft-deleted) automations in this factory"
+    )
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class FactoryListResponse(BaseModel):
+    factories: list[FactoryResponse]
     total: int
 
 

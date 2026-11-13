@@ -56,6 +56,8 @@ automation/
 │       ├── draft_router.py     # Saved setup draft CRUD and test dispatch routes
 │       ├── draft_schemas.py    # Draft body validation and normalization
 │       ├── event_router.py     # Receives webhook events, triggers automations
+│       ├── factories.py        # Factory slug rules
+│       ├── factory_router.py   # Factory CRUD (named groups of automations)
 │       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
 │       ├── filter_eval.py      # JMESPath-based filter evaluation for event matching
@@ -279,6 +281,25 @@ def upgrade() -> None:
 ```
 
 - **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher — check `using_sqlite()` to skip on SQLite
+
+## Factories
+
+A factory is a named group of automations: `factories` (`id`, `org_id`, `name`,
+`slug`, timestamps) plus a nullable `automations.factory_id` (`ON DELETE SET
+NULL`). Zero factories is a valid state; there is no default factory.
+
+- The slug is lowercase and URL-safe, derived from the name when omitted, unique
+  per org (`409` on a duplicate) and immutable. A rename changes only `name`.
+- `id` is never reused. Other services keep it as a plain reference with no
+  foreign key, because their data lives in other databases.
+- Read routes need `view_automations`; creating, renaming and deleting a
+  factory, and setting or clearing `factory_id`, need `manage_automations`.
+  The creator exception of `_assert_can_manage` does not apply to `factory_id`.
+- Deleting a factory returns `409` while a live automation belongs to it.
+  Otherwise one transaction detaches its soft-deleted automations (through the
+  ORM, so the change audit records it) and removes the row.
+- Git sync neither writes nor reads `factory_id`: a factory's id and slug are
+  local to an install.
 
 ## Preset-Based Automation Creation
 

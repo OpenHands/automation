@@ -33,6 +33,7 @@ from openhands.automation.auth import (
 )
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
+from openhands.automation.factory_router import get_org_factory_for_assignment
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
@@ -792,6 +793,9 @@ async def list_automations(
             "Narrows the caller's org listing; it never reaches other orgs."
         ),
     ),
+    factory_id: uuid.UUID | None = Query(
+        default=None, description="Only automations in this factory"
+    ),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
@@ -815,6 +819,8 @@ async def list_automations(
             ) from exc
     if run_as_user_id is not None:
         base_query = base_query.where(Automation.user_id == run_as_user_id)
+    if factory_id is not None:
+        base_query = base_query.where(Automation.factory_id == factory_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
@@ -879,6 +885,19 @@ async def update_automation(
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
+    # Membership is a factory-level act: features built on factories hand a
+    # factory's automations access to the factory's data. The creator exception
+    # of _assert_can_manage therefore does not apply.
+    if "factory_id" in update_data:
+        if "manage_automations" not in user.permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins and owners can change an automation's factory",
+            )
+        if update_data["factory_id"] is not None:
+            await get_org_factory_for_assignment(
+                session, user.org_id, update_data["factory_id"]
+            )
     # Same ownership check as create. Only a new value is checked: resending the
     # stored path cannot grant anything the row does not already have, and that
     # upload need not be owned by the editor or still be live.
