@@ -6,12 +6,17 @@ An automation joins a factory through ``PATCH /v1/{automation_id}`` (see
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+    require_permission,
+)
 from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.factories import slugify_factory_name
 from openhands.automation.models import Automation, Factory
@@ -21,6 +26,7 @@ from openhands.automation.schemas import (
     FactoryResponse,
     FactoryUpdate,
 )
+from openhands.automation.utils.enterprise_client import notify_factory_deleted
 
 
 router = APIRouter(prefix="/v1/factories", tags=["Factories"])
@@ -181,13 +187,16 @@ async def rename_factory(
 @router.delete("/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_factory(
     slug: str,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
+    client: httpx.AsyncClient = Depends(get_http_client),
 ) -> None:
     """Delete a factory that no live automation belongs to.
 
     Soft-deleted automations that still reference it are detached in the same
-    transaction.
+    transaction. After it commits, Enterprise is told to purge the factory's
+    worklogs; that notification never blocks or undoes the delete.
     """
     factory = await _get_org_factory(session, user.org_id, slug=slug, lock="update")
     live = await _count_live(session, factory.id)
@@ -208,5 +217,7 @@ async def delete_factory(
     for automation in detached:
         automation.factory_id = None
     await session.flush()
+    factory_id = factory.id
     await session.delete(factory)
-    await session.flush()
+    await session.commit()
+    background_tasks.add_task(notify_factory_deleted, client, user.org_id, factory_id)
