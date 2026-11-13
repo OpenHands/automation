@@ -181,6 +181,38 @@ async def get_event_automations(
     return result_pairs
 
 
+def _enabled_event_automation_filters(source: str) -> list[Any]:
+    """Filters selecting enabled, active event automations on a source."""
+    from sqlalchemy import func, literal
+
+    if using_sqlite():
+        trigger_filter = and_(
+            func.json_extract(Automation.trigger, "$.type") == literal("event"),
+            func.json_extract(Automation.trigger, "$.source") == literal(source),
+        )
+    else:
+        trigger_filter = and_(
+            Automation.trigger.op("->>")("type") == literal("event"),
+            Automation.trigger.op("->>")("source") == literal(source),
+        )
+    return [
+        Automation.enabled == True,  # noqa: E712
+        Automation.state == AutomationState.ACTIVE,
+        Automation.deleted_at.is_(None),
+        trigger_filter,
+    ]
+
+
+async def get_event_automation_org_ids(source: str, session: AsyncSession) -> list[str]:
+    """Organizations with an enabled event automation on a source."""
+    result = await session.execute(
+        select(Automation.org_id)
+        .where(*_enabled_event_automation_filters(source))
+        .distinct()
+    )
+    return sorted(str(org_id) for org_id in result.scalars().all())
+
+
 def _event_type_from_pattern(pattern: str) -> str:
     return pattern.split(".", 1)[0].strip()
 
@@ -198,27 +230,8 @@ async def get_requested_event_types(
     event type. Unsupported requested types are omitted when a supported set is
     provided.
     """
-    from sqlalchemy import func, literal
-
-    base_filters = [
-        Automation.enabled == True,  # noqa: E712
-        Automation.state == AutomationState.ACTIVE,
-        Automation.deleted_at.is_(None),
-    ]
-
-    if using_sqlite():
-        trigger_filter = and_(
-            func.json_extract(Automation.trigger, "$.type") == literal("event"),
-            func.json_extract(Automation.trigger, "$.source") == literal(source),
-        )
-    else:
-        trigger_filter = and_(
-            Automation.trigger.op("->>")("type") == literal("event"),
-            Automation.trigger.op("->>")("source") == literal(source),
-        )
-
     result = await session.execute(
-        select(Automation.trigger).where(*base_filters, trigger_filter)
+        select(Automation.trigger).where(*_enabled_event_automation_filters(source))
     )
 
     supported = (

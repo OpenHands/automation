@@ -47,11 +47,11 @@ Routes: `GET /api/automation/v1/kv`, `GET /api/automation/v1/kv/{key}`,
 - `F12.batch-validation`: empty or >100 ops, a key over 255 characters and `nx`+`xx` are 422; a `$` key, `set nx` on an existing key and `set xx` on a missing key are 400 `operation_failed`; a batch `patch` creates a missing key (single PATCH does not).
 - `F12.isolation`: keys of one automation are invisible to another, by user key and by JWT; a JWT ignores `?automation_id=` and always acts on its own claim.
 - `F12.encrypted-at-rest`: `automation_kv.value_encrypted` holds a Fernet token (`gAAAAA...`), never the plaintext.
-- `F12.soft-deleted-automation`: after `DELETE /v1/{id}` (a soft delete) the automation is 404 but its KV data is still readable with `?automation_id=`.
+- `F12.soft-deleted-automation`: after `DELETE /v1/{id}` (a soft delete) the automation is 404 but its KV data is still readable with `?automation_id=` and with its run token.
 - `F12.run-uses-kv`: a dispatched run writes the store with its injected `AUTOMATION_KV_TOKEN`; two runs leave `qa-runs` at 2 and `qa-last-run` naming the second run.
-- `F12.get-path-malformed`: `GET ?path=a[b` (unclosed bracket) should answer 400 like PATCH does; it answers 500 (known bug).
-- `F12.patch-empty-path`: PATCH with `path:""` should answer 400 `invalid_path`; it answers 500 (known bug).
-- `F12.jwt-unknown-automation`: a validly signed JWT for an automation that does not exist reads as empty, but its first write should be refused with a 4xx; it answers 500 (known bug).
+- `F12.get-path-malformed`: `GET ?path=a[b` (unclosed bracket) answers 400 `invalid_path: ...`, like PATCH.
+- `F12.patch-empty-path`: PATCH with `path:""` (a path naming no field) answers 400 `invalid_path: ...` and changes nothing.
+- `F12.jwt-unknown-automation`: a validly signed JWT whose automation does not exist is refused with 404 `Automation not found` on every route (as user auth is for an unknown `automation_id`) and stores nothing.
 
 ## How to get to it (agent POV)
 
@@ -378,6 +378,8 @@ Preconditions:
   control-automation api DELETE "/v1/$DID" --expect 204
   control-automation api GET "/v1/$DID" --expect 404
   control-automation api GET /v1/kv/qa-keep --query automation_id="$DID" --expect 200 --check value eq kept --save F12.soft-deleted-automation/read
+  DTOKEN=$(control-automation kv token --automation-id "$DID")
+  control-automation api GET /v1/kv/qa-keep --auth none --header "Authorization: Bearer $DTOKEN" --expect 200 --check value eq kept --save F12.soft-deleted-automation/jwt-read
   control-automation state sql "SELECT count(*) AS n FROM automations WHERE deleted_at IS NOT NULL AND name = 'qa-kv-deleted'" --check rows.0.n eq 1
   ```
 - **A real run uses the store (`F12.run-uses-kv`).** The `kv` fixture increments `qa-runs` and writes `qa-last-run` from inside the run with `AUTOMATION_KV_TOKEN`; dispatch it twice.
@@ -393,24 +395,25 @@ Preconditions:
   ```
   Both runs complete through their callback; the values could only have
   been written with the run's token, since the fixture holds no user key.
-- **Malformed GET path (`F12.get-path-malformed`), known bug.** PATCH maps an unclosed bracket to 400, GET crashes with 500 (`parse_path` raises `ValueError`, GET only catches `KeyError`).
+- **Malformed GET path (`F12.get-path-malformed`).** An unclosed bracket is a client error on GET as on PATCH: 400 `invalid_path: ...`.
   ```sh
   control-automation api PUT /v1/kv/qa-gpm --query automation_id="$AID" --json '{"a":{"b":1}}' --expect 201
   control-automation api GET /v1/kv/qa-gpm --query automation_id="$AID" --query path=a.b --expect 200 --check value eq 1
-  control-automation api GET /v1/kv/qa-gpm --query automation_id="$AID" --query 'path=a[b' --expect 400 --save F12.get-path-malformed/get  # bug: status eq 500
+  control-automation api GET /v1/kv/qa-gpm --query automation_id="$AID" --query 'path=a[b' --expect 400 --save F12.get-path-malformed/get
   ```
-- **Empty PATCH path (`F12.patch-empty-path`), known bug.** `path:""` reaches `set_nested_value`, whose `parts[-1]` raises `IndexError`: 500 instead of 400.
+- **Empty PATCH path (`F12.patch-empty-path`).** `path:""` names no field, so PATCH answers 400 `invalid_path: ...` (a batch `patch` answers 400 `operation_failed`).
   ```sh
   control-automation api PUT /v1/kv/qa-pep --query automation_id="$AID" --json '{"a":1}' --expect 201
   control-automation api PATCH /v1/kv/qa-pep --query automation_id="$AID" --json '{"path":"a","value":2}' --expect 200
-  control-automation api PATCH /v1/kv/qa-pep --query automation_id="$AID" --json '{"path":"","value":1}' --expect 400 --save F12.patch-empty-path/patch  # bug: status eq 500
+  control-automation api PATCH /v1/kv/qa-pep --query automation_id="$AID" --json '{"path":"","value":1}' --expect 400 --save F12.patch-empty-path/patch
   ```
-- **JWT for an automation that does not exist (`F12.jwt-unknown-automation`), known bug.** The token is accepted (the claim is never checked against the database): reads are empty, and the first write fails the foreign key on `automation_kv_meta`, which surfaces as 500.
+- **JWT for an automation that does not exist (`F12.jwt-unknown-automation`).** Auth checks the token's `automation_id` claim against the database: no row means 404 `Automation not found` for reads and writes alike, and no `automation_kv_meta` row is created. A soft-deleted automation keeps its row, so its token still works.
   ```sh
   GHOST=$(control-automation kv token --automation-id 00000000-0000-4000-8000-00000000dead)
-  control-automation api GET /v1/kv --auth none --header "Authorization: Bearer $GHOST" --expect 200 --check total eq 0
-  control-automation api GET /v1/kv/qa-ghost --auth none --header "Authorization: Bearer $GHOST" --expect 404 --check detail eq key_not_found
-  control-automation api PUT /v1/kv/qa-ghost --auth none --header "Authorization: Bearer $GHOST" --json '1' --expect 4xx --save F12.jwt-unknown-automation/put  # bug: status eq 500
+  control-automation api PUT /v1/kv/qa-ghost --auth none --header "Authorization: Bearer $GHOST" --json '1' --expect 404 --check detail eq 'Automation not found' --save F12.jwt-unknown-automation/put
+  control-automation api GET /v1/kv --auth none --header "Authorization: Bearer $GHOST" --expect 404 --check detail eq 'Automation not found' --save F12.jwt-unknown-automation/list
+  control-automation api GET /v1/kv/qa-ghost --auth none --header "Authorization: Bearer $GHOST" --expect 404 --check detail eq 'Automation not found'
+  control-automation state sql "SELECT count(*) AS n FROM automation_kv_meta WHERE CAST(automation_id AS TEXT) LIKE '%dead'" --check rows.0.n eq 0
   ```
 
 ## Gotchas
@@ -426,9 +429,10 @@ Preconditions:
   the user-auth 401 and reports its own.
 - Any Bearer value with exactly two dots is judged as a KV JWT and never falls
   back to user auth. A token's `automation_id` claim wins over the query
-  parameter, and the service does not check that the automation exists or
-  is not deleted (see `F12.jwt-unknown-automation`); `run_id` is not checked
-  either. `docs/kv-store-design.md` mentions a 403 `token_expired`; the code
+  parameter. The claim must name an existing automation row (404
+  `Automation not found` otherwise, see `F12.jwt-unknown-automation`); a
+  soft-deleted automation still has its row, so its token keeps working.
+  `run_id` is not checked. `docs/kv-store-design.md` mentions a 403 `token_expired`; the code
   answers 401 `Invalid or expired KV token`.
 - The `nx` conflict body is a normal response (`{key, created, error}`) with
   no `detail`; every other 409 is an `HTTPException` with `detail`. The
@@ -437,8 +441,7 @@ Preconditions:
 - The version is one counter per automation, not per key, and reads 0
   before anything was written for the automation (no meta row yet).
 - PUT cannot store JSON `null` (422 `Field required`); use a batch `set`.
-  The 422 for `null` and the 500s in the three known-bug bullets are
-  candidates for fixes, not contracts.
+  The 422 for `null` is a candidate for a fix, not a contract.
 - Nesting depth counts containers: 32 nested lists around a scalar are
   accepted, 33 are refused. NaN is accepted by the JSON parser and refused
   only when the value is serialized for storage (400).

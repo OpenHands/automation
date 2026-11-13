@@ -12,12 +12,15 @@ same validators, turns `state`/`enabled` into the disable bookkeeping
 (`disabled_reason`, `disabled_detail`, `disabled_at`) and keeps
 `keep_alive` true for `continue_conversation` triggers.
 
-Source: `openhands/automation/router.py`, `openhands/automation/schemas.py`, `openhands/automation/utils/tarball_validation.py`, `openhands/automation/utils/templates.py`, `openhands/automation/utils/timeout.py`, `openhands/automation/utils/cron.py`, `openhands/automation/utils/state.py`, `openhands/automation/utils/model_profiles.py`
+Source: `openhands/automation/router.py`, `openhands/automation/schemas.py`, `openhands/automation/utils/tarball_validation.py`, `openhands/automation/utils/templates.py`, `openhands/automation/utils/timeout.py`, `openhands/automation/utils/cron.py`, `openhands/automation/utils/state.py`, `openhands/automation/utils/model_profiles.py`, `openhands/automation/tags.py`, `openhands/automation/utils/tags.py`
 
 Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
+`GET /api/automation/v1/tags`,
 `GET /api/automation/v1/{automation_id}`, `PATCH /api/automation/v1/{automation_id}`,
 `DELETE /api/automation/v1/{automation_id}`,
-`GET /api/automation/v1/{automation_id}/tarball`
+`GET /api/automation/v1/{automation_id}/tarball`,
+`POST /api/automation/v1/{automation_id}/run-as`,
+`GET /api/automation/v1/{automation_id}/changes`
 
 ## Sub-features
 
@@ -32,16 +35,19 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.profile-model`: `agent_profile_id` together with `model` answers 422 `An agent profile already specifies the model`; a profile alone stores `model: null`; in local mode any pattern-valid `model` is stored as given.
 - `F05.keep-alive-continue`: an event trigger with `destination: continue_conversation` forces `keep_alive: true` on create; `keep_alive: false` with it answers 422.
 - `F05.template-idempotent`: a create with `template` answers 201 and records `preset_metadata.template`; a repeat with the same `template.id` answers 200 with the same automation unchanged (the new body is ignored).
-- `F05.list`: `GET /v1` answers `{automations, total}` newest first, pages with `limit`/`offset`, filters `created_by=me|others`, and rejects out-of-range `limit` and unknown `created_by` with 422.
+- `F05.list`: `GET /v1` answers `{automations, total}` newest first, pages with `limit`/`offset`, filters `created_by=me|others` on the creator (`created_by_user_id`), and rejects out-of-range `limit` and unknown `created_by` with 422.
+- `F05.tags`: `tags` on create and PATCH are trimmed, lowercased and hyphenated (`Software Factory` is stored as `software-factory`) and deduplicated; a non-slug tag, more than 10 tags or an explicit `null` answers 422; PATCH replaces the list and `[]` clears it. `GET /v1?tag=` filters the page and `total`; `GET /v1/tags` answers `{tags: [{tag, count}]}` for live automations, most-used first.
 - `F05.get`: an unknown id answers 404 `Automation not found`, a non-UUID 422.
 - `F05.patch-fields`: PATCH updates `name`, `trigger`, `timeout`, `entrypoint`, `setup_script_path` and bumps `updated_at`; unset fields are kept; a GET shows the stored values.
 - `F05.patch-state`: PATCH `state: INACTIVE` sets `enabled: false`, `disabled_reason: manual`, `disabled_detail {"reason":"manual","source":"user"}`, `disabled_at` and records a disable event; `enabled: true` reactivates and clears all three.
 - `F05.patch-validation`: PATCH applies the create validators (timeout bounds, entrypoint rules, unknown fields, `state: DRAFT`) with 422; an unknown id answers 404; `keep_alive: false` on a `continue_conversation` automation answers 400.
-- `F05.patch-null`, known bug: an explicit `null` for a NOT NULL column (`name`, `entrypoint`, `tarball_path`, `trigger`, `enabled`) answers 500 instead of 422.
+- `F05.patch-null`: an explicit `null` for a NOT NULL column (`name`, `entrypoint`, `tarball_path`, `trigger`, `enabled`) answers 422 naming the field and changes nothing; `state: null` is ignored; a nullable field such as `description` still clears with `null`.
 - `F05.delete`: DELETE answers 204 and soft-deletes (`deleted_at`, `state: INACTIVE`, `disabled_reason: manual_delete`); afterwards GET, PATCH and DELETE answer 404 and the list drops it.
 - `F05.tarball-download`: `GET /v1/{id}/tarball` for an internal upload answers 200 `application/x-tar` with `Content-Disposition: attachment; filename="<name>.tar"` and the uploaded bytes unchanged.
 - `F05.tarball-filename`: a non-ASCII name gets an ASCII `filename` fallback plus an RFC 5987 `filename*`; quotes and slashes are stripped.
 - `F05.tarball-external`: an `https://` tarball answers 302 to the URL; `s3://` and `gs://` answer 422 `Cannot proxy s3:// tarball URLs...`.
+- `F05.changes`: create, PATCH, enable, disable, run-as change and DELETE each add one audit row (`create`, `update`, `enable`, `disable`, `run_as_change`, `delete`) holding field names only, with `actor_kind` `user`, `service`, `git_sync` or `system`; `GET /v1/{id}/changes` answers `{changes, total}` newest first and pages with `limit`/`offset`; after a DELETE it answers 404.
+- `F05.run-as`: `POST /v1/{id}/run-as` with `{to: "self"}` on an automation that already runs as the caller answers 409, `{to: "service", service_account_id}` answers 422 in local mode (no service accounts), and a body missing `service_account_id` answers 422.
 - `F05.auth`: every route answers 401 without a key or with a wrong key.
 
 ## How to get to it (agent POV)
@@ -89,15 +95,15 @@ Preconditions:
   download time.
 - **tarball_path errors (`F05.tarball-path-errors`).** Schema, scheme, format and existence, each refused.
   ```sh
-  control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"ftp://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 422 --check detail.0.loc.1 eq tarball_path --check detail.0.msg contains 'tarball_path must start with s3://, gs://, http://, or https://' --save F05.tarball-path-errors/ftp
+  control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"ftp://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 422 --check detail.0.loc.1 eq tarball_path --check detail.0.msg contains 'tarball_path must start with oh-internal://, s3://, gs://, or https://' --save F05.tarball-path-errors/ftp
   control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"http://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 422 --check detail eq 'Invalid tarball_path. Must be oh-internal://uploads/{uuid} or a public URL (https://, s3://, gs://)' --save F05.tarball-path-errors/http
   control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"oh-internal://uploads/not-a-uuid","entrypoint":"bash run.sh"}' --expect 422 --check detail eq 'Invalid internal upload URL format. Expected: oh-internal://uploads/{uuid}'
   control-automation api POST /v1 --json '{"name":"qa-bad-tp","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"oh-internal://uploads/00000000-0000-4000-8000-000000000000","entrypoint":"bash run.sh"}' --expect 404 --check detail eq 'Upload not found'
   control-automation state sql "SELECT count(*) AS n FROM automations WHERE name = 'qa-bad-tp'" --check rows.0.n eq 0
   ```
   `http://` passes the schema regex and is refused by the handler's scheme
-  check; the schema message never mentions `oh-internal://`, which it
-  nevertheless accepts.
+  check; the schema message lists only the accepted schemes (since #654),
+  so it omits `http://` although the regex lets it through.
 - **Entrypoint rules (`F05.entrypoint-rules`).** Each unsafe form has its own message; spaces are fine.
   ```sh
   control-automation api POST /v1 --json '{"name":"qa-ep","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"/bin/run"}' --expect 422 --check detail.0.msg eq 'Value error, entrypoint must be a relative path, not an absolute path' --save F05.entrypoint-rules/absolute
@@ -152,7 +158,7 @@ Preconditions:
   control-automation api GET "/v1/$KID" --expect 200 --check keep_alive eq true --check trigger.destination eq continue_conversation
   control-automation api POST /v1 --json '{"name":"qa-continue-off","trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","keep_alive":false}' --expect 422 --check detail.0.msg contains "keep_alive cannot be false when destination is 'continue_conversation'"
   ```
-  Presets do not apply this rule; see `F06.continue-keep-alive`.
+  The preset routes apply the same rule (`F06.continue-keep-alive`).
 - **Template idempotency (`F05.template-idempotent`).** The second create with the same template id returns the first automation unchanged.
   ```sh
   TPL="qa-tpl-$(date +%s%N)"
@@ -164,7 +170,6 @@ Preconditions:
 - **List, page and filter (`F05.list`).** Newest first, stable paging, creator filter, bounds.
   ```sh
   L1=$(control-automation api POST /v1 --json '{"name":"qa-list-1","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
-  sleep 1.2
   L2=$(control-automation api POST /v1 --json '{"name":"qa-list-2","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
   LT=$(control-automation api GET /v1 --expect 200 --check automations.0.id eq "$L2" --check automations.1.id eq "$L1" --quiet --field total)
   control-automation api GET /v1 --query limit=1 --query offset=1 --expect 200 --check automations len-eq 1 --check automations.0.id eq "$L1" --check total eq "$LT" --save F05.list/page
@@ -175,9 +180,20 @@ Preconditions:
   control-automation api GET /v1 --query limit=101 --expect 422
   control-automation api GET /v1 --query offset=-1 --expect 422
   ```
-  The `sleep` is deliberate: `created_at` has one-second precision, and
-  rows in the same second are ordered by random UUID. `others` is empty
-  because the local user is the only user.
+  No `sleep` is needed: `created_at` has microseconds, so back-to-back
+  creates list newest first. `others` is empty because the local user is
+  the only user.
+- **Tags, tag filter and facets (`F05.tags`).** Normalized on write, filtered and counted on read.
+  ```sh
+  G1=$(control-automation api POST /v1 --json '{"name":"qa-tags-1","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","tags":["QA Tags","qa-tags","qa-extra"]}' --expect 201 --check tags.0 eq qa-tags --check tags.1 eq qa-extra --check tags len-eq 2 --save F05.tags/create --field id)
+  control-automation api POST /v1 --json '{"name":"qa-tags-bad","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","tags":["qa_tags"]}' --expect 422
+  control-automation api GET /v1 --query tag=qa-tags --expect 200 --check total eq 1 --check automations.0.id eq "$G1" --save F05.tags/filter
+  control-automation api GET /v1/tags --expect 200 --check tags len-ge 2 --save F05.tags/facets
+  control-automation api PATCH "/v1/$G1" --json '{"tags":["qa-extra"]}' --expect 200 --check tags len-eq 1 --check tags.0 eq qa-extra
+  control-automation api GET /v1 --query tag=qa-tags --expect 200 --check total eq 0
+  control-automation api PATCH "/v1/$G1" --json '{"tags":null}' --expect 422
+  control-automation api PATCH "/v1/$G1" --json '{"tags":[]}' --expect 200 --check tags len-eq 0
+  ```
 - **Get errors (`F05.get`).** Unknown and malformed ids.
   ```sh
   control-automation api GET /v1/00000000-0000-4000-8000-000000000000 --expect 404 --check detail eq 'Automation not found' --save F05.get/unknown
@@ -224,17 +240,24 @@ Preconditions:
   The `keep_alive` rule is a 400 from the handler on PATCH, a 422 from the
   schema on create. PATCH does not re-check ownership of a new
   `tarball_path` (only the scheme regex applies).
-- **Explicit null on required fields (`F05.patch-null`), known bug.** The schema accepts `null`, the database refuses it, and the client gets a 500.
+- **Explicit null on required fields (`F05.patch-null`).** `null` is not a value for a NOT NULL column: the schema refuses it with a 422 before the handler runs.
   ```sh
   NID=$(control-automation api POST /v1 --json '{"name":"qa-null","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
-  control-automation api PATCH "/v1/$NID" --json '{"name":null}' --expect 422 --save F05.patch-null/name  # bug: status eq 500
+  control-automation api PATCH "/v1/$NID" --json '{"name":null}' --expect 422 --check detail.0.loc.1 eq name --save F05.patch-null/name
+  control-automation api PATCH "/v1/$NID" --json '{"entrypoint":null}' --expect 422 --check detail.0.loc.1 eq entrypoint
+  control-automation api PATCH "/v1/$NID" --json '{"tarball_path":null}' --expect 422 --check detail.0.loc.1 eq tarball_path
+  control-automation api PATCH "/v1/$NID" --json '{"trigger":null}' --expect 422 --check detail.0.loc.1 eq trigger
+  control-automation api PATCH "/v1/$NID" --json '{"enabled":null}' --expect 422 --check detail.0.loc.1 eq enabled
+  control-automation api PATCH "/v1/$NID" --json '{"state":null}' --expect 200 --check state eq ACTIVE --check enabled eq true
+  control-automation api PATCH "/v1/$NID" --json '{"description":null}' --expect 200 --check description eq null --check name eq qa-null --check enabled eq true --save F05.patch-null/nullable
+  control-automation api GET "/v1/$NID" --expect 200 --check name eq qa-null --check entrypoint eq 'bash run.sh' --check tarball_path eq https://qa.invalid/x.tgz --check trigger.schedule eq '0 0 1 1 *' --check state eq ACTIVE --check enabled eq true --check description eq null
   ```
-  Correct behavior is a 422 that names the field. Today `name`,
-  `entrypoint`, `tarball_path`, `trigger` and `enabled` set to `null` each
-  answer 500 `Internal Server Error` (an `IntegrityError: NOT NULL
-  constraint failed` in the service log) and store nothing. `timeout: null`
-  is stored as `null` (200) instead of falling back to the default, and
-  `state: null` is ignored.
+  The message is `<field> cannot be null; omit it to leave it unchanged`;
+  `tags: null` has its own message (`F05.tags`). An omitted field is left
+  as it was. `state` is NOT NULL as well, but `state: null` is a no-op
+  (200, nothing changes) rather than a 422. `{"state":"INACTIVE","enabled":null}` is still accepted:
+  `enabled` follows `state`. `timeout: null` is stored as `null` (200)
+  rather than falling back to the default.
 - **Soft delete (`F05.delete`).** 204, then every route answers 404 and the row keeps its tombstone.
   ```sh
   DAID=$(control-automation api POST /v1 --json '{"name":"qa-delete","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
@@ -278,6 +301,25 @@ Preconditions:
   ```
   The CLI does not follow redirects, so the 302 and its `Location` are
   visible. `{automation_id}` is literal text in the 422 message.
+- **Change audit (`F05.changes`).** One row per change, the create included, field names only, readable until the automation is deleted.
+  ```sh
+  CHID=$(control-automation api POST /v1 --json '{"name":"qa-changes","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
+  control-automation api PATCH "/v1/$CHID" --json '{"name":"qa-changes-renamed"}' --expect 200
+  control-automation api PATCH "/v1/$CHID" --json '{"enabled":false}' --expect 200
+  control-automation api GET "/v1/$CHID/changes" --expect 200 --check total eq 3 --check changes.0.action eq disable --check changes.1.action eq update --check changes.1.changed_fields.0 eq name --check changes.1.actor_kind eq user --check changes.2.action eq create --save F05.changes/list
+  control-automation api GET "/v1/$CHID/changes" --query limit=1 --query offset=1 --expect 200 --check total eq 3 --check changes.0.action eq update
+  control-automation api DELETE "/v1/$CHID" --expect 204
+  control-automation api GET "/v1/$CHID/changes" --expect 404 --check detail eq 'Automation not found' --save F05.changes/deleted
+  ```
+  The audit row stores names, never values: the new `name` is not in it.
+- **Run-as change (`F05.run-as`).** Local mode has no service accounts, so only the refusals can be driven.
+  ```sh
+  TRID=$(control-automation api POST /v1 --json '{"name":"qa-run-as","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"self"}' --expect 409 --check detail eq 'The automation already runs as this identity' --save F05.run-as/self
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"service","service_account_id":"00000000-0000-4000-8000-000000000001"}' --expect 422 --check detail contains 'must be an active service account' --save F05.run-as/service
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"service"}' --expect 422
+  control-automation api GET "/v1/$TRID" --expect 200 --check state eq ACTIVE --check run_as_kind eq user
+  ```
 - **Key required (`F05.auth`).** No key or a wrong key gets 401 on every route.
   ```sh
   control-automation api GET /v1 --auth none --expect 401 --check detail contains 'Authentication required' --save F05.auth/list
@@ -295,21 +337,28 @@ Preconditions:
 - `POST /v1` checks the template before anything else except the
   profile/model pair: a repeat with an invalid tarball, model or trigger
   still answers 200 with the existing automation. The lookup is per org
-  (not per user) and matches inactive and draft-state rows too; presets
-  share it (`F06.template-shared`). Use a fresh `template.id` per replay.
+  (not per user) and matches inactive rows too (not draft-test artifacts;
+  see `F09.template-after-draft-test`); presets share it
+  (`F06.template-shared`). Use a fresh `template.id` per replay.
 - `http://` is accepted by the schema regex but refused by the handler;
-  the schema's error message lists `http://` and omits `oh-internal://`.
+  the schema's error message lists `oh-internal://`, `s3://`, `gs://` and
+  `https://` only (since #654).
   `https://`, `s3://` and `gs://` are never fetched at create time.
-- `created_at` has one-second precision; ordering within a second is by
-  random UUID.
-- PATCH with `null` on a NOT NULL column is a 500 today (`F05.patch-null`);
+- Every ORM-written `created_at` (automations, runs, uploads, webhooks,
+  change rows and the rest) comes from Python with microseconds, so
+  back-to-back writes (a create and an immediate PATCH) list newest first.
+  The raw SQL inserts into `automation_service_metadata` still use
+  `CURRENT_TIMESTAMP`; nothing reads that column. Rows written by a release
+  before that fix have whole-second times on SQLite and tie within a
+  second; ties order by random UUID (`id` desc), stable across pages but
+  not in time order.
+- PATCH with `null` on a NOT NULL column is a 422 (`F05.patch-null`);
   send only the fields you change, never `null` placeholders.
 - `enabled` is deprecated in favor of `state` but still accepted on create
   and PATCH (with a server-side `DeprecationWarning`).
 - In local mode the only user owns everything and holds both permissions,
-  so the 403 paths (`Only admins, owners, or the automation creator can
-  modify it`, `Only the automation creator can edit it; admins and owners
-  can only turn it off or delete it`) and cloud model/profile lookups
+  so the 403 path (`Only admins, owners, or the automation creator can
+  modify it`) and cloud model/profile lookups
   (`Model profile ... not found`, 502s) cannot be driven here.
 - The tarball route serves preset tarballs too (F06); they are gzip
   archives served as `application/x-tar`, so use `tar tzf`, not `tar tf`.

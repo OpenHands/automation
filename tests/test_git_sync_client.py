@@ -8,9 +8,11 @@ import subprocess
 
 import pytest
 
+import openhands.automation.git_sync.client as client_module
 from openhands.automation.git_sync.client import (
     GitAuthError,
     GitSyncError,
+    _auth_config_args,
     _looks_like_auth_failure,
     _non_interactive_env,
     _run_git,
@@ -525,3 +527,156 @@ class TestErrorClassification:
         with pytest.raises(GitSyncError) as exc_info:
             await _run_git(args, cwd=None, timeout=30)
         assert not isinstance(exc_info.value, GitAuthError)
+
+
+class TestAuthScheme:
+    """Basic auth as `x-access-token` is what GitHub, GitLab and Azure DevOps
+    accept for a token; Bitbucket Data Center rejects that username but takes
+    the token as a Bearer credential. The client falls back without any
+    configuration and remembers what worked for the token."""
+
+    REJECTED = (
+        b"fatal: could not read Username for 'https://bitbucket.example.com': "
+        b"terminal prompts disabled\n"
+    )
+
+    @pytest.fixture(autouse=True)
+    def _forget_accepted_schemes(self):
+        remembered = getattr(client_module, "_accepted_auth_scheme", {})
+        remembered.clear()
+        yield
+        remembered.clear()
+
+    @pytest.fixture
+    def rejecting_exec(self, monkeypatch):
+        """Run git for real, except that the listed auth schemes are refused the
+        way a remote refuses them: a 401 turns into git's username prompt, which
+        the non-interactive env converts into this exact stderr."""
+        state = {"rejected": {"basic"}, "headers": []}
+        real_exec = asyncio.create_subprocess_exec
+
+        class Rejected:
+            returncode = 128
+
+            async def communicate(self):
+                return b"", TestAuthScheme.REJECTED
+
+        async def spy(*args, **kwargs):
+            headers = [
+                arg.removeprefix("http.extraHeader=")
+                for arg in args
+                if isinstance(arg, str) and arg.startswith("http.extraHeader=")
+            ]
+            header = headers[0] if headers else None
+            state["headers"].append(header)
+            scheme = header.split()[1].lower() if header else None
+            if scheme in state["rejected"]:
+                return Rejected()
+            stripped = [
+                arg
+                for index, arg in enumerate(args)
+                if not (
+                    (isinstance(arg, str) and arg.startswith("http.extraHeader="))
+                    or (arg == "-c" and str(args[index + 1]).startswith("http.extra"))
+                )
+            ]
+            return await real_exec(*stripped, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+        return state
+
+    def test_basic_header_names_x_access_token(self):
+        [flag, header] = _auth_config_args("tok")
+        assert flag == "-c"
+        assert (
+            header == "http.extraHeader=AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46dG9r"
+        )
+
+    def test_bearer_header_carries_the_token_itself(self):
+        [_, header] = _auth_config_args("tok", client_module._AUTH_BEARER)
+        assert header == "http.extraHeader=AUTHORIZATION: Bearer tok"
+
+    def test_no_token_sends_no_header(self):
+        assert _auth_config_args("") == []
+
+    async def test_retries_with_bearer_when_basic_is_rejected(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        exists = await check_remote_access(
+            _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+
+        assert exists is False  # the empty bare origin has no branch yet
+        assert rejecting_exec["headers"] == [
+            "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46ZGMtdG9rZW4=",
+            "AUTHORIZATION: Bearer dc-token",
+        ]
+
+    async def test_remembers_the_scheme_that_worked_for_the_token(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        await check_remote_access(
+            _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+        rejecting_exec["headers"].clear()
+
+        workdir = tmp_path / "clone"
+        await ensure_repo(
+            workdir, _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+
+        # The clone is the only command that carries the token; it went
+        # straight to Bearer.
+        assert [h for h in rejecting_exec["headers"] if h] == [
+            "AUTHORIZATION: Bearer dc-token"
+        ]
+
+    async def test_a_different_token_starts_with_basic_again(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        await check_remote_access(
+            _repo_url(origin), "main", token="dc-token", timeout=30
+        )
+        rejecting_exec["headers"].clear()
+        rejecting_exec["rejected"] = set()
+
+        await check_remote_access(
+            _repo_url(origin), "main", token="gh-token", timeout=30
+        )
+
+        assert rejecting_exec["headers"] == [
+            "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2gtdG9rZW4="
+        ]
+
+    async def test_raises_the_first_attempts_auth_error_when_both_are_rejected(
+        self, tmp_path, origin, rejecting_exec
+    ):
+        rejecting_exec["rejected"] = {"basic", "bearer"}
+
+        with pytest.raises(GitAuthError) as exc_info:
+            await check_remote_access(
+                _repo_url(origin), "main", token="bad-token", timeout=30
+            )
+
+        assert "could not read Username" in str(exc_info.value)
+        assert "bad-token" not in str(exc_info.value)
+        assert len(rejecting_exec["headers"]) == 2
+        assert client_module._accepted_auth_scheme == {}
+
+    async def test_a_transient_failure_is_not_retried_with_another_scheme(
+        self, tmp_path, rejecting_exec
+    ):
+        rejecting_exec["rejected"] = set()
+
+        with pytest.raises(GitSyncError) as exc_info:
+            await check_remote_access(
+                _repo_url(tmp_path / "nothing-here"), "main", token="tok", timeout=30
+            )
+
+        assert not isinstance(exc_info.value, GitAuthError)
+        assert len(rejecting_exec["headers"]) == 1
+
+    async def test_without_a_token_no_scheme_is_tried(self, origin, rejecting_exec):
+        await check_remote_access(_repo_url(origin), "main", token="", timeout=30)
+
+        assert rejecting_exec["headers"] == [None]

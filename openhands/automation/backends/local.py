@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -15,6 +16,10 @@ from uuid import UUID
 import httpx
 
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
+from openhands.automation.plugin_secrets import (
+    PluginSourceSecrets,
+    local_plugin_source_secrets,
+)
 from openhands.automation.utils.agent_server import (
     VerificationResult,
     verify_run_on_agent_server,
@@ -141,14 +146,30 @@ class LocalAgentServerBackend(ExecutionBackend):
         """Return the pre-configured API key."""
         return self.api_key
 
+    async def plugin_source_secrets(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+        names: Collection[str],
+    ) -> PluginSourceSecrets:
+        """References into the agent server's secret store."""
+        return local_plugin_source_secrets(
+            names,
+            agent_server_url=self.agent_server_url,
+            api_key=self.api_key,
+            sandbox_agent_server_url=self.sandbox_agent_server_url,
+        )
+
     def build_env_vars(self) -> dict[str, str]:
         """Build local mode environment variables.
 
         Provides the env vars needed for local mode:
+        - AUTOMATION_RUN_MODE: ``local``; the presets pick their workspace from
+          this
         - AGENT_SERVER_URL: URL of the local agent server — from the
-          *sandbox's* point of view. Defaults to ``agent_server_url`` (the
-          URL the backend uses) but can be overridden via
-          ``sandbox_agent_server_url`` for container-split setups.
+          *sandbox's* point of view; cloud runs never get it. Defaults to
+          ``agent_server_url`` (the URL the backend uses) but can be
+          overridden via ``sandbox_agent_server_url`` for container-split
+          setups.
         - SESSION_API_KEY: API key for authenticating with the agent server
         - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
         - AUTOMATION_CALLBACK_API_KEY: API key for callback auth to automation service
@@ -162,6 +183,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         # Use run-specific workspace directory for isolation
         run_workspace = self.get_work_dir(str(self._run.id))
         env_vars = {
+            "AUTOMATION_RUN_MODE": "local",
             "AGENT_SERVER_URL": self.sandbox_agent_server_url or self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
             "WORKSPACE_BASE": run_workspace,

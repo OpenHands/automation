@@ -20,7 +20,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.models import AutomationState
+from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
@@ -30,6 +30,7 @@ from openhands.automation.providers import (
     reserved_sources,
     verifier_schemes,
 )
+from openhands.automation.tags import normalize_tags
 from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
@@ -396,6 +397,20 @@ def reject_public_draft_state(state: Any) -> Any:
     return state
 
 
+def reject_explicit_null(value: Any, info: ValidationInfo) -> Any:
+    """Refuse an explicit ``null`` for a PATCH field backed by a NOT NULL column.
+
+    Field validators run only for fields the client sent, so omitting the
+    field still means "leave it unchanged"; sending ``null`` is a 422 instead
+    of a constraint failure at commit.
+    """
+    if value is None:
+        raise ValueError(
+            f"{info.field_name} cannot be null; omit it to leave it unchanged"
+        )
+    return value
+
+
 def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
@@ -451,8 +466,13 @@ class TemplateProvenance(BaseModel):
     id: str = Field(
         ...,
         min_length=1,
-        max_length=100,
-        description="Identifier of the extension template (catalog entry id).",
+        max_length=255,
+        description=(
+            "Identifier of the extension template (catalog entry id). "
+            "Plugin-spec installs use a composite id "
+            "``plugin-spec:<source>/<repo_path>/<ref>`` which can exceed 100 "
+            "chars for deeply nested plugin paths or long branch names."
+        ),
     )
     version: str = Field(
         ...,
@@ -480,9 +500,59 @@ class TemplateProvenance(BaseModel):
 
 # --- Requests ---
 
+TAGS_DESCRIPTION: Final[str] = (
+    "Labels for grouping and filtering automations, e.g. 'software-factory'. "
+    "Each is trimmed, lowercased, and has whitespace replaced by '-'; at most "
+    "10 tags of up to 50 characters."
+)
+
+
+RUN_AS_USER_ID_DESCRIPTION = (
+    "Run the automation as this service account of the organization instead "
+    "of as the caller. Requires manage_automations. Its runs use the service "
+    "account's API key, and its upload moves to the service account. "
+    "Omitted: it runs as the caller."
+)
+
+
+CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR = (
+    "keep_alive cannot be false when destination is "
+    "'continue_conversation': deleting the sandbox would destroy "
+    "the conversation the next event continues"
+)
+
+
+def continue_conversation_keep_alive(
+    trigger: Trigger | dict[str, Any] | None, keep_alive: bool | None
+) -> bool | None:
+    """Return the `keep_alive` an automation with `trigger` must store.
+
+    A continued conversation outlives its run, so its sandbox must too: an
+    event trigger with `destination: continue_conversation` forces `keep_alive`
+    to true and refuses false with `ValueError`. Every other trigger keeps the
+    requested value. Every create and update path applies this one rule, so the
+    cleanup paths can check `keep_alive` alone. `trigger` is a parsed trigger
+    or its stored dict form.
+    """
+    if isinstance(trigger, EventTrigger):
+        destination: Any = trigger.destination
+    elif isinstance(trigger, dict):
+        destination = trigger.get("destination")
+    else:
+        destination = None
+    if destination != "continue_conversation":
+        return keep_alive
+    if keep_alive is False:
+        raise ValueError(CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR)
+    return True
+
 
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
 
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
@@ -513,6 +583,7 @@ class CreateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -574,7 +645,7 @@ class CreateAutomationRequest(BaseModel):
     def validate_tarball_path(cls, v: str) -> str:
         if not _TARBALL_SCHEME_RE.match(v):
             raise ValueError(
-                "tarball_path must start with s3://, gs://, http://, or https://"
+                "tarball_path must start with oh-internal://, s3://, gs://, or https://"
             )
         return v
 
@@ -597,6 +668,11 @@ class CreateAutomationRequest(BaseModel):
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
 
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str]) -> list[str]:
+        return normalize_tags(v)
+
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
@@ -610,18 +686,9 @@ class CreateAutomationRequest(BaseModel):
         alone, rather than every deletion site re-deriving that a run holding a
         subject is implicitly kept.
         """
-        trigger = self.trigger
-        if not isinstance(trigger, EventTrigger):
-            return self
-        if trigger.destination != "continue_conversation":
-            return self
-        if self.keep_alive is False:
-            raise ValueError(
-                "keep_alive cannot be false when destination is "
-                "'continue_conversation': deleting the sandbox would destroy "
-                "the conversation the next event continues"
-            )
-        self.keep_alive = True
+        self.keep_alive = continue_conversation_keep_alive(
+            self.trigger, self.keep_alive
+        )
         return self
 
 
@@ -650,6 +717,15 @@ class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Replace a plugin-spec automation's configuration, validated against "
+            "its manifest. Omit to preserve it; {} applies schema defaults. "
+            "Null is not allowed. The trigger is unchanged unless also supplied."
+        ),
+    )
 
     plugin: UpdateAutomationPluginSource | None = Field(
         default=None,
@@ -697,6 +773,10 @@ class UpdateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    tags: list[str] | None = Field(
+        default=None,
+        description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -724,12 +804,19 @@ class UpdateAutomationRequest(BaseModel):
     def validate_public_state(cls, v: Any) -> Any:
         return reject_public_draft_state(v)
 
+    # state is NOT NULL too, but an explicit null there has always been a
+    # no-op (the handler skips it), so it is left out on purpose.
+    @field_validator("name", "trigger", "tarball_path", "entrypoint", "enabled")
+    @classmethod
+    def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
+        return reject_explicit_null(v, info)
+
     @field_validator("tarball_path")
     @classmethod
     def validate_tarball_path(cls, v: str | None) -> str | None:
         if v is not None and not _TARBALL_SCHEME_RE.match(v):
             raise ValueError(
-                "tarball_path must start with s3://, gs://, http://, or https://"
+                "tarball_path must start with oh-internal://, s3://, gs://, or https://"
             )
         return v
 
@@ -755,6 +842,15 @@ class UpdateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str] | None) -> list[str]:
+        # Runs only when the field is sent; an explicit null would hit the
+        # NOT NULL column, so clearing is spelled [].
+        if v is None:
+            raise ValueError("tags cannot be null; send [] to clear them")
+        return normalize_tags(v)
 
     @field_validator("timeout")
     @classmethod
@@ -804,6 +900,9 @@ class RequestedEventTypesResponse(BaseModel):
     source: str
     event_types: list[str]
     event_detection_rules: list[EventDetectionRule] = Field(default_factory=list)
+    # Organizations with an enabled automation on the source, for forwarders
+    # that fan an event out to them. None for sources routed to a single org.
+    org_ids: list[str] | None = None
 
 
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
@@ -972,6 +1071,11 @@ class CustomWebhookUpdate(BaseModel):
     event_id_header: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
 
+    @field_validator("name", "event_key_expr", "signature_header", "enabled")
+    @classmethod
+    def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
+        return reject_explicit_null(v, info)
+
     @field_validator("signature_scheme")
     @classmethod
     def validate_signature_scheme(cls, v: str | None) -> str | None:
@@ -1085,6 +1189,8 @@ class AutomationResponse(BaseModel):
     agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     user_id: uuid.UUID
+    run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER
+    created_by_user_id: uuid.UUID
     org_id: uuid.UUID
     model: str | None
 
@@ -1095,6 +1201,7 @@ class AutomationResponse(BaseModel):
     plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
+    tags: list[str] = Field(default_factory=list)
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1121,6 +1228,25 @@ class AutomationResponse(BaseModel):
 class AutomationListResponse(BaseModel):
     automations: list[AutomationResponse]
     total: int
+
+
+class AutomationTagCount(BaseModel):
+    tag: str
+    count: int = Field(..., description="Live automations carrying this tag")
+
+
+class AutomationTagsResponse(BaseModel):
+    """The org's tags, most-used first, for a list filter."""
+
+    tags: list[AutomationTagCount]
+
+
+class UsageResponse(BaseModel):
+    """Totals across every organization, for the OpenHands server's usage report."""
+
+    automations: int = Field(
+        ..., description="Live (not soft-deleted) automations in every org"
+    )
 
 
 class CreateAutomationDraftRequest(BaseModel):
@@ -1232,6 +1358,7 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     trigger_source: str | None = None
+    triggered_by_user_id: uuid.UUID | None = None
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None
@@ -1258,6 +1385,47 @@ class AutomationRunListResponse(BaseModel):
     # Lifetime run counts by status, unaffected by pagination. Sparse: only
     # statuses with at least one run appear, so a missing key means zero.
     status_counts: dict[RunStatus, int] = Field(default_factory=dict)
+
+
+class ChangeRunAsRequest(BaseModel):
+    """Make an automation run as a service account, or as the caller."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    to: Literal["service", "self"]
+    service_account_id: uuid.UUID | None = Field(
+        default=None,
+        description="Required when `to` is `service`; not allowed otherwise.",
+    )
+
+    @model_validator(mode="after")
+    def _service_account_matches_target(self) -> "ChangeRunAsRequest":
+        if (self.to == "service") != (self.service_account_id is not None):
+            raise ValueError(
+                "service_account_id is required when to is 'service' and "
+                "not allowed when to is 'self'"
+            )
+        return self
+
+
+class AutomationChangeResponse(BaseModel):
+    """One audited change to an automation (field names only, no values)."""
+
+    id: uuid.UUID
+    actor_user_id: uuid.UUID | None
+    actor_kind: Literal["user", "service", "git_sync", "system"]
+    action: str
+    changed_fields: list[str]
+    created_at: UtcDatetime
+
+    model_config = {"from_attributes": True}
+
+
+class AutomationChangeListResponse(BaseModel):
+    """Response for listing an automation's changes."""
+
+    changes: list[AutomationChangeResponse]
+    total: int
 
 
 # --- Capability and Preflight Schemas ---
@@ -1316,7 +1484,15 @@ class CapabilitiesResponse(_SetupContractModel):
             "Event key patterns matched with the same wildcard syntax a "
             "trigger's 'on' field uses. Only sources publishing a known "
             "catalog contribute; a custom webhook's keys come from its own "
-            "event_key_expr."
+            "event_key_expr. Kept to GitHub's patterns for older clients; "
+            "eventTypesBySource covers every source."
+        ),
+    )
+    event_types_by_source: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Event key patterns per offered event source, for each source "
+            "that publishes a catalog. A source missing here accepts any key."
         ),
     )
     triggers: TriggerCapabilities

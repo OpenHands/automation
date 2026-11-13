@@ -9,9 +9,11 @@ mock user identity.
 """
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -429,6 +431,74 @@ class TestKVTokenAuthStillWorks:
         )
         assert resp.status_code == 200
         assert resp.json()["keys"] == ["real"]
+
+
+class TestKVTokenUnknownAutomation:
+    """A validly signed token whose automation has no row is refused with 404.
+
+    Matches user auth for an unknown ``automation_id``; before, reads came back
+    empty and the first write failed the ``automation_kv_meta`` foreign key.
+    """
+
+    @pytest.fixture
+    def ghost_token(self):
+        return create_kv_token(
+            secret=TEST_KV_SECRET,
+            automation_id=uuid.UUID("00000000-0000-4000-8000-00000000dead"),
+            run_id=TEST_RUN_ID,
+        )
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("GET", "", None),
+            ("GET", "/ghost", None),
+            ("PUT", "/ghost", 1),
+            ("PATCH", "/ghost", {"path": "a", "value": 1}),
+            ("DELETE", "/ghost", None),
+            ("POST", "/ghost/incr", None),
+            ("POST", "/ghost/rpush", {"value": 1}),
+            ("GET", "/ghost/len", None),
+            ("POST", "/batch", {"operations": [{"op": "set", "key": "g", "value": 1}]}),
+        ],
+    )
+    async def test_every_route_answers_404(
+        self,
+        kv_token_client,
+        test_automation,
+        sqlite_session,
+        ghost_token,
+        method,
+        path,
+        body,
+    ):
+        resp = await kv_token_client.request(
+            method,
+            f"{_KV}{path}",
+            headers={"Authorization": f"Bearer {ghost_token}"},
+            json=body,
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Automation not found"
+        count = await sqlite_session.execute(
+            select(func.count()).select_from(AutomationKV)
+        )
+        assert count.scalar_one() == 0
+
+    async def test_soft_deleted_automation_token_still_works(
+        self, kv_token_client, test_automation, sqlite_session, kv_token
+    ):
+        """Soft delete keeps the row, so the token works as user auth does."""
+        test_automation.deleted_at = datetime.now(UTC)
+        seed_keys(sqlite_session, {"k": 1})
+        await sqlite_session.commit()
+
+        headers = {"Authorization": f"Bearer {kv_token}"}
+        resp = await kv_token_client.get(f"{_KV}/k", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["value"] == 1
+        resp = await kv_token_client.put(f"{_KV}/k2", headers=headers, json=2)
+        assert resp.status_code == 201
 
 
 # ---------------------------------------------------------------------------

@@ -342,6 +342,15 @@ class TestBatchOpPatch:
         with pytest.raises(KVOperationError, match="not an object"):
             _execute_batch_operation(state, op)
 
+    @pytest.mark.parametrize("path", ["", ".", "a[b"])
+    def test_patch_rejects_empty_or_malformed_path(self, path):
+        state = {"config": {"a": 1}}
+        op = KVBatchOpPatch(op="patch", key="config", path=path, value=2)
+
+        with pytest.raises(KVOperationError, match="Invalid path"):
+            _execute_batch_operation(state, op)
+        assert state == {"config": {"a": 1}}
+
 
 class TestBatchRequest:
     """Test batch request validation."""

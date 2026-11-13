@@ -3,13 +3,94 @@
 import httpx
 import pytest
 
+from openhands.automation.config import clear_config_cache
 from openhands.automation.utils.agent_server import VerificationOutcome
 from openhands.automation.utils.sandbox import (
     SandboxApiTransientError,
+    find_agent_server_url,
     get_sandbox_agent_url,
     pause_sandbox,
     verify_run_status,
 )
+
+
+@pytest.fixture
+def sandbox_internal_url(monkeypatch):
+    """Set AUTOMATION_SANDBOX_INTERNAL_URL for one test."""
+
+    def set_url(value: str) -> None:
+        monkeypatch.setenv("AUTOMATION_SANDBOX_INTERNAL_URL", value)
+        clear_config_cache()
+
+    monkeypatch.delenv("AUTOMATION_SANDBOX_INTERNAL_URL", raising=False)
+    clear_config_cache()
+    yield set_url
+    clear_config_cache()
+
+
+def _sandbox(url: str) -> dict:
+    return {
+        "exposed_urls": [
+            {"name": "OTHER", "url": "http://other.example.com"},
+            {"name": "AGENT_SERVER", "url": url},
+        ],
+        "session_api_key": "session-key",
+    }
+
+
+def test_find_agent_server_url_found(sandbox_internal_url):
+    result = find_agent_server_url(_sandbox("http://agent.example.com/"))
+    assert result == ("http://agent.example.com", "session-key")
+
+
+def test_find_agent_server_url_not_found(sandbox_internal_url):
+    sandbox = {"exposed_urls": [{"name": "OTHER", "url": "http://other.example.com"}]}
+    assert find_agent_server_url(sandbox) is None
+
+
+def test_find_agent_server_url_empty(sandbox_internal_url):
+    assert find_agent_server_url({"exposed_urls": None}) is None
+
+
+def test_find_agent_server_url_unchanged_without_internal_url(sandbox_internal_url):
+    url = "http://localhost:9043/runtime/oh-agent-server-abc/8000"
+    assert find_agent_server_url(_sandbox(url)) == (url, "session-key")
+
+
+@pytest.mark.parametrize("internal_url", ["http://proxy", "http://proxy/"])
+def test_find_agent_server_url_uses_internal_url(sandbox_internal_url, internal_url):
+    sandbox_internal_url(internal_url)
+    result = find_agent_server_url(
+        _sandbox("http://localhost:9043/runtime/oh-agent-server-abc/8000")
+    )
+    assert result == ("http://proxy/runtime/oh-agent-server-abc/8000", "session-key")
+
+
+def test_find_agent_server_url_replaces_custom_domain(sandbox_internal_url):
+    sandbox_internal_url("http://proxy")
+    result = find_agent_server_url(
+        _sandbox("https://openhands.example.com/runtime/oh-agent-server-abc/8000/?a=1")
+    )
+    assert result == (
+        "http://proxy/runtime/oh-agent-server-abc/8000/?a=1",
+        "session-key",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_agent_url_uses_internal_url(sandbox_internal_url):
+    sandbox_internal_url("http://proxy")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sandbox = _sandbox("http://localhost:9043/runtime/oh-agent-server-abc/8000")
+        return httpx.Response(200, json=[{**sandbox, "status": "RUNNING"}])
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await get_sandbox_agent_url(
+            client, "https://app.example.com", "test-key", "sandbox-123"
+        )
+    assert result == ("http://proxy/runtime/oh-agent-server-abc/8000", "session-key")
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,14 @@ def test_builder_uses_fixed_uv_version() -> None:
 
     # eMudhra CA distrust: uv >= 0.13.4 (GHSA-6q48-6c7w-9gw2)
     assert "ARG UV_VERSION=0.13.5" in dockerfile
-    assert 'RUN pip install --no-cache-dir "uv==${UV_VERSION}"' in dockerfile
+    # pip must be upgraded first: the base image's pip vendors a certifi
+    # bundle that still trusts the compromised roots.
+    assert 'pip install --no-cache-dir "pip>=26.2.2"' in dockerfile
+    assert dockerfile.index('"pip>=26.2.2"') < dockerfile.index('"uv==${UV_VERSION}"')
+    assert (
+        'pip install --use-deprecated=legacy-certs --no-cache-dir "uv==${UV_VERSION}"'
+        in dockerfile
+    )
 
 
 def test_runtime_contract_is_preserved() -> None:
@@ -40,6 +47,21 @@ def test_runtime_contract_is_preserved() -> None:
         'CMD ["ddtrace-run", "uvicorn", "openhands.automation.app:app", '
         '"--host", "0.0.0.0", "--port", "8000"]'
     ) in dockerfile
+
+
+def test_snapshot_apt_is_resilient() -> None:
+    dockerfile = _dockerfile()
+
+    # snapshot.debian.org 5xx responses must not fail the build on first hit
+    assert (
+        "https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" in dockerfile
+    )
+    assert (
+        "https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/"
+        in dockerfile
+    )
+    assert 'Acquire::Retries "5";' in dockerfile
+    assert "for attempt in 1 2 3 4 5; do" in dockerfile
 
 
 def test_runtime_data_dir_is_owned_by_service_user() -> None:

@@ -1,6 +1,7 @@
 """FastAPI router for the automations CRUD API."""
 
 import asyncio
+import json
 import logging
 import re
 import unicodedata
@@ -25,18 +26,23 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+    require_permission,
+)
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationDraft,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
-    TarballUpload,
 )
 from openhands.automation.observability import (
     add_event,
@@ -44,11 +50,17 @@ from openhands.automation.observability import (
     current_span_context,
     span,
 )
+from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
     AutomationPluginSource,
     CreatePluginSpecAutomationRequest,
+    PluginSecretLookup,
     PluginSpecError,
+    PluginSpecPreflightResponse,
     entrypoint_for_manifest,
+    no_plugin_secrets,
+    pin_plugin_refs,
+    plugin_secret_names,
     preflight_manifest,
     resolve_suggested_trigger,
     setup_script_for_manifest,
@@ -61,18 +73,27 @@ from openhands.automation.preset_router import (
     repos_config_json,
 )
 from openhands.automation.schemas import (
+    AutomationChangeListResponse,
+    AutomationChangeResponse,
     AutomationListResponse,
     AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
+    AutomationTagCount,
+    AutomationTagsResponse,
+    ChangeRunAsRequest,
     CreateAutomationRequest,
     EventTrigger,
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
+    continue_conversation_keep_alive,
 )
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.tags import normalize_tag
 from openhands.automation.telemetry import (
+    automation_created_event,
+    automation_created_properties,
     capture_automation_event,
     get_request_telemetry_context,
 )
@@ -82,6 +103,7 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.callback_error import format_callback_error
+from openhands.automation.utils.change_events import AuditActor, set_audit_actor
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
@@ -97,6 +119,15 @@ from openhands.automation.utils.run import (
     record_first_run_outcome,
     skip_pending_runs_for_disabled_automation,
 )
+from openhands.automation.utils.run_as import (
+    ResolvedRunAs,
+    assign_upload_to_run_as,
+    refuse_service_account,
+    require_automation_creator,
+    require_run_as_permission,
+    resolve_run_as,
+    verify_service_account,
+)
 from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
@@ -105,7 +136,9 @@ from openhands.automation.utils.state import (
     automation_state_enabled,
     model_automation_state,
 )
+from openhands.automation.utils.tags import count_org_tags, has_tag
 from openhands.automation.utils.tarball_validation import (
+    get_org_upload,
     is_http_url,
     parse_internal_upload_id,
     validate_tarball_path,
@@ -130,52 +163,30 @@ _require_view_automations = require_permission("view_automations")
 async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) -> None:
     """Authorize a write operation on a specific automation.
 
-    Admins and owners carry ``manage_automations`` and are always allowed.
-    A member (view-only) is allowed only when they are the creator of the
-    automation being modified — the ticket calls this the "creator escape
-    hatch."  ``require_permission`` can't express this because it has no
-    access to the automation row, so the check lives here in the handler
-    path instead of in the dependency.
+    Admins and owners carry ``manage_automations`` and may edit, turn on or
+    off, dispatch, cancel and delete any automation in their org, whoever
+    created it. A member (view-only) may do so only for an automation they
+    created — the "creator escape hatch." ``require_permission`` can't express
+    this because it has no access to the automation row, so the check lives
+    here in the handler path instead of in the dependency.
+
+    An automation that runs as a service account has no creator escape: only
+    holders of ``manage_automations`` pass, so the service account's own run
+    key cannot edit, delete, dispatch or cancel the automation it runs.
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
     """
     if "manage_automations" in user.permissions:
         return
-    if automation.user_id == user.user_id:
+    if (
+        automation.run_as_kind != AutomationRunAsKind.SERVICE
+        and automation.user_id == user.user_id
+    ):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Only admins, owners, or the automation creator can modify it",
-    )
-
-
-def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
-    fields = set(update_data)
-    if not fields or not fields <= {"enabled", "state"}:
-        return False
-    if "state" in update_data:
-        state = model_automation_state(update_data["state"], update_data.get("enabled"))
-        return (
-            state == ModelAutomationState.INACTIVE
-            and update_data.get("enabled", False) is False
-        )
-    return update_data.get("enabled") is False
-
-
-def _assert_can_update_fields(
-    automation: Automation, user: AuthenticatedUser, update_data: dict[str, Any]
-) -> None:
-    if automation.user_id == user.user_id:
-        return
-    if _is_disable_only_update(update_data):
-        return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=(
-            "Only the automation creator can edit it; admins and owners can only "
-            "turn it off or delete it"
-        ),
     )
 
 
@@ -231,7 +242,7 @@ async def create_automation(
     body: CreateAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_view_automations),
+    user: AuthenticatedUser = Depends(require_automation_creator),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create a new automation.
@@ -242,6 +253,8 @@ async def create_automation(
 
     An entry shipping its own tarball creates here rather than through a
     preset, so it may carry the same ``template`` provenance those accept.
+
+    ``run_as_user_id`` creates it as a service account of the org (managers only).
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
 
@@ -258,9 +271,14 @@ async def create_automation(
 
     # After the template lookup, so a repeat enable stays one query and does
     # not depend on the OpenHands API, and before the rest of the transaction.
-    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
 
-    # Validate tarball_path (checks ownership for internal uploads)
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
+
+    # Validate tarball_path (checks ownership for internal uploads). Always
+    # against the caller: a service account owns an upload only after creation.
     await validate_tarball_path(
         tarball_path=body.tarball_path,
         user_id=user.user_id,
@@ -280,7 +298,9 @@ async def create_automation(
     state = model_automation_state(body.state, body.enabled)
 
     auto = Automation(
-        user_id=user.user_id,
+        user_id=run_as.user_id,
+        run_as_kind=run_as.kind,
+        created_by_user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
         description=body.description,
@@ -289,6 +309,7 @@ async def create_automation(
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
+        tags=body.tags,
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
@@ -300,6 +321,8 @@ async def create_automation(
             request
         ).frontend_distinct_id,
     )
+    # Before ``add``: the new row must not count as another user of the upload.
+    await assign_upload_to_run_as(session, body.tarball_path, user.org_id, run_as)
     session.add(auto)
     await session.flush()
     await session.refresh(auto)
@@ -308,8 +331,9 @@ async def create_automation(
     if body.template is not None:
         creation_properties["template_id"] = body.template.id
         creation_properties["template_version"] = body.template.version
+    creation_properties.update(await automation_created_properties(session, auto))
     await capture_automation_event(
-        "automation_created",
+        automation_created_event(),
         request=request,
         user=user,
         automation=auto,
@@ -327,7 +351,7 @@ async def create_automation_from_plugin_spec(
     body: CreatePluginSpecAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_view_automations),
+    user: AuthenticatedUser = Depends(require_automation_creator),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""
@@ -339,11 +363,16 @@ async def create_automation_from_plugin_spec(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
+
     runtime_fields = await _resolve_plugin_spec_runtime_fields(
         plugin=body.plugin,
         plugin_config=body.config,
         request=request,
         user=user,
+        run_as_user_id=run_as.user_id,
+        pin_ref=run_as.kind == AutomationRunAsKind.SERVICE,
+        agent_profile_id=body.agent_profile_id,
     )
     trigger = await _resolve_plugin_spec_trigger(
         requested_trigger=body.trigger,
@@ -353,21 +382,12 @@ async def create_automation_from_plugin_spec(
         session=session,
     )
 
-    keep_alive = body.keep_alive
-    if (
-        isinstance(trigger, EventTrigger)
-        and trigger.destination == "continue_conversation"
-    ):
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would destroy "
-                    "the conversation the next event continues"
-                ),
-            )
-        keep_alive = True
+    # The trigger may come from the manifest, so the rule is applied here
+    # rather than on the request model.
+    try:
+        keep_alive = continue_conversation_keep_alive(trigger, body.keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     state = model_automation_state(body.state, body.enabled)
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
@@ -375,7 +395,9 @@ async def create_automation_from_plugin_spec(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     automation = Automation(
-        user_id=user.user_id,
+        user_id=run_as.user_id,
+        run_as_kind=run_as.kind,
+        created_by_user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
         prompt=None,
@@ -401,36 +423,102 @@ async def create_automation_from_plugin_spec(
     await session.refresh(automation)
     await mark_git_sync_dirty(session, automation)
     await capture_automation_event(
-        "automation_created",
+        automation_created_event(),
         request=request,
         user=user,
         automation=automation,
-        properties={"creation_path": "plugin_spec"},
+        properties={
+            "creation_path": "plugin_spec",
+            **await automation_created_properties(session, automation),
+        },
     )
     return AutomationResponse.model_validate(automation)
 
 
-def _allow_local_plugin_sources() -> bool:
-    return get_config().service.is_local_mode
+@router.get(
+    "/plugin-spec/preflight",
+    response_model=PluginSpecPreflightResponse,
+)
+async def preflight_plugin_spec(
+    source: str,
+    ref: str | None = None,
+    repo_path: str | None = None,
+    user: AuthenticatedUser = Depends(_require_view_automations),  # noqa: ARG001
+) -> PluginSpecPreflightResponse:
+    """Read-only preflight of a plugin spec.
 
-
-def _fetch_validated_plugin_manifest(
-    plugin: AutomationPluginSource,
-    plugin_config: dict[str, Any] | None,
-) -> tuple[dict[str, Any], Any]:
+    Resolves and parses the plugin manifest (config schema, runtime profile
+    requirements, suggested trigger) with no side effects. Used by launch
+    flows to render typed config inputs and a default trigger before the user
+    commits to creating an automation.
+    """
+    plugin = AutomationPluginSource(source=source, ref=ref, repo_path=repo_path)
     allow_local_sources = _allow_local_plugin_sources()
     try:
-        _resolved_ref, manifest = preflight_manifest(
+        resolved_ref, manifest = preflight_manifest(
             plugin, allow_local_sources=allow_local_sources
         )
         validate_required_plugins(
             manifest.runtime.plugins,
             allow_local_sources=allow_local_sources,
         )
+        # Static suggested_trigger can be returned directly. Templated triggers
+        # need config the preflight doesn't have, so return null and let the
+        # frontend render the trigger once config is collected at install time.
+        if manifest.suggested_trigger_template is None:
+            suggested_trigger = resolve_suggested_trigger(manifest, {})
+        else:
+            suggested_trigger = None
+    except PluginSpecError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return PluginSpecPreflightResponse(
+        manifest=manifest,
+        resolved_ref=resolved_ref,
+        suggested_trigger=suggested_trigger,
+    )
+
+
+def _allow_local_plugin_sources() -> bool:
+    return get_config().service.is_local_mode
+
+
+def _plugin_secrets_for(
+    request: Request, user_id: uuid.UUID, org_id: uuid.UUID
+) -> PluginSecretLookup:
+    """Secrets for a preflight of the plugins of an automation that runs as
+    ``user_id`` in ``org_id``: a private source names its credential with a
+    ``${NAME}`` placeholder, resolved for that identity."""
+    return preflight_secret_lookup(
+        get_http_client(request), user_id=user_id, org_id=org_id
+    )
+
+
+async def _fetch_validated_plugin_manifest(
+    plugin: AutomationPluginSource,
+    plugin_config: dict[str, Any] | None,
+    secrets: PluginSecretLookup,
+) -> tuple[dict[str, Any], Any, str | None, list[dict[str, Any]]]:
+    """Preflight a plugin.
+
+    Returns its config, manifest, resolved commit SHA and the preflighted
+    secondary plugins (each with its own ``resolved_ref``).
+    """
+    allow_local_sources = _allow_local_plugin_sources()
+    try:
+        resolved_ref, manifest = preflight_manifest(
+            plugin,
+            allow_local_sources=allow_local_sources,
+            secrets=await secrets(plugin_secret_names([plugin])),
+        )
+        required_plugins = validate_required_plugins(
+            manifest.runtime.plugins,
+            allow_local_sources=allow_local_sources,
+            secrets=await secrets(plugin_secret_names(manifest.runtime.plugins)),
+        )
         resolved_config = validate_plugin_config(manifest, plugin_config)
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    return resolved_config, manifest
+    return resolved_config, manifest, resolved_ref, required_plugins
 
 
 def _profile_requirements_signature(manifest: Any) -> dict[str, Any]:
@@ -453,11 +541,33 @@ def _plugin_runtime_fields(
     manifest: Any,
     model: str | None,
     agent_profile_id: uuid.UUID | None,
+    pinned_ref: str | None = None,
+    pinned_required_plugins: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Automation fields derived from a plugin spec.
+
+    ``pinned_ref`` (the resolved commit SHA) replaces the plugin's ref in the
+    stored spec, so every run fetches exactly that commit.
+    ``pinned_required_plugins`` (the preflighted secondary plugins) is stored
+    with each ref replaced by its resolved SHA; runs fetch those instead of
+    re-resolving the manifest's secondary plugins.
+    """
+    if pinned_ref:
+        plugin = plugin.model_copy(update={"ref": pinned_ref})
+    pins: dict[str, Any] = {}
+    if pinned_required_plugins is not None:
+        pins["required_plugins"] = [
+            {
+                **{k: v for k, v in item.items() if k != "resolved_ref"},
+                **({"ref": item["resolved_ref"]} if item.get("resolved_ref") else {}),
+            }
+            for item in pinned_required_plugins
+        ]
     return {
         "plugin_spec": {
             "plugin": plugin.model_dump(exclude_none=True),
             "config": plugin_config,
+            **pins,
         },
         "manifest": manifest,
         "model": model,
@@ -505,20 +615,52 @@ async def _resolve_plugin_spec_runtime_fields(
     plugin_config: dict[str, Any] | None,
     request: Request,
     user: AuthenticatedUser,
+    run_as_user_id: uuid.UUID,
+    pin_ref: bool = False,
+    agent_profile_id: uuid.UUID | None = None,
+    current_agent_profile_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    """Validate a plugin spec and return automation fields derived from it."""
-    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin, plugin_config)
+    """Validate a plugin spec and return automation fields derived from it.
 
+    ``pin_ref`` stores the resolved commit SHA as the plugin ref, for an
+    automation that runs as a service account: a moving branch or tag would
+    let anyone who can push to the plugin repo change code that runs as the
+    service account, with no edit visible here. The manifest's secondary
+    plugins are pinned the same way.
+
+    A private source is fetched with the secrets of ``run_as_user_id``, the
+    identity every run uses.
+    """
+    (
+        plugin_config,
+        manifest,
+        resolved_ref,
+        required_plugins,
+    ) = await _fetch_validated_plugin_manifest(
+        plugin,
+        plugin_config,
+        _plugin_secrets_for(request, run_as_user_id, user.org_id),
+    )
+
+    agent_profile_requirement = manifest.runtime.agent_profile
+    if agent_profile_requirement is None:
+        if agent_profile_id is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "This plugin does not run on an agent profile",
+            )
+    elif agent_profile_id is None:
+        agent_profile_id = current_agent_profile_id
     agent_profile_name = (
-        manifest.runtime.agent_profile.default_name
-        if manifest.runtime.agent_profile is not None
+        agent_profile_requirement.default_name
+        if agent_profile_requirement is not None and agent_profile_id is None
         else None
     )
-    has_agent_profile = bool(agent_profile_name)
+    has_agent_profile = agent_profile_id is not None or bool(agent_profile_name)
     if (
-        manifest.runtime.agent_profile is not None
-        and manifest.runtime.agent_profile.required
-        and not agent_profile_name
+        agent_profile_requirement is not None
+        and agent_profile_requirement.required
+        and not has_agent_profile
     ):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -544,9 +686,8 @@ async def _resolve_plugin_spec_runtime_fields(
             resolve_model_profile_for_user(llm_default, user) if llm_default else None
         )
 
-    agent_profile_requirement = manifest.runtime.agent_profile
     agent_profile_id = await validate_agent_profile_allowlists(
-        None,
+        agent_profile_id,
         agent_profile_name,
         agent_profile_requirement.allowed_tools
         if agent_profile_requirement is not None
@@ -567,13 +708,17 @@ async def _resolve_plugin_spec_runtime_fields(
         manifest=manifest,
         model=model,
         agent_profile_id=agent_profile_id,
+        pinned_ref=resolved_ref if pin_ref else None,
+        pinned_required_plugins=required_plugins if pin_ref else None,
     )
 
 
-def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+async def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
     *,
     plugin: AutomationPluginSource,
     automation: Automation,
+    secrets: PluginSecretLookup = no_plugin_secrets,
+    plugin_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve a plugin update without rereading agent profile details.
 
@@ -595,12 +740,21 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Existing plugin-spec automation is missing plugin source metadata",
         )
-    requested_config = existing_plugin_spec.get("config")
+    existing_config = existing_plugin_spec.get("config")
+    requested_config = plugin_config if plugin_config is not None else existing_config
     old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
-    _old_config, old_manifest = _fetch_validated_plugin_manifest(
-        old_plugin, requested_config
-    )
-    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin, requested_config)
+    (
+        _old_config,
+        old_manifest,
+        _old_ref,
+        _old_required,
+    ) = await _fetch_validated_plugin_manifest(old_plugin, existing_config, secrets)
+    (
+        plugin_config,
+        manifest,
+        resolved_ref,
+        required_plugins,
+    ) = await _fetch_validated_plugin_manifest(plugin, requested_config, secrets)
     if _profile_requirements_signature(manifest) != _profile_requirements_signature(
         old_manifest
     ):
@@ -611,12 +765,15 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
                 "new plugin manifest changes profile requirements"
             ),
         )
+    runs_as_service = automation.run_as_kind == AutomationRunAsKind.SERVICE
     return _plugin_runtime_fields(
         plugin=plugin,
         plugin_config=plugin_config,
         manifest=manifest,
         model=automation.model,
         agent_profile_id=automation.agent_profile_id,
+        pinned_ref=resolved_ref if runs_as_service else None,
+        pinned_required_plugins=required_plugins if runs_as_service else None,
     )
 
 
@@ -625,6 +782,16 @@ async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     created_by: Literal["me", "others"] | None = Query(default=None),
+    tag: str | None = Query(
+        default=None, description="Only automations carrying this tag"
+    ),
+    run_as_user_id: uuid.UUID | None = Query(
+        default=None,
+        description=(
+            "Only automations that run as this user or service account id. "
+            "Narrows the caller's org listing; it never reaches other orgs."
+        ),
+    ),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
@@ -633,10 +800,21 @@ async def list_automations(
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
+    # The creator, not the run-as identity: an automation the caller created to
+    # run as a service account is still "me".
     if created_by == "me":
-        base_query = base_query.where(Automation.user_id == user.user_id)
+        base_query = base_query.where(Automation.created_by_user_id == user.user_id)
     elif created_by == "others":
-        base_query = base_query.where(Automation.user_id != user.user_id)
+        base_query = base_query.where(Automation.created_by_user_id != user.user_id)
+    if tag is not None:
+        try:
+            base_query = base_query.where(has_tag(normalize_tag(tag)))
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            ) from exc
+    if run_as_user_id is not None:
+        base_query = base_query.where(Automation.user_id == run_as_user_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
@@ -655,6 +833,19 @@ async def list_automations(
     return AutomationListResponse(
         automations=[AutomationResponse.model_validate(a) for a in automations],
         total=total,
+    )
+
+
+# Before /{automation_id}, which would otherwise take "tags" as an id.
+@router.get("/tags")
+async def list_automation_tags(
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> AutomationTagsResponse:
+    """Tags on the caller's org's live automations, most-used first."""
+    counts = await count_org_tags(session, user.org_id)
+    return AutomationTagsResponse(
+        tags=[AutomationTagCount(tag=tag, count=count) for tag, count in counts]
     )
 
 
@@ -680,14 +871,38 @@ async def update_automation(
 ) -> AutomationResponse:
     """Partially update an automation.
 
-    Only the creator may edit the definition. Admins and owners may turn an
-    automation off but cannot reactivate it or change what it runs.
+    Admins and owners may edit and turn on or off any automation in their org;
+    members only those they created (see ``_assert_can_manage``). An edit never
+    changes who the automation runs as: it keeps running as ``user_id``.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
-    _assert_can_update_fields(auto, user, update_data)
+    # Same ownership check as create. Only a new value is checked: resending the
+    # stored path cannot grant anything the row does not already have, and that
+    # upload need not be owned by the editor or still be live.
+    requested_tarball_path = update_data.get("tarball_path")
+    if (
+        requested_tarball_path is not None
+        and requested_tarball_path != auto.tarball_path
+    ):
+        await validate_tarball_path(
+            tarball_path=requested_tarball_path,
+            user_id=user.user_id,
+            org_id=user.org_id,
+            session=session,
+        )
+        # Validated against the caller above; the identity the automation runs
+        # as owns it from now on, so an admin editing a teammate's automation
+        # cannot delete the upload from under it.
+        await assign_upload_to_run_as(
+            session,
+            requested_tarball_path,
+            user.org_id,
+            ResolvedRunAs(auto.user_id, auto.run_as_kind),
+            automation_id=auto.id,
+        )
     # Repositories are not a column: a preset bakes them into its tarball and
     # records them in preset_metadata, so they are applied with the prompt below.
     repos_requested = "repos" in update_data
@@ -700,6 +915,18 @@ async def update_automation(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Only prompt and plugin preset automations can update repos",
         )
+    config_requested = "config" in update_data
+    requested_config = update_data.pop("config", None)
+    if config_requested:
+        if requested_config is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, "config cannot be null"
+            )
+        if not auto.plugin_spec or auto.tarball_path != "plugin-spec://runtime":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Only plugin-spec automations can update config",
+            )
     plugin_update_requested = "plugin" in update_data
     if plugin_update_requested:
         if update_data["plugin"] is None:
@@ -712,6 +939,7 @@ async def update_automation(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "Only plugin-spec automations can update plugin source",
             )
+    if plugin_update_requested or config_requested:
         runtime_overrides = sorted(
             set(update_data)
             & {
@@ -731,15 +959,20 @@ async def update_automation(
                     "plugin manifest; remove: " + ", ".join(runtime_overrides)
                 ),
             )
+    if plugin_update_requested:
+        assert auto.plugin_spec is not None
         plugin_source = AutomationPluginSource.model_validate(update_data.pop("plugin"))
         try:
             plugin_runtime_fields = await _resolve_plugin_spec_runtime_fields(
                 plugin=plugin_source,
-                plugin_config=auto.plugin_spec.get("config")
-                if auto.plugin_spec
-                else None,
+                plugin_config=requested_config
+                if config_requested
+                else auto.plugin_spec.get("config"),
                 request=request,
                 user=user,
+                run_as_user_id=auto.user_id,
+                pin_ref=auto.run_as_kind == AutomationRunAsKind.SERVICE,
+                current_agent_profile_id=auto.agent_profile_id,
             )
         except HTTPException as exc:
             if (
@@ -752,13 +985,27 @@ async def update_automation(
             ):
                 raise
             plugin_runtime_fields = (
-                _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+                await _resolve_plugin_spec_update_fields_reusing_existing_profiles(
                     plugin=plugin_source,
                     automation=auto,
+                    secrets=_plugin_secrets_for(request, auto.user_id, auto.org_id),
+                    plugin_config=requested_config if config_requested else None,
                 )
             )
         plugin_runtime_fields.pop("manifest", None)
         update_data.update(plugin_runtime_fields)
+    elif config_requested:
+        assert auto.plugin_spec is not None
+        plugin_source = AutomationPluginSource.model_validate(
+            auto.plugin_spec["plugin"]
+        )
+        resolved_config, _, _, _ = await _fetch_validated_plugin_manifest(
+            plugin_source,
+            requested_config,
+            _plugin_secrets_for(request, auto.user_id, auto.org_id),
+        )
+        # A config edit must not repin code or change the selected profiles.
+        update_data["plugin_spec"] = {**auto.plugin_spec, "config": resolved_config}
 
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
@@ -792,19 +1039,13 @@ async def update_automation(
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
     trigger = update_data.get("trigger") or auto.trigger or {}
-    if trigger.get("destination") == "continue_conversation":
-        keep_alive = update_data.get("keep_alive", auto.keep_alive)
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would "
-                    "destroy the conversation the next event continues"
-                ),
-            )
-        if keep_alive is not True:
-            update_data["keep_alive"] = True
+    keep_alive = update_data.get("keep_alive", auto.keep_alive)
+    try:
+        settled_keep_alive = continue_conversation_keep_alive(trigger, keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if settled_keep_alive is not keep_alive:
+        update_data["keep_alive"] = settled_keep_alive
 
     disable_event: AutomationDisableEvent | None = None
     skip_pending_reason: str | None = None
@@ -844,11 +1085,23 @@ async def update_automation(
             # Only a newly selected profile is looked up: an update that sends
             # the current one back must not start failing because the profile
             # was deleted since, or the OpenHands API is down.
-            await ensure_agent_profile_exists(selected_profile, request, user)
+            await ensure_agent_profile_exists(
+                selected_profile, request, user, runs_as_user_id=auto.user_id
+            )
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:
-            update_data["model"] = resolve_model_profile_for_user(body.model, user)
+            # The model is a profile of the identity the automation runs as,
+            # which an admin editing a teammate's automation does not share: a
+            # resent profile is kept unchecked, like a resent agent profile, and
+            # only the run-as identity's own clear falls back to its active one.
+            if body.model is not None:
+                if body.model != auto.model:
+                    update_data["model"] = resolve_model_profile_for_user(
+                        body.model, user
+                    )
+            elif auto.user_id == user.user_id:
+                update_data["model"] = resolve_model_profile_for_user(None, user)
 
     original_prompt = auto.prompt
     for field, value in update_data.items():
@@ -915,16 +1168,15 @@ async def update_automation(
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
+    updated_fields = sorted(
+        update_data.keys() | ({"repos"} if repos_requested else set())
+    )
     await capture_automation_event(
         "automation_updated",
         request=request,
         user=user,
         automation=auto,
-        properties={
-            "updated_fields": sorted(
-                update_data.keys() | ({"repos"} if repos_requested else set())
-            )
-        },
+        properties={"updated_fields": updated_fields},
     )
     return AutomationResponse.model_validate(auto)
 
@@ -975,6 +1227,244 @@ async def delete_automation(
     )
 
 
+async def _pin_plugins_for_run_as_change(
+    auto: Automation,
+    session: AsyncSession,
+    background_tasks: BackgroundTasks,
+    secrets: PluginSecretLookup = no_plugin_secrets,
+) -> None:
+    """Pin the plugin refs of ``auto`` to commit SHAs for a service account.
+
+    ``secrets`` are those of the new identity: a private source must be
+    readable with its credentials.
+
+    An automation runs the plugin code its ref points at. Under a service
+    account that code would change, with no edit visible here, whenever anyone
+    pushes to the plugin repo. Create and update pin the refs for a
+    run-as-service-account automation; one that runs as a person may hold
+    branch refs, so the run-as change pins them the same way:
+
+    - plugin spec: the manifest is resolved as on create, and the resolved SHAs
+      of the plugin and its secondary plugins replace the stored refs. The
+      stored ``entrypoint`` and ``setup_script_path`` are taken from that
+      manifest, so they match the pinned commit if the branch moved since
+      create. The agent profile is not checked here: each run re-reads the
+      manifest at the pin and validates the profile against it.
+    - plugin preset: each ref in ``preset_metadata`` is resolved, and the
+      tarball's ``plugins_config.json`` is rewritten with the SHAs.
+
+    Raises:
+        HTTPException: 422 when a plugin cannot be fetched or validated, or
+            when its refs cannot be checked (experiment variants keep their
+            plugins only inside the tarball).
+    """
+    if auto.plugin_spec:
+        plugin = AutomationPluginSource.model_validate(auto.plugin_spec.get("plugin"))
+        (
+            config,
+            manifest,
+            resolved_ref,
+            required_plugins,
+        ) = await _fetch_validated_plugin_manifest(
+            plugin, auto.plugin_spec.get("config"), secrets
+        )
+        runtime_fields = _plugin_runtime_fields(
+            plugin=plugin,
+            plugin_config=config,
+            manifest=manifest,
+            model=None,
+            agent_profile_id=None,
+            pinned_ref=resolved_ref,
+            pinned_required_plugins=required_plugins,
+        )
+        auto.plugin_spec = runtime_fields["plugin_spec"]
+        auto.entrypoint = runtime_fields["entrypoint"]
+        auto.setup_script_path = runtime_fields["setup_script_path"]
+    elif (auto.preset_metadata or {}).get("preset_type") == "plugin":
+        plugins = (auto.preset_metadata or {}).get("plugins")
+        if plugins is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Plugin refs cannot be checked for this automation, so it "
+                "cannot run as a service account",
+            )
+        try:
+            pinned = await pin_plugin_refs(
+                plugins,
+                allow_local_sources=_allow_local_plugin_sources(),
+                secrets=secrets,
+            )
+        except PluginSpecError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
+        if pinned == plugins:
+            return
+        new_tarball_path = await regenerate_preset_tarball(
+            auto,
+            {"plugins_config.json": json.dumps(pinned, indent=2)},
+            session,
+            background_tasks,
+        )
+        if new_tarball_path is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="The plugin refs of this automation cannot be pinned, so it "
+                "cannot run as a service account",
+            )
+        auto.tarball_path = new_tarball_path
+        auto.preset_metadata = {**(auto.preset_metadata or {}), "plugins": pinned}
+
+
+@router.post("/{automation_id}/run-as")
+async def change_run_as(
+    automation_id: uuid.UUID,
+    body: ChangeRunAsRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> AutomationResponse:
+    """Make an automation run as a service account of the org, or as the caller.
+
+    Only holders of ``manage_automations`` may change it: to a service account
+    (``to: service``) or to themselves (``to: self``). The automation keeps its
+    id, KV store and creator, but ends INACTIVE: a person must re-enable it
+    under the new identity. Refused (409) while a run is PENDING or RUNNING,
+    when the automation is a draft, or when its internal upload is used by
+    another automation.
+
+    Conversation ids of subject-keyed runs include the service account for an
+    automation that runs as one (``subjects.conversation_id_for``): after a
+    change to a service account, new events start new conversations, and a
+    change back to a user restores the old ids.
+
+    Plugin refs are pinned to commit SHAs on a change to a service account
+    (see ``_pin_plugins_for_run_as_change``).
+
+    Known limits:
+
+    - ``keep_alive`` and deferred-cleanup sandboxes of runs that already
+      finished are cleaned up with the NEW identity's key after the change.
+      They can outlive the change until the runtime TTL.
+    - The live-run check and the commit are not under a row lock. A run
+      dispatched in between can finish under the old identity's key and get
+      403 on its callbacks, until the watchdog times it out.
+    """
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    # As on create (``resolve_run_as``): a service account must not make an
+    # automation run as itself, whatever its permissions.
+    refuse_service_account(
+        user, "A service account cannot change who an automation runs as"
+    )
+    require_run_as_permission(
+        user, "Only admins and owners can change who an automation runs as"
+    )
+    # Pinning plugin refs flushes before the identity changes; label the whole
+    # request so its audit row reads as one run-as change.
+    set_audit_actor(session, AuditActor.from_user(user), action="run_as_change")
+    if body.to == "self":
+        new_run_as = ResolvedRunAs(user.user_id, AutomationRunAsKind.USER)
+    else:
+        assert body.service_account_id is not None  # guaranteed by the schema
+        new_run_as = ResolvedRunAs(body.service_account_id, AutomationRunAsKind.SERVICE)
+
+    if (auto.user_id, auto.run_as_kind) == (new_run_as.user_id, new_run_as.kind):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="The automation already runs as this identity",
+        )
+    if auto.state == ModelAutomationState.DRAFT:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="A draft automation cannot change who it runs as",
+        )
+    live_run = await session.scalar(
+        select(AutomationRun.id)
+        .where(
+            AutomationRun.automation_id == auto.id,
+            AutomationRun.status.in_(
+                (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING)
+            ),
+        )
+        .limit(1)
+    )
+    if live_run is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="The automation has a pending or running run; wait for it to "
+            "finish or cancel it",
+        )
+
+    if new_run_as.kind == AutomationRunAsKind.SERVICE:
+        await verify_service_account(
+            new_run_as.user_id,
+            user.org_id,
+            get_http_client(request),
+            field="service_account_id",
+        )
+        await _pin_plugins_for_run_as_change(
+            auto,
+            session,
+            background_tasks,
+            _plugin_secrets_for(request, new_run_as.user_id, user.org_id),
+        )
+    # After pinning (which may replace the tarball) and before the identity
+    # changes, so a 409 for a shared upload leaves the row as it was.
+    await assign_upload_to_run_as(
+        session, auto.tarball_path, user.org_id, new_run_as, automation_id=auto.id
+    )
+
+    now = utcnow()
+    disabled_detail = {"reason": "run_as_changed", "source": "run_as_change"}
+    auto.user_id = new_run_as.user_id
+    auto.run_as_kind = new_run_as.kind
+    auto.enabled = False
+    auto.state = ModelAutomationState.INACTIVE
+    auto.disabled_reason = "run_as_changed"
+    auto.disabled_detail = disabled_detail
+    auto.disabled_at = now
+    session.add(
+        AutomationDisableEvent(
+            automation_id=auto.id,
+            reason="run_as_changed",
+            detail=disabled_detail,
+            source="run_as_change",
+        )
+    )
+    # No run is live (409 above); this covers one accepted since that check.
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        auto.id,
+        reason="Automation now runs as a new identity",
+        disabled_detail=disabled_detail,
+        completed_at=now,
+        include_manual=True,
+    )
+    # Conversations started under the old identity must not be continued as the
+    # new one: stop routing events to them. The run rows keep their subject keys.
+    await session.execute(
+        update(AutomationRun)
+        .where(
+            AutomationRun.automation_id == auto.id,
+            AutomationRun.subject_key.isnot(None),
+            AutomationRun.subject_released_at.is_(None),
+        )
+        .values(subject_released_at=now)
+    )
+    await session.flush()
+    await session.refresh(auto)
+    await mark_git_sync_dirty(session, auto)
+    await capture_automation_event(
+        "automation_run_as_changed",
+        request=request,
+        user=user,
+        automation=auto,
+        properties={"to": body.to},
+    )
+    return AutomationResponse.model_validate(auto)
+
+
 @router.get("/{automation_id}/tarball")
 async def download_automation_tarball(
     automation_id: uuid.UUID,
@@ -994,14 +1484,8 @@ async def download_automation_tarball(
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
-        result = await session.execute(
-            select(TarballUpload).where(
-                TarballUpload.id == upload_id,
-                TarballUpload.deleted_at.is_(None),
-            )
-        )
-        upload = result.scalars().first()
-        if upload is None:
+        upload = await get_org_upload(session, upload_id, auto.org_id)
+        if upload is None or upload.deleted_at is not None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Tarball not found (underlying upload may have been deleted)",
@@ -1091,6 +1575,7 @@ async def dispatch_automation(
             auto,
             telemetry_distinct_id=telemetry_context.frontend_distinct_id,
             trigger_source="manual",
+            triggered_by_user_id=user.user_id,
             observability_parent_span_context=current_span_context(),
         )
         run_created_attributes = automation_attributes(auto, run)
@@ -1137,7 +1622,8 @@ async def list_automation_runs(
     result = await session.execute(
         select(AutomationRun)
         .where(AutomationRun.automation_id == automation_id)
-        .order_by(AutomationRun.created_at.desc())
+        # id breaks exact created_at ties, so offset pages stay stable.
+        .order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc())
         .offset(offset)
         .limit(limit)
     )
@@ -1147,6 +1633,53 @@ async def list_automation_runs(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
         status_counts=status_counts,
+    )
+
+
+@router.get("/{automation_id}/changes")
+async def list_automation_changes(
+    automation_id: uuid.UUID,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> AutomationChangeListResponse:
+    """List who changed an automation and which fields, latest first.
+
+    Field names only, never values. A soft-deleted automation is a 404, so its
+    history is not readable through the API.
+
+    ``created_at`` is written from Python with microseconds, so changes made in
+    the same second still list newest first on SQLite. Rows written before that
+    (whole seconds on SQLite) can tie; ``id`` keeps their order stable.
+    """
+    await _get_org_automation(session, automation_id, user.org_id)
+
+    total = await session.scalar(
+        select(func.count())
+        .select_from(AutomationChangeEvent)
+        .where(
+            AutomationChangeEvent.org_id == user.org_id,
+            AutomationChangeEvent.automation_id == automation_id,
+        )
+    )
+    result = await session.execute(
+        select(AutomationChangeEvent)
+        .where(
+            AutomationChangeEvent.org_id == user.org_id,
+            AutomationChangeEvent.automation_id == automation_id,
+        )
+        # id only breaks exact ties (rows from before created_at had a Python
+        # default), so offset pages keep one order across requests.
+        .order_by(
+            AutomationChangeEvent.created_at.desc(), AutomationChangeEvent.id.desc()
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+    return AutomationChangeListResponse(
+        changes=[AutomationChangeResponse.model_validate(e) for e in result.scalars()],
+        total=total or 0,
     )
 
 

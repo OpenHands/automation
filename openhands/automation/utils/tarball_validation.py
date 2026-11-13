@@ -80,6 +80,24 @@ def is_http_url(tarball_path: str) -> bool:
     return tarball_path.startswith(HTTP_URL_SCHEMES)
 
 
+async def get_org_upload(
+    session: AsyncSession, upload_id: UUID, org_id: UUID
+) -> TarballUpload | None:
+    """Load an upload by id, only if it belongs to ``org_id``.
+
+    Pass the automation's org when resolving its ``oh-internal://``
+    tarball_path. Deleted uploads are returned; the caller decides how to
+    treat them.
+    """
+    result = await session.execute(
+        select(TarballUpload).where(
+            TarballUpload.id == upload_id,
+            TarballUpload.org_id == org_id,
+        )
+    )
+    return result.scalars().first()
+
+
 async def validate_tarball_path(
     tarball_path: str,
     user_id: UUID,
@@ -87,7 +105,7 @@ async def validate_tarball_path(
     session: AsyncSession,
 ) -> None:
     """
-    Validate tarball_path for automation creation.
+    Validate tarball_path for automation creation and update.
 
     For internal uploads (oh-internal://):
     - Verifies the upload exists and is not deleted

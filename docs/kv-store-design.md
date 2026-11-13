@@ -505,25 +505,40 @@ GET /kv/task-queue/len
 
 ## Error Responses
 
-All errors return JSON with consistent structure:
+Errors use FastAPI's standard shape. Most carry a string `detail` that starts
+with a stable snake_case code, optionally followed by `: ` and a
+human-readable reason:
 
 ```json
-{
-  "error": "error_code",
-  "message": "Human-readable description"
-}
+{"detail": "invalid_path: unclosed bracket"}
 ```
 
-| HTTP Status | Error Code | Description |
-|-------------|------------|-------------|
-| 400 | `invalid_request` | Malformed request body |
-| 400 | `invalid_path` | Invalid JSON path syntax |
-| 400 | `type_mismatch` | Operation doesn't match value type (e.g., incr on object) |
-| 401 | `unauthorized` | Missing or invalid token |
-| 403 | `token_expired` | JWT token has expired |
+A few carry a structured `detail` with `error`, `message` and extra fields
+(see the table). Clients should branch on the HTTP status and the code
+prefix, never on the reason text.
+
+| HTTP Status | `detail` | When |
+|-------------|----------|------|
+| 400 | `invalid_key: <reason>` | Empty, whitespace-only, `$`-prefixed, over 255 chars, or containing control characters |
+| 400 | `invalid_path: <reason>` | Malformed path syntax (for example `a[b`), or a PATCH path that names no field (`""`, `.`) |
+| 400 | `invalid_value: <reason>` | Not strict JSON (NaN, Infinity), nested too deep, or not serializable |
+| 400 | `type_mismatch: <reason>` | Operation does not fit the stored type (for example `incr` on a non-integer, `rpush` on a non-list) |
+| 400 | `Cannot use both nx and xx` | PUT with both `?nx=true` and `?xx=true` |
+| 400 | `automation_id query parameter is required for user-authenticated KV access` | User credentials without `?automation_id=` |
+| 400 | `{"error": "operation_failed", "message", "operation_index", "operation"}` | A batch operation failed; nothing in the batch was applied |
+| 401 | `Missing token`, `Invalid authorization header format`, `Invalid or expired KV token`, `Authentication required: ...` | No usable KV token or user credentials (an expired token is a 401 too) |
 | 404 | `key_not_found` | Key does not exist |
-| 409 | `key_exists` | Key already exists (for `?nx=true`) |
-| 409 | `key_not_exists` | Key doesn't exist (for `?xx=true`) |
+| 404 | `invalid_path` | GET `?path=` is well formed but names a field the value does not have |
+| 404 | `Automation not found` | The token's (or `?automation_id=`'s) automation does not exist or is not accessible |
+| 409 | `key_not_exists` | PUT with `?xx=true` on a missing key |
+| 409 | `kv_store_busy: another operation is in progress, please retry` | The per-automation lock timed out |
+| 409 | `{"error": "version_mismatch", "message", "expected_version", "actual_version"}` | `?if_version=` did not match the current version |
+| 413 | `{"error": "value_too_large", "message", ...}` | Value exceeds the per-value size limit |
+| 422 | FastAPI validation list | Request body does not match the schema |
+| 503 | `KV store not configured (missing AUTOMATION_KV_SECRET)` | KV is disabled on this deployment |
+
+PUT with `?nx=true` on an existing key is not an error body: it answers 409
+with `{"key": ..., "created": false, "error": "key_exists"}`.
 
 ---
 

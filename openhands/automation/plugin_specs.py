@@ -8,10 +8,14 @@ import json
 import os
 import re
 import tarfile
+import tempfile
+import uuid
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from urllib.parse import urlparse
 
+import httpx
 from jsonschema import (
     Draft202012Validator,
     ValidationError as JSONSchemaValidationError,
@@ -22,6 +26,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -30,6 +35,8 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
+    RUN_AS_USER_ID_DESCRIPTION,
+    CronTrigger,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
@@ -41,6 +48,7 @@ from openhands.automation.utils.timeout import validate_automation_timeout
 from openhands.sdk.extensions.fetch import SourceType, parse_extension_source
 from openhands.sdk.plugin import PluginSource, PluginSourceError, preflight_plugin
 from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_resolution
+from openhands.sdk.secret import SecretValue
 
 
 MANIFEST_NAME = "automation-plugin.json"
@@ -52,6 +60,9 @@ PLUGIN_SPEC_PRESET_DIR = PRESETS_DIR / "plugin_spec"
 _PLUGIN_SPEC_PRESET_CACHE: dict[str, str] | None = None
 _CONFIG_TEMPLATE_RE = re.compile(
     r"{{\s*(?P<json>json\s+)?config\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}"
+)
+_FORM_TEMPLATE_RE = re.compile(
+    r"{{\s*(?P<json>json\s+)?form\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}"
 )
 _TRIGGER_ADAPTER: TypeAdapter[Trigger] = TypeAdapter(Trigger)
 
@@ -71,8 +82,102 @@ class PluginSpecError(ValueError):
         self.status_code = status_code
 
 
+# Resolves secret names to the references a plugin fetch expands its
+# placeholders from; see ``plugin_secrets``.
+PluginSecretLookup = Callable[[Collection[str]], Awaitable[Mapping[str, SecretValue]]]
+
+
+async def no_plugin_secrets(
+    names: Collection[str],  # noqa: ARG001
+) -> Mapping[str, SecretValue]:
+    """The lookup of a fetch that resolves no credentials."""
+    return {}
+
+
+# A placeholder is the whole user name or password of an http(s) URL: the SDK
+# expands it, from the secrets a fetch is given, only for that fetch.
+_SECRET_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_CREDENTIALS_MESSAGE = (
+    "plugin source URLs must not include credentials; name a secret with a "
+    "placeholder in the URL user info instead, for example "
+    "https://x-access-token:${GITHUB_TOKEN}@github.com/org/repo.git"
+)
+_PLACEHOLDER_MESSAGE = (
+    "a ${NAME} placeholder is only allowed as the user name or password of an "
+    "http(s) plugin source URL"
+)
+
+
+def _url_userinfo_secret_names(source: str) -> list[str]:
+    """Secret names in the user info of an http(s) source, validating its form.
+
+    Raises:
+        ValueError: when the user info holds a literal credential, or a
+            placeholder appears anywhere else in the URL.
+    """
+    parsed = urlparse(source)
+    userinfo, has_userinfo, hostport = parsed.netloc.rpartition("@")
+    rest = source.split(parsed.netloc, 1)[-1] if parsed.netloc else source
+    if "${" in hostport or "${" in rest:
+        raise ValueError(_PLACEHOLDER_MESSAGE)
+    if not has_userinfo:
+        return []
+    username, has_password, password = userinfo.partition(":")
+    names: list[str] = []
+    if has_password:
+        # The password must be a placeholder; the user name may be literal
+        # (x-access-token, oauth2, a Data Center user name) or one too.
+        password_match = _SECRET_PLACEHOLDER_RE.fullmatch(password)
+        if password_match is None:
+            raise ValueError(_CREDENTIALS_MESSAGE)
+        names.append(password_match.group(1))
+        if "${" in username:
+            username_match = _SECRET_PLACEHOLDER_RE.fullmatch(username)
+            if username_match is None:
+                raise ValueError(_PLACEHOLDER_MESSAGE)
+            names.append(username_match.group(1))
+    else:
+        # A lone user name is the credential itself (a token as user name).
+        username_match = _SECRET_PLACEHOLDER_RE.fullmatch(username)
+        if username_match is None:
+            raise ValueError(_CREDENTIALS_MESSAGE)
+        names.append(username_match.group(1))
+    return names
+
+
+def plugin_source_secret_names(source: str) -> list[str]:
+    """The secret names a validated plugin source references, sorted."""
+    parsed = urlparse(source.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return []
+    return sorted(set(_url_userinfo_secret_names(source.strip())))
+
+
+def plugin_secret_names(
+    plugins: Iterable[AutomationPluginSource | Mapping[str, Any]],
+) -> list[str]:
+    """The secret names any of ``plugins`` references, sorted."""
+    names: set[str] = set()
+    for plugin in plugins:
+        source = (
+            plugin.source
+            if isinstance(plugin, AutomationPluginSource)
+            else plugin.get("source")
+        )
+        if isinstance(source, str):
+            names.update(plugin_source_secret_names(source))
+    return sorted(names)
+
+
 class AutomationPluginSource(BaseModel):
-    """Source of an executable automation plugin or secondary plugin."""
+    """Source of an executable automation plugin or secondary plugin.
+
+    A private repository names its credential with a ``${NAME}`` placeholder
+    as the URL user name or password, for example
+    ``https://x-access-token:${GITHUB_TOKEN}@github.com/org/repo.git``. The
+    source is stored as written; each fetch resolves ``NAME`` for the identity
+    the automation runs as. Literal credentials are rejected.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -91,18 +196,22 @@ class AutomationPluginSource(BaseModel):
             parsed_source = source
         parsed = urlparse(parsed_source)
         shorthand_path = source.removeprefix("github:")
-        if (
-            parsed.scheme in {"http", "https"}
-            and (parsed.username is not None or parsed.password is not None)
-        ) or (
-            source_type == SourceType.GITHUB
-            and ("@" in shorthand_path or ":" in shorthand_path)
+        if source_type == SourceType.GITHUB and (
+            "@" in shorthand_path or ":" in shorthand_path or "${" in shorthand_path
         ):
-            raise ValueError(
-                "plugin source URLs must not include credentials; use a "
-                "credential-free source"
-            )
+            raise ValueError(_CREDENTIALS_MESSAGE)
+        if parsed.scheme in {"http", "https"}:
+            _url_userinfo_secret_names(parsed_source)
+        elif "${" in source:
+            raise ValueError(_PLACEHOLDER_MESSAGE)
         return source
+
+    @field_validator("ref")
+    @classmethod
+    def validate_ref(cls, value: str | None) -> str | None:
+        if value is not None and "${" in value:
+            raise ValueError("plugin ref must not contain a ${NAME} placeholder")
+        return value
 
     @field_validator("repo_path")
     @classmethod
@@ -129,6 +238,15 @@ class AutomationPluginEntrypoint(BaseModel):
     arguments: str | None = Field(default=None, max_length=5000)
     working_dir: str = Field(default=".", min_length=1, max_length=200)
     setup_script: str | None = Field(default=None, min_length=1, max_length=200)
+    bundle_files: dict[str, str] = Field(default_factory=dict)
+    bundle_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Catalog-only: a template mapping rendered against the validated "
+            "form config and written as config.json at the tarball root. "
+            "Templates use {{form.<arg>}} syntax."
+        ),
+    )
 
     @field_validator("command")
     @classmethod
@@ -155,6 +273,17 @@ class AutomationPluginEntrypoint(BaseModel):
                 raise ValueError(
                     "entrypoint.arguments is only valid for conversation runners"
                 )
+            if self.bundle_files or self.bundle_config:
+                if self.working_dir not in ("", "."):
+                    raise ValueError(
+                        "entrypoint.bundle_files/bundle_config are self-contained "
+                        "and cannot be combined with working_dir"
+                    )
+                if self.setup_script is not None:
+                    raise ValueError(
+                        "entrypoint.bundle_files/bundle_config cannot be combined "
+                        "with setup_script"
+                    )
             return self
         if self.setup_script is not None:
             raise ValueError(
@@ -285,10 +414,21 @@ class CreatePluginSpecAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
     name: str = Field(..., min_length=1, max_length=500)
     plugin: AutomationPluginSource
     config: dict[str, Any] = Field(default_factory=dict)
     trigger: Trigger | None = None
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Agent profile the runs launch from, within the manifest's "
+            "runtime.agent_profile allowlists. Defaults to the profile named by "
+            "its default_name."
+        ),
+    )
     observability_associations: dict[str, str] | None = None
     timeout: int | None = None
     keep_alive: bool | None = None
@@ -319,6 +459,22 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         return validate_automation_timeout(value)
 
 
+class PluginSpecPreflightResponse(BaseModel):
+    """Read-only preflight of an executable plugin spec.
+
+    The parsed manifest (config schema, runtime profile requirements,
+    suggested trigger) plus the resolved ref, with no side effects. Used by
+    launch flows to render typed config inputs and a default trigger before
+    the user commits to creating an automation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    manifest: AutomationPluginManifest
+    resolved_ref: str | None = None
+    suggested_trigger: Trigger | None = None
+
+
 def validate_plugin_source_allowed(
     plugin: AutomationPluginSource,
     *,
@@ -342,12 +498,71 @@ def validate_plugin_source_allowed(
     if source_type == SourceType.GITHUB:
         return
 
+    # Any HTTPS host: a plugin can live on a self-hosted provider such as
+    # Bitbucket Data Center, not only on github.com.
     parsed = urlparse(url)
-    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
+    if parsed.scheme != "https" or not parsed.hostname:
         raise PluginSpecError(
-            "Cloud plugin sources must use github:owner/repo or "
-            "https://github.com/owner/repo.git"
+            "Cloud plugin sources must use github:owner/repo or an https:// git URL"
         )
+
+
+COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def require_pinned_plugin_refs(plugins: list[PluginSource]) -> None:
+    """Reject plugin refs that can move, for an automation run as a service account.
+
+    The generated tarball stores the refs as given and the sandbox resolves them
+    on every run, so a branch, tag or missing ref would let anyone who can push
+    to the plugin repo change code that runs as the service account.
+
+    Raises:
+        PluginSpecError: when a ref is not a full 40-character commit SHA.
+    """
+    for plugin in plugins:
+        if plugin.ref is None or not COMMIT_SHA_RE.fullmatch(plugin.ref):
+            raise PluginSpecError(
+                f"Plugin {plugin.source!r} must set ref to a full 40-character "
+                "commit SHA for an automation that runs as a service account"
+            )
+
+
+async def pin_plugin_refs(
+    plugins: list[dict[str, Any]],
+    *,
+    allow_local_sources: bool,
+    secrets: PluginSecretLookup = no_plugin_secrets,
+) -> list[dict[str, Any]]:
+    """Return ``plugins`` with each ref replaced by its commit SHA.
+
+    Used for an automation that runs as a service account (see
+    ``require_pinned_plugin_refs``). A full SHA is kept as is; a branch, tag or
+    missing ref is resolved by preflight, with ``secrets`` for a private source.
+
+    Raises:
+        PluginSpecError: when a source is not allowed, a plugin cannot be
+            preflighted, or a ref does not resolve to a full commit SHA.
+    """
+    pinned = []
+    for item in plugins:
+        if COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
+            pinned.append(item)
+            continue
+        try:
+            source = AutomationPluginSource.model_validate(item)
+        except ValidationError as exc:
+            # The SDK's PluginSource (preset bodies) accepts more than this.
+            raise PluginSpecError(f"Invalid plugin source: {exc}") from exc
+        [resolved] = validate_required_plugins(
+            [source],
+            allow_local_sources=allow_local_sources,
+            secrets=await secrets(plugin_secret_names([source])),
+        )
+        ref = resolved.pop("resolved_ref", None)
+        pinned.append({**resolved, **({"ref": ref} if ref else {})})
+    require_pinned_plugin_refs([PluginSource.model_validate(item) for item in pinned])
+    return pinned
 
 
 def _contained_path(root: Path, relative: str) -> Path:
@@ -393,33 +608,135 @@ def fetch_manifest(
     return plugin_path, resolved_ref, manifest
 
 
+def _source_secrets(
+    plugin: AutomationPluginSource, secrets: Mapping[str, SecretValue] | None
+) -> dict[str, SecretValue] | None:
+    """The secrets ``plugin``'s own fetch may expand: only the names it uses."""
+    names = plugin_source_secret_names(plugin.source)
+    if not names or not secrets:
+        return None
+    return {name: secrets[name] for name in names if name in secrets}
+
+
+def plugin_fetch_error(
+    prefix: str, exc: Exception, plugin: AutomationPluginSource
+) -> PluginSpecError:
+    """A ``PluginSpecError`` for a failed strict fetch of ``plugin``.
+
+    Keeps the SDK's ``code`` and ``status_code``, so a failure is permanent or
+    transient as the SDK classifies it, and names the secrets the source uses.
+    A secret lookup that fails inside the fetch raises an ``httpx`` error: a
+    missing secret is permanent, an unreachable lookup transient.
+    """
+    names = ", ".join(plugin_source_secret_names(plugin.source))
+    if isinstance(exc, PluginSourceError):
+        message = f"{prefix}: {exc}"
+        code, status_code = exc.code, exc.status_code
+        if names and code == "auth_failed":
+            message += f" (the git host rejected the credentials from secret {names})"
+        elif code == "source_unavailable" and "url rejected" in str(exc).lower():
+            # Git refused a malformed URL, which retrying cannot fix. A
+            # secret value with "/", "@" or ":" breaks the URL it is put in.
+            code, status_code = "invalid_source", 422
+            if names:
+                message += (
+                    f" (the value of secret {names} may contain a character that "
+                    'is not allowed in a URL, such as "/", "@" or ":")'
+                )
+        return PluginSpecError(message, code=code, status_code=status_code)
+    if isinstance(exc, httpx.HTTPStatusError):
+        lookup_status = exc.response.status_code
+        if lookup_status == 404:
+            return PluginSpecError(
+                f"{prefix}: Missing secret: {names}",
+                code="missing_secret",
+                status_code=422,
+            )
+        if lookup_status in (408, 429) or lookup_status >= 500:
+            return PluginSpecError(
+                f"{prefix}: could not read secret {names} (HTTP {lookup_status})",
+                code="secret_unavailable",
+                status_code=lookup_status,
+            )
+        return PluginSpecError(
+            f"{prefix}: reading secret {names} was refused (HTTP {lookup_status})",
+            code="secret_lookup_failed",
+            status_code=lookup_status,
+        )
+    if isinstance(exc, httpx.RequestError):
+        return PluginSpecError(
+            f"{prefix}: could not reach the secret store for secret {names} "
+            f"({type(exc).__name__})",
+            code="secret_unavailable",
+            status_code=503,
+        )
+    return PluginSpecError(f"{prefix}: {exc}")
+
+
 def preflight_manifest(
     plugin: AutomationPluginSource,
     *,
     allow_local_sources: bool = True,
+    secrets: Mapping[str, SecretValue] | None = None,
 ) -> tuple[str | None, AutomationPluginManifest]:
-    """Strictly resolve a plugin source and parse its automation metadata."""
+    """Strictly resolve a plugin source and parse its automation metadata.
+
+    Supports three manifest formats found at the resolved plugin path:
+    .plugin/plugin.json with an ``automation`` key, a legacy
+    automation-plugin.json, and a catalog manifest.json (with a ``setup``
+    key) whose setup.form.args are converted to a JSON Schema config_schema.
+    ``secrets`` resolves the placeholders of a private source.
+    """
     validate_plugin_source_allowed(plugin, allow_local_sources=allow_local_sources)
     try:
-        with preflight_plugin(
-            source=plugin.source,
-            ref=plugin.ref,
-            repo_path=plugin.repo_path,
-            allow_local=allow_local_sources,
-        ) as checked:
-            manifest = _read_manifest_from_plugin_metadata(checked.manifest)
-            _validate_manifest_paths(checked.path, manifest)
-            return checked.resolved_ref, manifest
-    except PluginSourceError as exc:
-        raise PluginSpecError(
-            f"Failed to preflight automation plugin: {exc}",
-            code=exc.code,
-            status_code=exc.status_code,
-        ) from exc
+        try:
+            with preflight_plugin(
+                source=plugin.source,
+                ref=plugin.ref,
+                repo_path=plugin.repo_path,
+                secrets=_source_secrets(plugin, secrets),
+                allow_local=allow_local_sources,
+            ) as checked:
+                if checked.manifest.get(PLUGIN_AUTOMATION_KEY) is not None:
+                    manifest = _read_manifest_from_plugin_metadata(checked.manifest)
+                else:
+                    manifest = _read_manifest(checked.path)
+                _validate_manifest_paths(checked.path, manifest)
+                return checked.resolved_ref, manifest
+        except PluginSourceError as exc:
+            if exc.code != "invalid_plugin":
+                raise
+            # Only fall through to the catalog path when the plugin has no
+            # plugin.json (catalog manifests use manifest.json instead). Other
+            # invalid_plugin errors — bad JSON, non-object manifest, Plugin.load
+            # failures — indicate a broken plugin and must surface, not silently
+            # fall back to a catalog checkout that may accept invalid metadata.
+            if "plugin.json not found" not in exc.message:
+                raise
+            # Catalog plugins (no .plugin/plugin.json) fall through to here.
+            # Use a throwaway temp dir for the checkout — the preflight is a
+            # read-only operation that only reads the manifest, so it should
+            # not write to the user persistence dir (which may be unset or
+            # unwritable in containers where HOME is not writable).
+            with tempfile.TemporaryDirectory(
+                prefix="automation-preflight-"
+            ) as tmp_cache:
+                plugin_path, resolved_ref = fetch_plugin_with_resolution(
+                    source=plugin.source,
+                    cache_dir=Path(tmp_cache),
+                    ref=plugin.ref,
+                    repo_path=plugin.repo_path,
+                )
+                manifest = _read_manifest(plugin_path)
+                _validate_manifest_paths(plugin_path, manifest)
+                _validate_bundle_file_sources(plugin, resolved_ref, manifest)
+                return resolved_ref, manifest
+    except PluginSpecError:
+        raise
     except Exception as exc:
-        if isinstance(exc, PluginSpecError):
-            raise
-        raise PluginSpecError(f"Failed to preflight automation plugin: {exc}") from exc
+        raise plugin_fetch_error(
+            "Failed to preflight automation plugin", exc, plugin
+        ) from exc
 
 
 def _read_manifest_from_plugin_metadata(
@@ -458,17 +775,194 @@ def _read_manifest(plugin_path: Path) -> AutomationPluginManifest:
             return _read_manifest_from_plugin_metadata(plugin_metadata)
 
     legacy_manifest_path = _contained_path(plugin_path, MANIFEST_NAME)
-    if not legacy_manifest_path.is_file():
+    if legacy_manifest_path.is_file():
+        try:
+            return AutomationPluginManifest.model_validate_json(
+                legacy_manifest_path.read_text()
+            )
+        except Exception as exc:
+            raise PluginSpecError(f"Invalid automation plugin manifest: {exc}") from exc
+
+    catalog_manifest_path = _contained_path(plugin_path, "manifest.json")
+    if catalog_manifest_path.is_file():
+        try:
+            catalog = json.loads(catalog_manifest_path.read_text())
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Invalid catalog manifest: manifest.json: {exc}"
+            ) from exc
+        if isinstance(catalog.get("setup"), dict):
+            return _convert_catalog_manifest(catalog)
+
+    raise PluginSpecError(
+        "Automation plugin manifest not found: "
+        f"{PLUGIN_MANIFEST_NAME} with `{PLUGIN_AUTOMATION_KEY}`, "
+        f"{MANIFEST_NAME}, or a catalog manifest.json with a `setup` key"
+    )
+
+
+_CATALOG_FIELD_TYPE_MAP: Final[dict[str, str]] = {
+    "textarea": "string",
+    "text": "string",
+    "string": "string",
+    "number": "number",
+    "integer": "integer",
+    "boolean": "boolean",
+    "checkbox": "boolean",
+    "select": "string",
+    "enum": "string",
+    "llm-profile": "string",
+    "repo-picker": "string",
+}
+
+
+def _convert_catalog_arg_to_schema(arg: dict[str, Any]) -> dict[str, Any]:
+    """Convert a catalog setup.form.args entry to a JSON Schema property."""
+    catalog_type = arg.get("type", "string")
+    if catalog_type not in _CATALOG_FIELD_TYPE_MAP:
         raise PluginSpecError(
-            "Automation plugin manifest not found: "
-            f"{PLUGIN_MANIFEST_NAME} with `{PLUGIN_AUTOMATION_KEY}` or {MANIFEST_NAME}"
+            f"Unknown catalog field type: {catalog_type!r}. "
+            f"Supported: {', '.join(sorted(_CATALOG_FIELD_TYPE_MAP))}"
         )
+
+    item_type = _CATALOG_FIELD_TYPE_MAP[catalog_type]
+    is_multiple = bool(arg.get("multiple"))
+    if is_multiple:
+        schema: dict[str, Any] = {"type": "array", "items": {"type": item_type}}
+    else:
+        schema = {"type": item_type}
+
+    if catalog_type == "textarea":
+        schema["format"] = "textarea"
+    elif catalog_type == "timezone":
+        schema["format"] = "timezone"
+    elif catalog_type in ("select", "enum") and arg.get("options"):
+        options = _catalog_options(arg["options"])
+        if is_multiple:
+            schema["items"]["enum"] = options
+        else:
+            schema["enum"] = options
+
+    if arg.get("label"):
+        schema["title"] = arg["label"]
+    if arg.get("help"):
+        schema["description"] = arg["help"]
+    if "default" in arg:
+        schema["default"] = arg["default"]
+
+    constraints = arg.get("constraints") or {}
+    if "minLength" in constraints:
+        schema["minLength"] = constraints["minLength"]
+    if "maxLength" in constraints:
+        schema["maxLength"] = constraints["maxLength"]
+    if "minimum" in constraints:
+        schema["minimum"] = constraints["minimum"]
+    elif "min" in constraints:
+        schema["minimum"] = constraints["min"]
+    if "maximum" in constraints:
+        schema["maximum"] = constraints["maximum"]
+    elif "max" in constraints:
+        schema["maximum"] = constraints["max"]
+    if "pattern" in constraints:
+        schema["pattern"] = constraints["pattern"]
+    if is_multiple and arg.get("required"):
+        schema["minItems"] = 1
+
+    if (
+        arg.get("options")
+        and "enum" not in schema
+        and "enum" not in schema.get("items", {})
+    ):
+        options = _catalog_options(arg["options"])
+        if is_multiple:
+            schema["items"]["enum"] = options
+        else:
+            schema["enum"] = options
+
+    return schema
+
+
+def _catalog_options(options: list[Any]) -> list[Any]:
+    return [opt.get("value", opt) if isinstance(opt, dict) else opt for opt in options]
+
+
+def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManifest:
+    """Convert an automations/catalog manifest to an AutomationPluginManifest."""
+    setup = catalog.get("setup") or {}
+    form = setup.get("form") or {}
+    args = form.get("args") or {}
+    triggers = form.get("triggers") or {}
+    bundle = setup.get("bundle") or {}
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, arg in args.items():
+        if not isinstance(arg, dict):
+            continue
+        properties[name] = _convert_catalog_arg_to_schema(arg)
+        if arg.get("required"):
+            required.append(name)
+
+    config_schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        config_schema["required"] = required
+
+    suggested_trigger: Trigger | None = None
+    cron = triggers.get("cron") or {}
+    schedule = cron.get("schedule") or {}
+    if isinstance(schedule, dict) and schedule.get("default"):
+        tz = cron.get("timezone") or {}
+        suggested_trigger = CronTrigger(
+            type="cron",
+            schedule=schedule["default"],
+            timezone=tz.get("default", "UTC") if isinstance(tz, dict) else "UTC",
+        )
+
+    entrypoint_command = bundle.get("entrypoint")
+    bundle_files = bundle.get("files") or {}
+    bundle_config = bundle.get("config") or None
+    if entrypoint_command is None:
+        raise PluginSpecError(
+            "Catalog manifest setup.bundle.entrypoint is required: catalog "
+            "plugins have no .plugin/plugin.json, so without an explicit "
+            "entrypoint the worker would run 'python3 main.py' against a "
+            "file that does not exist. Define setup.bundle.entrypoint "
+            "(and setup.bundle.files) in the manifest."
+        )
+    if bundle_config is not None and not isinstance(bundle_config, dict):
+        raise PluginSpecError("Catalog manifest setup.bundle.config must be an object")
     try:
-        return AutomationPluginManifest.model_validate_json(
-            legacy_manifest_path.read_text()
+        entrypoint = AutomationPluginEntrypoint(
+            runner="script",
+            command=entrypoint_command,
+            working_dir=".",
+            bundle_files=bundle_files,
+            bundle_config=bundle_config,
         )
     except Exception as exc:
-        raise PluginSpecError(f"Invalid automation plugin manifest: {exc}") from exc
+        raise PluginSpecError(
+            f"Catalog manifest has invalid entrypoint: {exc}"
+        ) from exc
+
+    description = catalog.get("description")
+    if description and len(description) > 500:
+        description = description[:497] + "..."
+
+    data = {
+        "schema_version": "openhands.automation.plugin.v1",
+        "name": catalog.get("name") or catalog.get("id") or "catalog-automation",
+        "description": description,
+        "entrypoint": entrypoint.model_dump(),
+        "config_schema": config_schema,
+        "suggested_trigger": suggested_trigger.model_dump()
+        if suggested_trigger
+        else None,
+    }
+
+    try:
+        return AutomationPluginManifest.model_validate(data)
+    except Exception as exc:
+        raise PluginSpecError(f"Failed to convert catalog manifest: {exc}") from exc
 
 
 def _validate_manifest_paths(
@@ -534,6 +1028,8 @@ def validate_plugin_config(
         raise PluginSpecError(
             f"Plugin automation config is invalid: {exc.message}"
         ) from exc
+    if manifest.entrypoint.runner == "conversation":
+        conversation_prompt(manifest, plugin_config)
     return plugin_config
 
 
@@ -542,7 +1038,7 @@ def _config_value(config: dict[str, Any], path: str) -> Any:
     for part in path.split("."):
         if not isinstance(current, dict) or part not in current:
             raise PluginSpecError(
-                f"Trigger template references missing config value: config.{path}"
+                f"Template references missing config value: config.{path}"
             )
         current = current[part]
     return current
@@ -567,6 +1063,43 @@ def _render_config_templates(value: Any, config: dict[str, Any]) -> Any:
     return _CONFIG_TEMPLATE_RE.sub(replace, value)
 
 
+def _render_form_templates(value: Any, config: dict[str, Any]) -> Any:
+    """Render {{form.<path>}} templates against validated plugin config.
+
+    Catalog bundle.config maps form arg names to config file keys, e.g.
+    ``{"repos": "{{form.repositories}}"}}``. The config dict is keyed by the
+    form arg name, so ``form.repositories`` resolves to ``config["repositories"]``.
+
+    When the whole string is a single template (``"{{form.x}}"``), the resolved
+    value is substituted as-is so it keeps its JSON type — a list stays a list,
+    a number stays a number. When the template is embedded in a longer string,
+    it is stringified so it can be interpolated.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _render_form_templates(item, config) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_render_form_templates(item, config) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    full = _FORM_TEMPLATE_RE.fullmatch(value.strip())
+    if full is not None and full.group(0) == value:
+        resolved = _config_value(config, full.group("path"))
+        if full.group("json"):
+            return json.dumps(resolved)
+        return resolved
+
+    def replace(match: re.Match[str]) -> str:
+        resolved = _config_value(config, match.group("path"))
+        if match.group("json"):
+            return json.dumps(resolved)
+        return str(resolved)
+
+    return _FORM_TEMPLATE_RE.sub(replace, value)
+
+
 def resolve_suggested_trigger(
     manifest: AutomationPluginManifest,
     config: dict[str, Any],
@@ -587,8 +1120,12 @@ def validate_required_plugins(
     plugins: list[AutomationPluginSource],
     *,
     allow_local_sources: bool = True,
+    secrets: Mapping[str, SecretValue] | None = None,
 ) -> list[dict[str, Any]]:
-    """Preflight secondary plugins and return source specs with resolved refs."""
+    """Preflight secondary plugins and return source specs with resolved refs.
+
+    ``secrets`` resolves the placeholders of private sources.
+    """
     resolved: list[dict[str, Any]] = []
     for plugin in plugins:
         validate_plugin_source_allowed(plugin, allow_local_sources=allow_local_sources)
@@ -597,12 +1134,13 @@ def validate_required_plugins(
                 source=plugin.source,
                 ref=plugin.ref,
                 repo_path=plugin.repo_path,
+                secrets=_source_secrets(plugin, secrets),
                 allow_local=allow_local_sources,
             ) as checked:
                 resolved_ref = checked.resolved_ref
         except Exception as exc:
-            raise PluginSpecError(
-                f"Failed to preflight required plugin {plugin.source!r}: {exc}"
+            raise plugin_fetch_error(
+                f"Failed to preflight required plugin {plugin.source!r}", exc, plugin
             ) from exc
         item = plugin.model_dump(exclude_none=True)
         if resolved_ref:
@@ -611,7 +1149,7 @@ def validate_required_plugins(
     return resolved
 
 
-def build_execution_payload(
+async def build_execution_payload(
     *,
     plugin_spec: dict[str, Any],
     agent_profile_id: str | None,
@@ -619,17 +1157,33 @@ def build_execution_payload(
     llm_profile_name: str | None,
     work_dir: str,
     allow_local_sources: bool = True,
+    secrets: PluginSecretLookup = no_plugin_secrets,
 ) -> tuple[bytes, dict[str, str], dict[str, Any], list[dict[str, Any]]]:
-    """Preflight, validate, and package a plugin-backed automation run."""
+    """Preflight, validate, and package a plugin-backed automation run.
+
+    ``secrets`` resolves the placeholders of private sources, for the
+    identity the automation runs as.
+    """
     source = AutomationPluginSource.model_validate(plugin_spec["plugin"])
     requested_config = plugin_spec.get("config") or {}
     resolved_ref, manifest = preflight_manifest(
-        source, allow_local_sources=allow_local_sources
+        source,
+        allow_local_sources=allow_local_sources,
+        secrets=await secrets(plugin_secret_names([source])),
     )
     config = validate_plugin_config(manifest, requested_config)
+    # A stored list pins the secondary plugins (automations that run as a
+    # service account); otherwise they follow the manifest's refs.
+    stored_required = plugin_spec.get("required_plugins")
+    required_sources = (
+        [AutomationPluginSource.model_validate(item) for item in stored_required]
+        if stored_required is not None
+        else manifest.runtime.plugins
+    )
     required_plugins = validate_required_plugins(
-        manifest.runtime.plugins,
+        required_sources,
         allow_local_sources=allow_local_sources,
+        secrets=await secrets(plugin_secret_names(required_sources)),
     )
     plugin_fetches = _plugin_fetch_requests(source, resolved_ref, required_plugins)
     if agent_profile_name is None and manifest.runtime.agent_profile is not None:
@@ -648,6 +1202,7 @@ def build_execution_payload(
         "llm_profile_name": llm_profile_name,
     }
 
+    bundle_file_data: dict[str, bytes] | None = None
     if manifest.entrypoint.runner == "conversation":
         tarball = _build_stock_runner_tarball(
             source=source,
@@ -658,11 +1213,25 @@ def build_execution_payload(
             required_plugins=required_plugins,
         )
     else:
+        if manifest.entrypoint.bundle_files:
+            bundle_file_data = _fetch_bundle_files(
+                source, resolved_ref, manifest.entrypoint.bundle_files
+            )
+            # Catalog plugins with bundle files are self-contained — the
+            # tarball carries the script. Skip the agent-server pre-fetch for
+            # the main plugin (which rejects catalog plugins for lacking
+            # .plugin/plugin.json) and only fetch declared runtime plugins.
+            plugin_fetches = _plugin_fetch_requests(
+                source=None,
+                resolved_ref=resolved_ref,
+                required_plugins=required_plugins,
+            )
         tarball = _build_runtime_metadata_tarball(
             manifest=manifest,
             config=config,
             resolved_runtime=resolved_runtime,
             required_plugins=required_plugins,
+            bundle_files=bundle_file_data,
         )
     work_dir = work_dir.rstrip("/") or "/workspace/project"
     env = {
@@ -679,12 +1248,103 @@ def build_execution_payload(
     return tarball, env, resolved_runtime, plugin_fetches
 
 
+def _validate_bundle_file_sources(
+    source: AutomationPluginSource,
+    resolved_ref: str | None,
+    manifest: AutomationPluginManifest,
+) -> None:
+    """Check that declared bundle file sources exist in the repo.
+
+    Catalog manifests declare ``setup.bundle.files`` as destination → source
+    paths relative to the repo root. A typo in a source path would otherwise
+    sail through preflight and create, failing only at dispatch when the
+    tarball is assembled. Sources are validated here against a full checkout
+    (no ``repo_path``) so the error surfaces at preflight time.
+    """
+    bundle_files = manifest.entrypoint.bundle_files
+    if not bundle_files:
+        return
+    with tempfile.TemporaryDirectory(prefix="automation-bundle-check-") as tmp_cache:
+        try:
+            repo_root, _ = fetch_plugin_with_resolution(
+                source=source.source,
+                cache_dir=Path(tmp_cache),
+                ref=resolved_ref or source.ref,
+                repo_path=None,
+            )
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Failed to fetch plugin repo for bundle file check: {exc}"
+            ) from exc
+        for dest, src_path in bundle_files.items():
+            if not isinstance(src_path, str) or not src_path.strip():
+                raise PluginSpecError(
+                    f"Bundle file source for '{dest}' must be a non-empty string"
+                )
+            candidate = repo_root / src_path.strip("/")
+            try:
+                candidate.resolve().relative_to(repo_root.resolve())
+            except ValueError as exc:
+                raise PluginSpecError(
+                    f"Bundle file source escapes repo root: {src_path}"
+                ) from exc
+            if not candidate.is_file():
+                raise PluginSpecError(f"Bundle file not found in repo: {src_path}")
+
+
+def _fetch_bundle_files(
+    source: AutomationPluginSource,
+    resolved_ref: str | None,
+    bundle_files: dict[str, str],
+) -> dict[str, bytes]:
+    """Fetch the full plugin repo and read bundle file contents.
+
+    Catalog manifests declare ``setup.bundle.files`` as a mapping of
+    tarball-destination → repo-relative-source. Source paths are relative to
+    the repository root, so the repo is fetched *without* ``repo_path`` (the
+    full clone) even when the plugin source uses a subdirectory.
+    """
+    if not bundle_files:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="automation-bundle-") as tmp_cache:
+        try:
+            repo_root, _ = fetch_plugin_with_resolution(
+                source=source.source,
+                cache_dir=Path(tmp_cache),
+                ref=resolved_ref or source.ref,
+                repo_path=None,
+            )
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Failed to fetch plugin repo for bundle files: {exc}"
+            ) from exc
+
+        result: dict[str, bytes] = {}
+        for dest, src_path in bundle_files.items():
+            if not isinstance(src_path, str) or not src_path.strip():
+                raise PluginSpecError(
+                    f"Bundle file source for '{dest}' must be a non-empty string"
+                )
+            candidate = repo_root / src_path.strip("/")
+            try:
+                candidate.resolve().relative_to(repo_root.resolve())
+            except ValueError as exc:
+                raise PluginSpecError(
+                    f"Bundle file source escapes repo root: {src_path}"
+                ) from exc
+            if not candidate.is_file():
+                raise PluginSpecError(f"Bundle file not found in repo: {src_path}")
+            result[dest] = candidate.read_bytes()
+        return result
+
+
 def _build_runtime_metadata_tarball(
     *,
     manifest: AutomationPluginManifest,
     config: dict[str, Any],
     resolved_runtime: dict[str, Any],
     required_plugins: list[dict[str, Any]],
+    bundle_files: dict[str, bytes] | None = None,
 ) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -699,8 +1359,34 @@ def _build_runtime_metadata_tarball(
                 f'bash "$AUTOMATION_PLUGIN_ROOT/{setup_script}"\n'
             )
             _add_bytes(tar, "setup.sh", wrapper.encode(), mode=0o755)
+        if manifest.entrypoint.bundle_config:
+            rendered = _render_form_templates(manifest.entrypoint.bundle_config, config)
+            _add_json(tar, "config.json", rendered)
+        if bundle_files:
+            for dest, data in bundle_files.items():
+                _safe_add_tar_path(tar, dest, data)
     buf.seek(0)
     return buf.read()
+
+
+_RESERVED_BUNDLE_DESTINATIONS: Final[frozenset[str]] = frozenset(
+    {
+        "config.json",
+        f"{AUTOMATION_DIR}/config.json",
+        f"{AUTOMATION_DIR}/execution.json",
+        f"{AUTOMATION_DIR}/plugins.json",
+        "setup.sh",
+    }
+)
+
+
+def _safe_add_tar_path(tar: tarfile.TarFile, name: str, data: bytes) -> None:
+    """Add a file to the tarball, rejecting path escapes and reserved names."""
+    if name.startswith("/") or ".." in PurePosixPath(name).parts:
+        raise PluginSpecError(f"Bundle file path escapes tarball root: {name}")
+    if name in _RESERVED_BUNDLE_DESTINATIONS:
+        raise PluginSpecError(f"Bundle file destination is reserved: {name}")
+    _add_bytes(tar, name, data, mode=0o755 if name.endswith(".sh") else 0o644)
 
 
 def _add_json(tar: tarfile.TarFile, name: str, data: Any) -> None:
@@ -723,6 +1409,7 @@ def _load_plugin_spec_preset_files() -> dict[str, str]:
                 PLUGIN_SPEC_PRESET_DIR / "prompt_builder.py"
             ).read_text(),
             "setup.sh": (PLUGIN_SPEC_PRESET_DIR / "setup.sh").read_text(),
+            "setup.py": (PRESETS_DIR / "setup.py").read_text(),
         }
     return _PLUGIN_SPEC_PRESET_CACHE
 
@@ -741,6 +1428,8 @@ def setup_script_for_manifest(manifest: AutomationPluginManifest) -> str | None:
 def entrypoint_for_manifest(manifest: AutomationPluginManifest) -> str:
     if manifest.entrypoint.runner == "conversation":
         return _preset_entrypoint()
+    if manifest.entrypoint.bundle_files:
+        return manifest.entrypoint.command
     if manifest.entrypoint.working_dir in ("", "."):
         return f'cd "$AUTOMATION_PLUGIN_ROOT" && {manifest.entrypoint.command}'
     return (
@@ -749,10 +1438,14 @@ def entrypoint_for_manifest(manifest: AutomationPluginManifest) -> str:
     )
 
 
-def _conversation_prompt_for_manifest(manifest: AutomationPluginManifest) -> str:
+def conversation_prompt(
+    manifest: AutomationPluginManifest, config: dict[str, Any]
+) -> str:
+    """Return the message a conversation runner sends, arguments rendered."""
     prompt = f"/{manifest.name}:{manifest.entrypoint.command}"
     if manifest.entrypoint.arguments:
-        prompt = f"{prompt} {manifest.entrypoint.arguments}"
+        arguments = _render_config_templates(manifest.entrypoint.arguments, config)
+        prompt = f"{prompt} {arguments}"
     return prompt
 
 
@@ -766,11 +1459,13 @@ def _resolved_plugin_source(
 
 
 def _plugin_config_sources(
-    source: AutomationPluginSource,
+    source: AutomationPluginSource | None,
     resolved_ref: str | None,
     required_plugins: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    sources = [_resolved_plugin_source(source, resolved_ref)]
+    sources: list[dict[str, Any]] = []
+    if source is not None:
+        sources.append(_resolved_plugin_source(source, resolved_ref))
     for plugin in required_plugins:
         item = {k: v for k, v in plugin.items() if k != "resolved_ref"}
         if resolved_ref := plugin.get("resolved_ref"):
@@ -780,7 +1475,7 @@ def _plugin_config_sources(
 
 
 def _plugin_fetch_requests(
-    source: AutomationPluginSource,
+    source: AutomationPluginSource | None,
     resolved_ref: str | None,
     required_plugins: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -802,9 +1497,9 @@ def _build_stock_runner_tarball(
         _add_bytes(tar, "main.py", preset_files["main.py"].encode())
         _add_bytes(tar, "prompt_builder.py", preset_files["prompt_builder.py"].encode())
         _add_bytes(tar, "setup.sh", preset_files["setup.sh"].encode(), mode=0o755)
-        _add_bytes(
-            tar, "prompt.txt", _conversation_prompt_for_manifest(manifest).encode()
-        )
+        if os.name == "nt":
+            _add_bytes(tar, "setup.py", preset_files["setup.py"].encode())
+        _add_bytes(tar, "prompt.txt", conversation_prompt(manifest, config).encode())
         _add_json(
             tar,
             "plugins_config.json",
