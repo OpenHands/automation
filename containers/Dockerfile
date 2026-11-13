@@ -1,6 +1,6 @@
 FROM python:3.12-slim-trixie AS snapshot-base
 
-ARG DEBIAN_SNAPSHOT=20261012T000000Z
+ARG DEBIAN_SNAPSHOT=20261112T000000Z
 # snapshot.debian.org intermittently returns 5xx under load; retry with
 # backoff like the agent-server image (SDK #6502) so a single 503 does not
 # fail the whole build.

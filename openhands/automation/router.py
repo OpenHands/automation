@@ -87,6 +87,7 @@ from openhands.automation.schemas import (
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
+    continue_conversation_keep_alive,
 )
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.tags import normalize_tag
@@ -270,7 +271,9 @@ async def create_automation(
 
     # After the template lookup, so a repeat enable stays one query and does
     # not depend on the OpenHands API, and before the rest of the transaction.
-    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+    await ensure_agent_profile_exists(
+        body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
+    )
 
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
 
@@ -369,6 +372,7 @@ async def create_automation_from_plugin_spec(
         user=user,
         run_as_user_id=run_as.user_id,
         pin_ref=run_as.kind == AutomationRunAsKind.SERVICE,
+        agent_profile_id=body.agent_profile_id,
     )
     trigger = await _resolve_plugin_spec_trigger(
         requested_trigger=body.trigger,
@@ -378,21 +382,12 @@ async def create_automation_from_plugin_spec(
         session=session,
     )
 
-    keep_alive = body.keep_alive
-    if (
-        isinstance(trigger, EventTrigger)
-        and trigger.destination == "continue_conversation"
-    ):
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would destroy "
-                    "the conversation the next event continues"
-                ),
-            )
-        keep_alive = True
+    # The trigger may come from the manifest, so the rule is applied here
+    # rather than on the request model.
+    try:
+        keep_alive = continue_conversation_keep_alive(trigger, body.keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     state = model_automation_state(body.state, body.enabled)
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
@@ -622,6 +617,8 @@ async def _resolve_plugin_spec_runtime_fields(
     user: AuthenticatedUser,
     run_as_user_id: uuid.UUID,
     pin_ref: bool = False,
+    agent_profile_id: uuid.UUID | None = None,
+    current_agent_profile_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Validate a plugin spec and return automation fields derived from it.
 
@@ -645,16 +642,25 @@ async def _resolve_plugin_spec_runtime_fields(
         _plugin_secrets_for(request, run_as_user_id, user.org_id),
     )
 
+    agent_profile_requirement = manifest.runtime.agent_profile
+    if agent_profile_requirement is None:
+        if agent_profile_id is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "This plugin does not run on an agent profile",
+            )
+    elif agent_profile_id is None:
+        agent_profile_id = current_agent_profile_id
     agent_profile_name = (
-        manifest.runtime.agent_profile.default_name
-        if manifest.runtime.agent_profile is not None
+        agent_profile_requirement.default_name
+        if agent_profile_requirement is not None and agent_profile_id is None
         else None
     )
-    has_agent_profile = bool(agent_profile_name)
+    has_agent_profile = agent_profile_id is not None or bool(agent_profile_name)
     if (
-        manifest.runtime.agent_profile is not None
-        and manifest.runtime.agent_profile.required
-        and not agent_profile_name
+        agent_profile_requirement is not None
+        and agent_profile_requirement.required
+        and not has_agent_profile
     ):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -680,9 +686,8 @@ async def _resolve_plugin_spec_runtime_fields(
             resolve_model_profile_for_user(llm_default, user) if llm_default else None
         )
 
-    agent_profile_requirement = manifest.runtime.agent_profile
     agent_profile_id = await validate_agent_profile_allowlists(
-        None,
+        agent_profile_id,
         agent_profile_name,
         agent_profile_requirement.allowed_tools
         if agent_profile_requirement is not None
@@ -967,6 +972,7 @@ async def update_automation(
                 user=user,
                 run_as_user_id=auto.user_id,
                 pin_ref=auto.run_as_kind == AutomationRunAsKind.SERVICE,
+                current_agent_profile_id=auto.agent_profile_id,
             )
         except HTTPException as exc:
             if (
@@ -1033,19 +1039,13 @@ async def update_automation(
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
     trigger = update_data.get("trigger") or auto.trigger or {}
-    if trigger.get("destination") == "continue_conversation":
-        keep_alive = update_data.get("keep_alive", auto.keep_alive)
-        if keep_alive is False:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "keep_alive cannot be false when destination is "
-                    "'continue_conversation': deleting the sandbox would "
-                    "destroy the conversation the next event continues"
-                ),
-            )
-        if keep_alive is not True:
-            update_data["keep_alive"] = True
+    keep_alive = update_data.get("keep_alive", auto.keep_alive)
+    try:
+        settled_keep_alive = continue_conversation_keep_alive(trigger, keep_alive)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if settled_keep_alive is not keep_alive:
+        update_data["keep_alive"] = settled_keep_alive
 
     disable_event: AutomationDisableEvent | None = None
     skip_pending_reason: str | None = None
@@ -1085,7 +1085,9 @@ async def update_automation(
             # Only a newly selected profile is looked up: an update that sends
             # the current one back must not start failing because the profile
             # was deleted since, or the OpenHands API is down.
-            await ensure_agent_profile_exists(selected_profile, request, user)
+            await ensure_agent_profile_exists(
+                selected_profile, request, user, runs_as_user_id=auto.user_id
+            )
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:
@@ -1620,7 +1622,8 @@ async def list_automation_runs(
     result = await session.execute(
         select(AutomationRun)
         .where(AutomationRun.automation_id == automation_id)
-        .order_by(AutomationRun.created_at.desc())
+        # id breaks exact created_at ties, so offset pages stay stable.
+        .order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc())
         .offset(offset)
         .limit(limit)
     )
@@ -1646,8 +1649,9 @@ async def list_automation_changes(
     Field names only, never values. A soft-deleted automation is a 404, so its
     history is not readable through the API.
 
-    Known limit: rows with the same ``created_at`` (one transaction, or one
-    second on SQLite) come back in a stable but not time order.
+    ``created_at`` is written from Python with microseconds, so changes made in
+    the same second still list newest first on SQLite. Rows written before that
+    (whole seconds on SQLite) can tie; ``id`` keeps their order stable.
     """
     await _get_org_automation(session, automation_id, user.org_id)
 
@@ -1665,8 +1669,8 @@ async def list_automation_changes(
             AutomationChangeEvent.org_id == user.org_id,
             AutomationChangeEvent.automation_id == automation_id,
         )
-        # id breaks ties: rows of one transaction share a timestamp, and SQLite
-        # stores whole seconds, so paging would otherwise be unstable.
+        # id only breaks exact ties (rows from before created_at had a Python
+        # default), so offset pages keep one order across requests.
         .order_by(
             AutomationChangeEvent.created_at.desc(), AutomationChangeEvent.id.desc()
         )

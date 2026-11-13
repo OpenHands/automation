@@ -397,6 +397,20 @@ def reject_public_draft_state(state: Any) -> Any:
     return state
 
 
+def reject_explicit_null(value: Any, info: ValidationInfo) -> Any:
+    """Refuse an explicit ``null`` for a PATCH field backed by a NOT NULL column.
+
+    Field validators run only for fields the client sent, so omitting the
+    field still means "leave it unchanged"; sending ``null`` is a 422 instead
+    of a constraint failure at commit.
+    """
+    if value is None:
+        raise ValueError(
+            f"{info.field_name} cannot be null; omit it to leave it unchanged"
+        )
+    return value
+
+
 def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
@@ -499,6 +513,38 @@ RUN_AS_USER_ID_DESCRIPTION = (
     "account's API key, and its upload moves to the service account. "
     "Omitted: it runs as the caller."
 )
+
+
+CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR = (
+    "keep_alive cannot be false when destination is "
+    "'continue_conversation': deleting the sandbox would destroy "
+    "the conversation the next event continues"
+)
+
+
+def continue_conversation_keep_alive(
+    trigger: Trigger | dict[str, Any] | None, keep_alive: bool | None
+) -> bool | None:
+    """Return the `keep_alive` an automation with `trigger` must store.
+
+    A continued conversation outlives its run, so its sandbox must too: an
+    event trigger with `destination: continue_conversation` forces `keep_alive`
+    to true and refuses false with `ValueError`. Every other trigger keeps the
+    requested value. Every create and update path applies this one rule, so the
+    cleanup paths can check `keep_alive` alone. `trigger` is a parsed trigger
+    or its stored dict form.
+    """
+    if isinstance(trigger, EventTrigger):
+        destination: Any = trigger.destination
+    elif isinstance(trigger, dict):
+        destination = trigger.get("destination")
+    else:
+        destination = None
+    if destination != "continue_conversation":
+        return keep_alive
+    if keep_alive is False:
+        raise ValueError(CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR)
+    return True
 
 
 class CreateAutomationRequest(BaseModel):
@@ -640,18 +686,9 @@ class CreateAutomationRequest(BaseModel):
         alone, rather than every deletion site re-deriving that a run holding a
         subject is implicitly kept.
         """
-        trigger = self.trigger
-        if not isinstance(trigger, EventTrigger):
-            return self
-        if trigger.destination != "continue_conversation":
-            return self
-        if self.keep_alive is False:
-            raise ValueError(
-                "keep_alive cannot be false when destination is "
-                "'continue_conversation': deleting the sandbox would destroy "
-                "the conversation the next event continues"
-            )
-        self.keep_alive = True
+        self.keep_alive = continue_conversation_keep_alive(
+            self.trigger, self.keep_alive
+        )
         return self
 
 
@@ -766,6 +803,13 @@ class UpdateAutomationRequest(BaseModel):
     @classmethod
     def validate_public_state(cls, v: Any) -> Any:
         return reject_public_draft_state(v)
+
+    # state is NOT NULL too, but an explicit null there has always been a
+    # no-op (the handler skips it), so it is left out on purpose.
+    @field_validator("name", "trigger", "tarball_path", "entrypoint", "enabled")
+    @classmethod
+    def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
+        return reject_explicit_null(v, info)
 
     @field_validator("tarball_path")
     @classmethod
@@ -1027,6 +1071,11 @@ class CustomWebhookUpdate(BaseModel):
     event_id_header: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
 
+    @field_validator("name", "event_key_expr", "signature_header", "enabled")
+    @classmethod
+    def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
+        return reject_explicit_null(v, info)
+
     @field_validator("signature_scheme")
     @classmethod
     def validate_signature_scheme(cls, v: str | None) -> str | None:
@@ -1190,6 +1239,14 @@ class AutomationTagsResponse(BaseModel):
     """The org's tags, most-used first, for a list filter."""
 
     tags: list[AutomationTagCount]
+
+
+class UsageResponse(BaseModel):
+    """Totals across every organization, for the OpenHands server's usage report."""
+
+    automations: int = Field(
+        ..., description="Live (not soft-deleted) automations in every org"
+    )
 
 
 class CreateAutomationDraftRequest(BaseModel):

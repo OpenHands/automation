@@ -421,6 +421,14 @@ class CreatePluginSpecAutomationRequest(BaseModel):
     plugin: AutomationPluginSource
     config: dict[str, Any] = Field(default_factory=dict)
     trigger: Trigger | None = None
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Agent profile the runs launch from, within the manifest's "
+            "runtime.agent_profile allowlists. Defaults to the profile named by "
+            "its default_name."
+        ),
+    )
     observability_associations: dict[str, str] | None = None
     timeout: int | None = None
     keep_alive: bool | None = None
@@ -1020,6 +1028,8 @@ def validate_plugin_config(
         raise PluginSpecError(
             f"Plugin automation config is invalid: {exc.message}"
         ) from exc
+    if manifest.entrypoint.runner == "conversation":
+        conversation_prompt(manifest, plugin_config)
     return plugin_config
 
 
@@ -1028,7 +1038,7 @@ def _config_value(config: dict[str, Any], path: str) -> Any:
     for part in path.split("."):
         if not isinstance(current, dict) or part not in current:
             raise PluginSpecError(
-                f"Trigger template references missing config value: config.{path}"
+                f"Template references missing config value: config.{path}"
             )
         current = current[part]
     return current
@@ -1399,6 +1409,7 @@ def _load_plugin_spec_preset_files() -> dict[str, str]:
                 PLUGIN_SPEC_PRESET_DIR / "prompt_builder.py"
             ).read_text(),
             "setup.sh": (PLUGIN_SPEC_PRESET_DIR / "setup.sh").read_text(),
+            "setup.py": (PRESETS_DIR / "setup.py").read_text(),
         }
     return _PLUGIN_SPEC_PRESET_CACHE
 
@@ -1427,10 +1438,14 @@ def entrypoint_for_manifest(manifest: AutomationPluginManifest) -> str:
     )
 
 
-def _conversation_prompt_for_manifest(manifest: AutomationPluginManifest) -> str:
+def conversation_prompt(
+    manifest: AutomationPluginManifest, config: dict[str, Any]
+) -> str:
+    """Return the message a conversation runner sends, arguments rendered."""
     prompt = f"/{manifest.name}:{manifest.entrypoint.command}"
     if manifest.entrypoint.arguments:
-        prompt = f"{prompt} {manifest.entrypoint.arguments}"
+        arguments = _render_config_templates(manifest.entrypoint.arguments, config)
+        prompt = f"{prompt} {arguments}"
     return prompt
 
 
@@ -1482,9 +1497,9 @@ def _build_stock_runner_tarball(
         _add_bytes(tar, "main.py", preset_files["main.py"].encode())
         _add_bytes(tar, "prompt_builder.py", preset_files["prompt_builder.py"].encode())
         _add_bytes(tar, "setup.sh", preset_files["setup.sh"].encode(), mode=0o755)
-        _add_bytes(
-            tar, "prompt.txt", _conversation_prompt_for_manifest(manifest).encode()
-        )
+        if os.name == "nt":
+            _add_bytes(tar, "setup.py", preset_files["setup.py"].encode())
+        _add_bytes(tar, "prompt.txt", conversation_prompt(manifest, config).encode())
         _add_json(
             tar,
             "plugins_config.json",

@@ -84,7 +84,9 @@ from openhands.automation.telemetry import (
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.event_sources import get_event_source_delivery
 from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
     resolve_model_profile_for_user,
+    validate_agent_profile_combination,
     validate_model_profile_for_user,
 )
 from openhands.automation.utils.run import (
@@ -271,6 +273,26 @@ async def _validate_draft_body(
         )
 
     try:
+        validate_agent_profile_combination(draft.agent_profile_id, draft.model)
+        await ensure_agent_profile_exists(
+            draft.agent_profile_id,
+            request,
+            user,
+            runs_as_user_id=draft.run_as_user_id,
+        )
+    except HTTPException as e:
+        if e.status_code == 422:
+            errors.append(
+                DraftValidationError(
+                    field="agent_profile_id",
+                    code="invalid_agent_profile",
+                    message=str(e.detail),
+                )
+            )
+        else:
+            logger.warning("Draft validation could not check the agent profile: %s", e)
+
+    try:
         validate_model_profile_for_user(draft.model, user)
     except HTTPException as e:
         errors.append(
@@ -398,6 +420,15 @@ async def _write_generated_tarball(
     return build_internal_url(upload_id)
 
 
+def _profile_and_model(body: DraftModel, user: AuthenticatedUser) -> dict[str, Any]:
+    if body.agent_profile_id:
+        return {"agent_profile_id": body.agent_profile_id, "model": None}
+    return {
+        "agent_profile_id": None,
+        "model": resolve_model_profile_for_user(body.model, user),
+    }
+
+
 async def _materialize_raw_draft(
     body: CreateAutomationRequest,
     user: AuthenticatedUser,
@@ -417,10 +448,11 @@ async def _materialize_raw_draft(
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
     return {
         "name": body.name,
+        "tags": body.tags,
         "description": body.description,
         "prompt": None,
         "preset_metadata": preset_metadata,
-        "model": resolve_model_profile_for_user(body.model, user),
+        **_profile_and_model(body, user),
         "trigger": body.trigger.model_dump(),
         "observability_associations": body.observability_associations,
         "tarball_path": body.tarball_path,
@@ -461,7 +493,7 @@ async def _materialize_prompt_draft(
         "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
-        "model": resolve_model_profile_for_user(body.model, user),
+        **_profile_and_model(body, user),
         "trigger": body.trigger.model_dump(),
         "observability_associations": body.observability_associations,
         "tarball_path": tarball_path,
@@ -479,9 +511,9 @@ async def _materialize_plugin_draft(
     session: AsyncSession,
     file_store: FileStore,
 ) -> dict[str, Any]:
-    model = resolve_model_profile_for_user(body.model, user)
+    profile_and_model = _profile_and_model(body, user)
     variants = _resolve_experiment_variant_models(
-        body.variants, user, default_model=model
+        body.variants, user, default_model=profile_and_model["model"]
     )
     tarball_content = _generate_plugin_tarball(
         body.plugins,
@@ -514,7 +546,7 @@ async def _materialize_plugin_draft(
         "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
-        "model": model,
+        **profile_and_model,
         "trigger": body.trigger.model_dump(),
         "observability_associations": body.observability_associations,
         "tarball_path": tarball_path,

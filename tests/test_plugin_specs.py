@@ -2,6 +2,7 @@ import json
 import tarfile
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -430,6 +431,38 @@ async def test_stock_conversation_runner_packages_primary_plugin_command(tmp_pat
     assert "report_phase" not in main_source
 
 
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_stock_conversation_runner_packages_platform_setup(
+    tmp_path, monkeypatch, platform
+):
+    plugin = write_conversation_plugin(tmp_path)
+    source = AutomationPluginSource(source=str(plugin))
+    _, _, manifest = fetch_manifest(source)
+    monkeypatch.setattr(plugin_specs, "_PLUGIN_SPEC_PRESET_CACHE", None)
+    monkeypatch.setattr(plugin_specs, "os", SimpleNamespace(name=platform))
+
+    tarball = plugin_specs._build_stock_runner_tarball(
+        source=source,
+        resolved_ref=None,
+        manifest=manifest,
+        config={},
+        resolved_runtime={},
+        required_plugins=[],
+    )
+
+    with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
+        assert "setup.sh" in tar.getnames()
+        if platform == "nt":
+            setup = tar.extractfile("setup.py")
+            assert setup is not None
+            # As text: a Windows checkout may hold the file with CRLF endings,
+            # and the service reads it with read_text().
+            shared_setup = (plugin_specs.PRESETS_DIR / "setup.py").read_text()
+            assert setup.read().decode() == shared_setup
+        else:
+            assert "setup.py" not in tar.getnames()
+
+
 async def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch):
     plugin = write_conversation_plugin(tmp_path)
     sentinel_main = "print('plugin-spec conversation runner')\n"
@@ -442,6 +475,7 @@ async def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monke
                 "def build_user_prompt(prompt, event_context):\n    return prompt\n"
             ),
             "setup.sh": "#!/usr/bin/env bash\n",
+            "setup.py": "",
         },
     )
 
@@ -725,7 +759,9 @@ def _write_catalog_manifest_with_bundle(root: Path) -> Path:
     )
     scripts_dir = repo_root / "scripts"
     scripts_dir.mkdir()
-    (scripts_dir / "main.py").write_text("print('hello from bundle')\n")
+    # Bytes: write_text would store "\r\n" on Windows, and the bundle keeps
+    # the file as it is on disk.
+    (scripts_dir / "main.py").write_bytes(b"print('hello from bundle')\n")
     return repo_root
 
 
@@ -1200,3 +1236,49 @@ async def test_run_fetches_the_pinned_secondary_plugins_not_the_moved_branch(
     )
 
     assert plugin_fetches[1:] == [{"source": str(secondary), "ref": pinned}]
+
+
+def _write_templated_arguments(plugin: Path, arguments: str) -> None:
+    metadata = json.loads((plugin / ".plugin" / "plugin.json").read_text())
+    metadata["automation"]["entrypoint"]["arguments"] = arguments
+    metadata["automation"]["config_schema"] = {
+        "type": "object",
+        "properties": {"prompt": {"type": "string"}},
+    }
+    (plugin / ".plugin" / "plugin.json").write_text(json.dumps(metadata))
+    (plugin / "automation-plugin.json").write_text(
+        json.dumps({"name": metadata["name"], **metadata["automation"]})
+    )
+
+
+async def test_conversation_runner_renders_arguments_from_config(tmp_path):
+    plugin = write_conversation_plugin(tmp_path)
+    _write_templated_arguments(plugin, "{{ config.prompt }}")
+
+    tarball, _env, _runtime, _fetches = await build_execution_payload(
+        plugin_spec={
+            "plugin": {"source": str(plugin)},
+            "config": {"prompt": "Summarize {{ open }} issues\nby label"},
+        },
+        agent_profile_id="profile-id",
+        agent_profile_name="agent-default",
+        llm_profile_name=None,
+        work_dir="/tmp/automation-run",
+    )
+
+    with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
+        prompt_file = tar.extractfile("prompt.txt")
+        assert prompt_file is not None
+        prompt = prompt_file.read().decode()
+    assert prompt == (
+        "/hello-world-automation:hello Summarize {{ open }} issues\nby label"
+    )
+
+
+def test_conversation_runner_arguments_need_their_config(tmp_path):
+    plugin = write_conversation_plugin(tmp_path)
+    _write_templated_arguments(plugin, "{{ config.prompt }}")
+    _, _, manifest = fetch_manifest(AutomationPluginSource(source=str(plugin)))
+
+    with pytest.raises(PluginSpecError, match="missing config value: config.prompt"):
+        validate_plugin_config(manifest, {})

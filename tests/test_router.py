@@ -963,6 +963,78 @@ class TestCreateAutomation:
         assert second.status_code == 201
         assert second.json()["id"] != first.json()["id"]
 
+    @staticmethod
+    def _template_row(state: AutomationState) -> Automation:
+        return Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="From template",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            state=state,
+            enabled=state == AutomationState.ACTIVE,
+            preset_metadata={"template": {"id": "tpl-drafted", "version": "1"}},
+        )
+
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            (
+                "/api/automation/v1",
+                {
+                    "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                    "entrypoint": "uv run main.py",
+                },
+            ),
+            ("/api/automation/v1/preset/prompt", {"prompt": "Review PRs."}),
+        ],
+        ids=["bundle", "preset-prompt"],
+    )
+    async def test_draft_test_artifact_does_not_count_as_template_install(
+        self, async_client, async_session, path, payload
+    ):
+        """A DRAFT row from a draft test dispatch does not block the real create."""
+        draft_artifact = self._template_row(AutomationState.DRAFT)
+        async_session.add(draft_artifact)
+        await async_session.commit()
+
+        response = await async_client.post(
+            path,
+            json={
+                **payload,
+                "name": "Real",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "template": {"id": "tpl-drafted", "version": "1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["id"] != str(draft_artifact.id)
+        assert response.json()["state"] == "ACTIVE"
+
+    async def test_inactive_template_install_still_returns_existing(
+        self, async_client, async_session
+    ):
+        """A disabled install is still an install: the create replays it, 200."""
+        installed = self._template_row(AutomationState.INACTIVE)
+        async_session.add(installed)
+        await async_session.commit()
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "Again",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                "entrypoint": "uv run main.py",
+                "template": {"id": "tpl-drafted", "version": "1"},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["id"] == str(installed.id)
+
     async def test_create_automation_rejects_oversized_template_config(
         self, async_client
     ):
@@ -2168,6 +2240,89 @@ class TestUpdateAutomation:
         fetched = await async_client.get(url)
         assert fetched.status_code == 200
         assert fetched.json()["description"] is None
+
+    @pytest.mark.parametrize(
+        "field", ["name", "entrypoint", "tarball_path", "trigger", "enabled"]
+    )
+    async def test_update_automation_null_on_required_field_is_422(
+        self, async_client, async_session, field
+    ):
+        """Explicit null on a NOT NULL column is a 422 naming it, not a 500."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Required Fields",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        url = f"/api/automation/v1/{automation.id}"
+        before = (await async_client.get(url)).json()
+        stored_before = getattr(automation, field)
+
+        response = await async_client.patch(url, json={field: None})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"][0]["loc"] == ["body", field]
+        await async_session.refresh(automation)
+        assert getattr(automation, field) is not None
+        assert getattr(automation, field) == stored_before
+        after = await async_client.get(url)
+        assert after.status_code == 200
+        assert after.json()[field] == before[field]
+
+    async def test_update_automation_null_state_is_ignored(
+        self, async_client, async_session
+    ):
+        """state: null stays a no-op, as it always was."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Null State",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        url = f"/api/automation/v1/{automation.id}"
+
+        response = await async_client.patch(url, json={"state": None})
+
+        assert response.status_code == 200, response.text
+        await async_session.refresh(automation)
+        assert automation.state == AutomationState.ACTIVE
+        assert automation.enabled is True
+        fetched = await async_client.get(url)
+        assert fetched.json()["state"] == "ACTIVE"
+        assert fetched.json()["enabled"] is True
+
+    async def test_update_automation_state_with_null_enabled_uses_state(
+        self, async_client, async_session
+    ):
+        """A null enabled next to a state is derived from the state, as before."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="State Wins",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"state": "INACTIVE", "enabled": None},
+        )
+
+        assert response.status_code == 200, response.text
+        await async_session.refresh(automation)
+        assert automation.state == AutomationState.INACTIVE
+        assert automation.enabled is False
 
     async def test_update_automation_schedule(self, async_client, async_session):
         """PATCH updates the trigger schedule."""
@@ -5622,8 +5777,6 @@ class TestAutomationChangeEvents:
             f"/api/automation/v1/{automation.id}", json={"enabled": True}
         )
 
-        # Both PATCHes run in the test's one transaction, so the rows share
-        # created_at; match them by action instead of by order.
         events = {e.action: e for e in await self._events(async_session, automation.id)}
         assert set(events) == {"disable", "enable"}
         assert events["disable"].changed_fields == [
@@ -5680,6 +5833,34 @@ class TestAutomationChangeEvents:
         assert body["changes"][0]["changed_fields"] == ["name"]
         assert body["changes"][0]["actor_kind"] == "user"
         assert body["changes"][0]["actor_user_id"] == str(TEST_USER_ID)
+
+    async def test_changes_endpoint_lists_back_to_back_changes_newest_first(
+        self, async_client, async_session
+    ):
+        # Issue #739: CURRENT_TIMESTAMP gave these rows one created_at (one
+        # transaction here, one second on SQLite) and the uuid4 tie-break
+        # shuffled them.
+        automation = await _seed_s3_automation(async_session)
+        patches = [
+            {"name": "Renamed"},
+            {"description": "Described"},
+            {"entrypoint": "uv run other.py"},
+        ]
+        for body in patches:
+            response = await async_client.patch(
+                f"/api/automation/v1/{automation.id}", json=body
+            )
+            assert response.status_code == 200
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+
+        changes = response.json()["changes"]
+        assert [c["changed_fields"] for c in changes[:3]] == [
+            ["entrypoint"],
+            ["description"],
+            ["name"],
+        ]
+        assert changes[3]["action"] == "create"
 
     async def test_changes_endpoint_orders_equal_timestamps_by_id(
         self, async_client, async_session

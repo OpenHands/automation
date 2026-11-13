@@ -381,9 +381,12 @@ def set_nested_value(obj: dict, path: str, value: Any) -> dict:
         The modified dict (same reference as input).
 
     Raises:
-        ValueError: If intermediate path element is not a dict.
+        ValueError: If the path is malformed or empty, or an intermediate
+            path element is not a dict.
     """
     parts = parse_path(path)
+    if not parts:
+        raise ValueError(f"Invalid path: '{path}' names no field")
     current = obj
 
     for part in parts[:-1]:
