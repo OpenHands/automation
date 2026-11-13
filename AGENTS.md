@@ -69,6 +69,7 @@ automation/
 │       ├── preset_router.py    # Preset-based automation creation
 │       ├── providers.py        # Event provider descriptors and signature verifiers
 │       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
+│       ├── service_router.py   # Service-key routes for Enterprise (factory lookup)
 │       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
 │       ├── schemas.py          # Pydantic request/response schemas
 │       ├── subjects.py         # Maps an external subject to a conversation id
@@ -226,6 +227,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
+| `AUTOMATION_WORKLOG_TOKEN` | Dispatcher, cloud mode only, when the automation belongs to a factory and the service key is set | Run token for the factory's Enterprise-hosted worklogs (see Factories). Absent in local mode, for an automation with no factory, and without a service key; the run starts anyway |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
@@ -300,6 +302,33 @@ NULL`). Zero factories is a valid state; there is no default factory.
   ORM, so the change audit records it) and removes the row.
 - Git sync neither writes nor reads `factory_id`: a factory's id and slug are
   local to an install.
+
+### Enterprise-hosted worklogs
+
+Worklogs (append-only logs scoped to a factory) are an OpenHands Enterprise
+feature, stored and served by the Enterprise server (OpenHands/enterprise#1297).
+This service supplies three things:
+
+- **Run token** (`utils/worklog.py`): the dispatcher injects
+  `AUTOMATION_WORKLOG_TOKEN` next to `AUTOMATION_KV_TOKEN`. It is an HS256 JWT
+  signed with a key derived from `AUTOMATION_SERVICE_KEY` by HKDF-SHA256 (zero
+  salt, 32 bytes, info `openhands-worklog-run-token-v1`); the raw service key
+  never signs. Claims: `aud` `worklog`, `org_id`, `factory_id`,
+  `automation_id`, `automation_name` (at most 256 characters), `run_id`, `iat`,
+  `exp` (24 hours). The token is never stored, logged or put in
+  `AUTOMATION_EVENT_PAYLOAD`. A run keeps the factory named in its token until
+  it expires, even if its automation is moved to another factory mid-run. Runs
+  call `$OPENHANDS_CLOUD_API_URL/api/service/worklog/...` with it as a Bearer
+  token. `tests/test_worklog_token.py` commits the contract test vector that
+  Enterprise's tests also commit; if the two differ, the enterprise issue is
+  authoritative.
+- **Factory lookup**: `GET /v1/service/factories?org_id=&id=...` (up to 100
+  ids), authenticated with `X-Service-API-Key` like `usage_router`.
+- **Delete notification**: after a factory delete commits, `DELETE
+  {openhands_api_base_url}/api/service/orgs/{org_id}/factories/{factory_id}/worklogs`
+  (`notify_factory_deleted`). Any answer but 204, or a connection failure, is a
+  warning; it never blocks the delete. Skipped in local mode. Enterprise's
+  maintenance task repairs a missed notification, so there is no retry queue.
 
 ## Preset-Based Automation Creation
 

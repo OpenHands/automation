@@ -14,7 +14,8 @@ Source: `openhands/automation/factory_router.py`, `openhands/automation/factorie
 Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 `GET /api/automation/v1/factories/{slug}`,
 `PATCH /api/automation/v1/factories/{slug}`,
-`DELETE /api/automation/v1/factories/{slug}`
+`DELETE /api/automation/v1/factories/{slug}`,
+`GET /api/automation/v1/service/factories`
 
 ## Sub-features
 
@@ -24,6 +25,7 @@ Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 - `F19.assign`: `PATCH /v1/{id}` with `factory_id` assigns the automation, a second factory moves it, `null` removes it, and omitting the field leaves it; every automation response carries `factory_id`, and an unknown factory id answers 404 `Factory not found`.
 - `F19.list-filter`: `GET /v1?factory_id=<id>` returns only that factory's live automations, and the factory's `automation_count` counts the same ones.
 - `F19.delete`: `DELETE /v1/factories/{slug}` answers 409 `Factory has N live automations; remove them from it first` while any live automation belongs to it, and 204 once none does; the factory is then 404 and the same slug yields a new id.
+- `F19.lookup`: `GET /v1/service/factories?org_id=<org>&id=<id>...` with the service key answers 200 `{"factories": [{"id", "org_id"}]}` holding only the requested ids that exist in that org; a missing or wrong `X-Service-API-Key` answers 401, no configured service key 503, and more than 100 ids 422.
 - `F19.audit`: each `factory_id` change appears in `GET /v1/{id}/changes` with `factory_id` in `changed_fields`.
 
 ## How to get to it (agent POV)
@@ -36,6 +38,14 @@ Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 - CLI: `control-automation api POST /v1/factories --json '{"name":"..."}'`.
 - A factory has no description or other attribute, and no built-in default.
 - Git sync neither writes nor reads `factory_id`.
+- Enterprise reads factories through `GET /v1/service/factories`, with
+  `X-Service-API-Key: <AUTOMATION_SERVICE_KEY>` (its `AUTOMATIONS_SERVICE_KEY`),
+  to confirm a factory exists. After a delete this service calls Enterprise's
+  worklog purge route; local mode has no Enterprise server, so nothing is sent
+  and a recipe cannot observe it (the unit tests do).
+- A run of an automation that belongs to a factory gets
+  `AUTOMATION_WORKLOG_TOKEN` in cloud mode when the service key is set; local
+  mode never does.
 
 ## Driving it with control-automation
 
@@ -105,6 +115,22 @@ Preconditions:
   ```
   Leaves no factory behind. A soft-deleted automation does not block the
   delete; it is detached in the same transaction.
+- **Service lookup (`F19.lookup`).** Only the service key opens it, and only ids that exist in the org come back. Restores the baseline.
+  Requires: `F19.create`
+  ```sh
+  control-automation restart --service automation --env AUTOMATION_SERVICE_KEY=qa-service-key
+  LORG=46d09c5c-7d7d-585f-8c37-a6b45a3de738
+  LF=$(control-automation api POST /v1/factories --json '{"name":"QA Lookup"}' --expect 201 --field id)
+  control-automation api GET /v1/service/factories --auth none --header 'X-Service-API-Key: qa-service-key' --query org_id="$LORG" --query id="$LF" --query id=00000000-0000-4000-8000-000000000000 --expect 200 --check factories len-eq 1 --check factories.0.id eq "$LF" --check factories.0.org_id eq "$LORG" --save F19.lookup/found
+  control-automation api GET /v1/service/factories --auth none --header 'X-Service-API-Key: qa-service-key' --query org_id=00000000-0000-4000-8000-000000000000 --query id="$LF" --expect 200 --check factories len-eq 0
+  control-automation api GET /v1/service/factories --auth none --query org_id="$LORG" --query id="$LF" --expect 401 --check detail eq 'Invalid service API key' --save F19.lookup/missing-key
+  control-automation api GET /v1/service/factories --auth none --header 'X-Service-API-Key: not-the-key' --query org_id="$LORG" --query id="$LF" --expect 401
+  control-automation api DELETE "/v1/factories/qa-lookup" --expect 204
+  control-automation restart --service automation --reset-env
+  control-automation api GET /v1/service/factories --auth none --header 'X-Service-API-Key: qa-service-key' --query org_id="$LORG" --query id="$LF" --expect 503 --check detail eq 'Service authentication not configured' --save F19.lookup/unconfigured
+  ```
+  The over-100-ids refusal (422) needs 101 query parameters and is covered by
+  the unit tests.
 - **Change audit (`F19.audit`).** Each membership change is one change row listing `factory_id`.
   Requires: `F19.assign`
   ```sh

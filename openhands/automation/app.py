@@ -35,6 +35,7 @@ from openhands.automation.observability import init_observability
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.service_router import router as service_router
 from openhands.automation.streams import stream_supervisor_loop
 from openhands.automation.telemetry import (
     close_telemetry_http_client,
@@ -310,6 +311,7 @@ app.include_router(draft_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(factory_router, prefix=_base_path)
+app.include_router(service_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)
 app.include_router(usage_router, prefix=_base_path)
 app.include_router(git_sync_router, prefix=_base_path)

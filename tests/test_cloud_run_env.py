@@ -39,6 +39,7 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    Factory,
     TarballUpload,
     UploadStatus,
 )
@@ -217,10 +218,17 @@ async def _make_run(
     async_session_factory,
     tarball: bytes | str,
     preset_metadata: dict[str, Any] | None = None,
+    factory_id: uuid.UUID | None = None,
 ) -> AutomationRun:
     """A running run of an automation whose code is ``tarball`` (bytes are
-    stored as an internal upload, a string is an external URL)."""
+    stored as an internal upload, a string is an external URL). With
+    ``factory_id`` the automation belongs to a factory of that id."""
     async with async_session_factory() as session:
+        if factory_id is not None:
+            session.add(
+                Factory(id=factory_id, org_id=ORG_ID, name="Factory", slug="factory")
+            )
+            await session.flush()
         if isinstance(tarball, bytes):
             upload_id = uuid.uuid4()
             session.add(
@@ -245,6 +253,7 @@ async def _make_run(
             entrypoint="python3 main.py",
             enabled=True,
             preset_metadata=preset_metadata,
+            factory_id=factory_id,
         )
         session.add(automation)
         await session.commit()
@@ -301,6 +310,8 @@ async def _dispatch(
     preset_metadata: dict[str, Any] | None = None,
     git_connections: dict[str, str | None] | None = None,
     app_server_starts: bool = True,
+    factory_id: uuid.UUID | None = None,
+    run_out: list[AutomationRun] | None = None,
 ) -> dict[str, str]:
     """Dispatch a run through ``_execute_run``; return the env the sandbox gets.
 
@@ -308,7 +319,11 @@ async def _dispatch(
     ``app_server_starts=False`` is an app server without that route, where the
     runner creates the conversation itself.
     """
-    run = await _make_run(async_session_factory, tarball, preset_metadata)
+    run = await _make_run(
+        async_session_factory, tarball, preset_metadata, factory_id=factory_id
+    )
+    if run_out is not None:
+        run_out.append(run)
     if plugin_payload is not None:
         run.automation.plugin_spec = {"plugin": {"source": "github:org/plugin"}}
         run.automation.tarball_path = "plugin-spec://runtime"

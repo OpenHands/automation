@@ -1301,6 +1301,17 @@ class FactoryListResponse(BaseModel):
     total: int
 
 
+class FactoryLookupItem(BaseModel):
+    id: uuid.UUID
+    org_id: uuid.UUID
+
+
+class FactoryLookupResponse(BaseModel):
+    """The factory ids that exist, for Enterprise's service-key lookup."""
+
+    factories: list[FactoryLookupItem]
+
+
 class AutomationTagCount(BaseModel):
     tag: str
     count: int = Field(..., description="Live automations carrying this tag")

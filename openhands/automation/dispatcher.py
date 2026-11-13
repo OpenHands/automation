@@ -115,6 +115,7 @@ from openhands.automation.utils.timeout import resolve_automation_timeout_second
 from openhands.automation.utils.unhealthy import (
     maybe_disable_unhealthy_automation_after_run,
 )
+from openhands.automation.utils.worklog import create_worklog_token
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -1135,6 +1136,20 @@ async def _execute_run(
         env_vars["AUTOMATION_KV_TOKEN"] = create_kv_token(
             secret=kv_config.kv_secret,
             automation_id=automation.id,
+            run_id=run.id,
+        )
+
+    # Enterprise-hosted worklogs: a run of a factory's automation may write to
+    # the factory's worklogs. Local mode has no Enterprise server to accept the
+    # token, and without the service key there is nothing to sign it with. The
+    # run starts either way.
+    if automation.factory_id and settings.service_key and not settings.is_local_mode:
+        env_vars["AUTOMATION_WORKLOG_TOKEN"] = create_worklog_token(
+            settings.service_key,
+            org_id=automation.org_id,
+            factory_id=automation.factory_id,
+            automation_id=automation.id,
+            automation_name=automation.name,
             run_id=run.id,
         )
 

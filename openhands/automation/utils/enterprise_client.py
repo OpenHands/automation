@@ -80,3 +80,48 @@ async def get_org_member(
         return OrgMemberInfo.model_validate(response.json())
     except (ValueError, ValidationError) as exc:
         raise EnterpriseClientError("Unexpected membership response") from exc
+
+
+# ``{org_id}`` and ``{factory_id}`` are filled in by ``notify_factory_deleted``.
+FACTORY_WORKLOGS_PATH = "/api/service/orgs/{org_id}/factories/{factory_id}/worklogs"
+
+
+async def notify_factory_deleted(
+    client: httpx.AsyncClient, org_id: uuid.UUID, factory_id: uuid.UUID
+) -> None:
+    """Tell Enterprise to purge a deleted factory's worklogs.
+
+    Called after the delete commits. It never raises: a missed notification
+    must not undo or block the delete, and Enterprise's maintenance task repairs
+    one. Skipped in local mode, which has no Enterprise server.
+    """
+    config = get_config().service
+    if config.is_local_mode:
+        return
+    if not config.service_key:
+        logger.warning(
+            "Not notifying Enterprise of deleted factory %s: no service key",
+            factory_id,
+        )
+        return
+
+    url = config.openhands_api_base_url.rstrip("/") + FACTORY_WORKLOGS_PATH.format(
+        org_id=org_id, factory_id=factory_id
+    )
+    try:
+        response = await client.delete(
+            url, headers={"X-Service-API-Key": config.service_key}
+        )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Worklog purge for deleted factory %s failed: %s",
+            factory_id,
+            type(exc).__name__,
+        )
+        return
+    if response.status_code != 204:
+        logger.warning(
+            "Worklog purge for deleted factory %s returned HTTP %s",
+            factory_id,
+            response.status_code,
+        )
