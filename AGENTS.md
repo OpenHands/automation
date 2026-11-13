@@ -606,7 +606,12 @@ and `app.py` version lines.
 
 ### SDK dependency bumps
 
-When bumping `openhands-sdk` / `openhands-workspace` pins:
+The `bump-pins` workflow (`.github/workflows/bump-pins.yml`, a caller of the
+reusable workflow in `OpenHands/release-actions`) opens a `fix: bump SDK to <ver>`
+PR from the `bump-pins` branch when a newer SDK release is on PyPI, and rebuilds
+that branch when the next one is. Run it by hand from the Actions tab if needed.
+
+To bump the `openhands-sdk` / `openhands-workspace` pins by hand instead:
 1. Update both versions in `pyproject.toml` dependencies.
 2. Run `uv lock` to regenerate `uv.lock`.
 3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —
