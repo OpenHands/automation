@@ -357,13 +357,13 @@ class TestNonInteractive:
         `env=` from the subprocess call would silently allow that again.
         """
         captured: dict[str, str] = {}
-        real_exec = asyncio.create_subprocess_exec
+        real_run = subprocess.run
 
-        async def spy(*args, **kwargs):
+        def spy(args, **kwargs):
             captured.update(kwargs.get("env") or {})
-            return await real_exec(*args, **kwargs)
+            return real_run(args, **kwargs)
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+        monkeypatch.setattr(subprocess, "run", spy)
 
         workdir = tmp_path / "clone"
         await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
@@ -380,6 +380,48 @@ class TestNonInteractive:
         assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
         # Still inherits the ambient environment (PATH, HOME, ...).
         assert "PATH" in env
+
+
+class TestSubprocessRunner:
+    """#491: clone/fetch over SSH stalled under `asyncio.create_subprocess_exec`."""
+
+    async def test_clone_and_fetch_do_not_use_asyncio_subprocesses(
+        self, tmp_path, origin, monkeypatch
+    ):
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("git must not run via asyncio.create_subprocess_exec")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+
+        workdir = tmp_path / "clone"
+        await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
+        await pull(workdir, "main", token="", timeout=30)
+
+    async def test_a_slow_git_command_does_not_block_the_event_loop(
+        self, tmp_path, monkeypatch
+    ):
+        hang = tmp_path / "hang.sh"
+        hang.write_text("#!/bin/sh\nsleep 30\n")
+        hang.chmod(0o755)
+        monkeypatch.setenv("GIT_SSH_COMMAND", str(hang))
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        try:
+            with pytest.raises(GitSyncError, match="timed out after 1.0s"):
+                await check_remote_access(
+                    "ssh://git@example.invalid/org/repo.git", "main", "", timeout=1.0
+                )
+        finally:
+            task.cancel()
+        # The loop kept running while git waited in its worker thread.
+        assert ticks >= 10
 
 
 class TestCurrentHead:
@@ -427,13 +469,13 @@ class TestCheckRemoteAccess:
         """`ls-remote` and nothing else: a check must not clone, and must not
         run any command that could write to the remote."""
         commands: list[list[str]] = []
-        real_exec = asyncio.create_subprocess_exec
+        real_run = subprocess.run
 
-        async def spy(*args, **kwargs):
+        def spy(args, **kwargs):
             commands.append(list(args))
-            return await real_exec(*args, **kwargs)
+            return real_run(args, **kwargs)
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+        monkeypatch.setattr(subprocess, "run", spy)
         monkeypatch.chdir(tmp_path)
 
         await check_remote_access(_repo_url(origin), "main", token="", timeout=30)
@@ -553,15 +595,9 @@ class TestAuthScheme:
         way a remote refuses them: a 401 turns into git's username prompt, which
         the non-interactive env converts into this exact stderr."""
         state = {"rejected": {"basic"}, "headers": []}
-        real_exec = asyncio.create_subprocess_exec
+        real_run = subprocess.run
 
-        class Rejected:
-            returncode = 128
-
-            async def communicate(self):
-                return b"", TestAuthScheme.REJECTED
-
-        async def spy(*args, **kwargs):
+        def spy(args, **kwargs):
             headers = [
                 arg.removeprefix("http.extraHeader=")
                 for arg in args
@@ -571,7 +607,9 @@ class TestAuthScheme:
             state["headers"].append(header)
             scheme = header.split()[1].lower() if header else None
             if scheme in state["rejected"]:
-                return Rejected()
+                return subprocess.CompletedProcess(
+                    args, 128, b"", TestAuthScheme.REJECTED
+                )
             stripped = [
                 arg
                 for index, arg in enumerate(args)
@@ -580,9 +618,9 @@ class TestAuthScheme:
                     or (arg == "-c" and str(args[index + 1]).startswith("http.extra"))
                 )
             ]
-            return await real_exec(*stripped, **kwargs)
+            return real_run(stripped, **kwargs)
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+        monkeypatch.setattr(subprocess, "run", spy)
         return state
 
     def test_basic_header_names_x_access_token(self):
