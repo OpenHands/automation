@@ -25,6 +25,7 @@ from openhands.automation.execution import (
     _env_command_prefix,
     _is_windows_path,
     _serialize_env_vars,
+    _setup_step,
     _shell_quote,
     _upload,
     build_tarball,
@@ -274,6 +275,137 @@ class TestExecuteInContextErrors:
         assert isinstance(result, DispatchResult)
         assert result.success is True
         assert result.sandbox_id == "test-sandbox-id"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="runs the POSIX setup step with bash")
+class TestSetupStep:
+    """The stored ``setup_script_path`` is what runs (#343)."""
+
+    def _run(self, tmp_path, setup_script_path):
+        return subprocess.run(
+            ["bash", "-c", f"{_setup_step(setup_script_path)} && echo ENTRYPOINT"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+
+    def _script(self, path, marker):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"echo {marker}\n")
+
+    @pytest.mark.parametrize("setup_script_path", [None, "", "setup.sh"])
+    def test_default_root_setup_sh_runs_when_present(self, tmp_path, setup_script_path):
+        self._script(tmp_path / "setup.sh", "ROOT_SETUP")
+        result = self._run(tmp_path, setup_script_path)
+        assert result.returncode == 0
+        assert result.stdout.split() == ["ROOT_SETUP", "ENTRYPOINT"]
+
+    @pytest.mark.parametrize("setup_script_path", [None, "setup.sh"])
+    def test_default_setup_sh_stays_optional(self, tmp_path, setup_script_path):
+        result = self._run(tmp_path, setup_script_path)
+        assert result.returncode == 0
+        assert result.stdout.split() == ["ENTRYPOINT"]
+
+    def test_custom_path_runs_instead_of_root_setup_sh(self, tmp_path):
+        self._script(tmp_path / "scripts" / "install.sh", "CUSTOM_SETUP")
+        self._script(tmp_path / "setup.sh", "ROOT_SETUP")
+        result = self._run(tmp_path, "scripts/install.sh")
+        assert result.returncode == 0
+        assert result.stdout.split() == ["CUSTOM_SETUP", "ENTRYPOINT"]
+
+    def test_missing_custom_path_fails_before_the_entrypoint(self, tmp_path):
+        self._script(tmp_path / "setup.sh", "ROOT_SETUP")
+        result = self._run(tmp_path, "scripts/install.sh")
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert (
+            "setup script not found in the tarball: scripts/install.sh" in result.stderr
+        )
+
+    def test_failing_custom_setup_stops_the_run(self, tmp_path):
+        path = tmp_path / "scripts" / "install.sh"
+        path.parent.mkdir()
+        path.write_text("exit 3\n")
+        result = self._run(tmp_path, "scripts/install.sh")
+        assert result.returncode == 3
+        assert "ENTRYPOINT" not in result.stdout
+
+    def test_path_is_quoted(self, tmp_path):
+        # The validator rejects metacharacters; the quoting must hold anyway.
+        weird = "scripts/it's here.sh"
+        self._script(tmp_path / weird, "QUOTED_SETUP")
+        result = self._run(tmp_path, weird)
+        assert result.returncode == 0
+        assert result.stdout.split() == ["QUOTED_SETUP", "ENTRYPOINT"]
+
+
+class TestSetupScriptPathWiring:
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    async def test_execute_in_context_runs_the_stored_setup_script(
+        self, mock_start_bash, mock_upload
+    ):
+        mock_start_bash.return_value = "cmd-1"
+        await execute_in_context(
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python3 main.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            setup_script_path="scripts/install.sh",
+        )
+        command = mock_start_bash.await_args.args[1]
+        assert f"&& {_setup_step('scripts/install.sh')} && python3 main.py" in command
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    async def test_execute_in_context_defaults_to_optional_setup_sh(
+        self, mock_start_bash, mock_upload
+    ):
+        mock_start_bash.return_value = "cmd-1"
+        await execute_in_context(
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python3 main.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+        )
+        command = mock_start_bash.await_args.args[1]
+        assert "&& ([ ! -f setup.sh ] || bash setup.sh) && python3 main.py" in command
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_run_automation_runs_the_stored_setup_script(
+        self, mock_async_client, mock_create_and_wait, mock_upload, mock_bash
+    ):
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = (
+            "sandbox-1",
+            "session-key",
+            "https://agent.example.com",
+        )
+        mock_bash.return_value = (0, "", "")
+
+        result = await run_automation(
+            api_url="https://api.example.com",
+            api_key="api-key",
+            entrypoint="python3 main.py",
+            tarball_source=b"fake tarball bytes",
+            keep_sandbox=True,
+            setup_script_path="scripts/install.sh",
+        )
+
+        assert result.success is True
+        command = mock_bash.await_args.args[1]
+        assert f"&& {_setup_step('scripts/install.sh')} && python3 main.py" in command
 
 
 @pytest.mark.skipif(
