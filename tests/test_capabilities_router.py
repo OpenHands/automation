@@ -212,6 +212,7 @@ class TestGetCapabilities:
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
+        assert "factories" in body["features"]
         assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
         assert "pluginConfigUpdate" in body["features"]

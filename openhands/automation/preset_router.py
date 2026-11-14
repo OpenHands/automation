@@ -38,6 +38,7 @@ from openhands.automation.auth import (
 from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
+from openhands.automation.factory_router import authorize_factory_change
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
@@ -193,6 +194,13 @@ class CreatePromptAutomationRequest(BaseModel):
     )
 
     name: str = Field(..., min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory to create the automation in. Requires manage_automations "
+            "(members get 403); an unknown or other-org factory returns 404."
+        ),
+    )
     description: str | None = Field(default=None, max_length=2000)
     prompt: str = Field(
         ...,
@@ -640,6 +648,8 @@ async def create_automation_from_prompt(
     6. Report completion status back to the automation service
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
+    if body.factory_id is not None:
+        await authorize_factory_change(session, user, body.factory_id)
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -725,6 +735,7 @@ async def create_automation_from_prompt(
             name=body.name,
             description=body.description,
             prompt=body.prompt,
+            factory_id=body.factory_id,
             preset_metadata=preset_metadata,
             model=model,
             agent_profile_id=body.agent_profile_id,
@@ -826,6 +837,13 @@ class CreatePluginAutomationRequest(BaseModel):
     )
 
     name: str = Field(..., min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory to create the automation in. Requires manage_automations "
+            "(members get 403); an unknown or other-org factory returns 404."
+        ),
+    )
     description: str | None = Field(default=None, max_length=2000)
     plugins: list[PluginSource] | None = Field(
         default=None,
@@ -1161,6 +1179,8 @@ async def create_automation_from_plugin(
     - With repo_path: subdirectory for monorepos
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
+    if body.factory_id is not None:
+        await authorize_factory_change(session, user, body.factory_id)
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -1276,6 +1296,7 @@ async def create_automation_from_plugin(
             name=body.name,
             description=body.description,
             prompt=body.prompt,
+            factory_id=body.factory_id,
             preset_metadata=preset_metadata,
             model=model,
             agent_profile_id=body.agent_profile_id,
