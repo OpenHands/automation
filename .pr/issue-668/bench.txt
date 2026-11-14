@@ -1,6 +1,0 @@
-main  run 1  setup.sh exit=0  setup=  14.8s   entrypoint SDK import (main.py)=  7.7s   setup+import=  22.5s
-pr    run 1  setup.sh exit=0  setup=   1.8s   entrypoint SDK import (main.py)= 15.8s   setup+import=  17.6s
-main  run 2  setup.sh exit=0  setup=  16.1s   entrypoint SDK import (main.py)= 10.0s   setup+import=  26.1s
-pr    run 2  setup.sh exit=0  setup=   0.9s   entrypoint SDK import (main.py)= 14.3s   setup+import=  15.2s
-main  run 3  setup.sh exit=0  setup=  15.2s   entrypoint SDK import (main.py)=  7.1s   setup+import=  22.3s
-pr    run 3  setup.sh exit=0  setup=   1.0s   entrypoint SDK import (main.py)= 12.2s   setup+import=  13.2s
