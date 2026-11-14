@@ -1232,6 +1232,70 @@ class TestEffectiveTimeout:
             assert expected - 30 < remaining <= expected
 
 
+class TestExecuteRunSetupScriptPath:
+    @pytest.mark.parametrize("setup_script_path", ["scripts/install.sh", None])
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_stored_setup_script_path_reaches_execution(
+        self,
+        mock_execute,
+        setup_script_path,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Custom setup path",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="python3 main.py",
+                setup_script_path=setup_script_path,
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+
+        backend = MagicMock()
+        backend.get_execution_context = AsyncMock(
+            return_value=MagicMock(
+                agent_url="http://agent.test",
+                sandbox_id="sbx-1",
+                session_key="sk-1",
+                api_key=None,
+            )
+        )
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        mock_execute.assert_awaited_once()
+        assert mock_execute.await_args.kwargs["setup_script_path"] == setup_script_path
+
+
 class TestExecuteRunPhaseReporting:
     """Phase-reporting wiring in _execute_run."""
 

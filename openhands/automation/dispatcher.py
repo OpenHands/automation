@@ -1395,6 +1395,11 @@ async def _execute_run(
             timeout=effective_timeout,
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
+            # A plugin spec stores its manifest's setup script, which lives in
+            # the fetched plugin; the runtime bundle runs it via a root setup.sh.
+            setup_script_path=(
+                None if automation.plugin_spec else automation.setup_script_path
+            ),
         )
     except PermanentDispatchError as exc:
         logger.error(

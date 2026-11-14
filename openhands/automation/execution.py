@@ -313,6 +313,7 @@ async def execute_in_context(
     timeout: int | None = None,
     run_id: str | None = None,
     sandbox_id: str | None = None,
+    setup_script_path: str | None = None,
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -320,9 +321,10 @@ async def execute_in_context(
     The context (agent_url, session_key) is obtained from the backend.
 
     1. Get tarball into environment (upload bytes OR download from URL).
-    2. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
-       When *work_dir* is a Windows path, ``windows_runner.py`` does this
-       step instead and runs ``setup.py`` (if present).
+    2. Extract it, run the setup script (see ``_setup_step``), then start
+       *entrypoint*. When *work_dir* is a Windows path, ``windows_runner.py``
+       does this step instead and runs ``setup.py`` (if present);
+       *setup_script_path* does not apply there.
     3. Return immediately without waiting for the entrypoint to complete.
 
     Args:
@@ -337,6 +339,9 @@ async def execute_in_context(
             path (/tmp/automation-<run_id>.tar.gz) that prevents collisions
             when concurrent runs share the same filesystem (sandboxless mode)
         sandbox_id: Sandbox ID for logging (Cloud mode only)
+        setup_script_path: The automation's stored setup script, relative to
+            the extracted tarball. Validated at the request layer (relative,
+            no traversal, no shell metacharacters); quoted here regardless.
 
     Returns:
         DispatchResult with success status
@@ -418,7 +423,7 @@ async def execute_in_context(
                 f" && tar xzf {tarball_path} -C {work_dir}"
                 f" && rm -f {tarball_path}"
                 f" && cd {work_dir}"
-                f" && ([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {_setup_step(setup_script_path)}"
                 f" && {entrypoint}"
             )
 
@@ -491,6 +496,7 @@ async def run_automation(
     run_id: str | None = None,
     keep_sandbox: bool = False,
     work_dir: str = DEFAULT_WORK_DIR,
+    setup_script_path: str | None = None,
 ) -> AutomationResult:
     """Execute an automation end-to-end in a fresh sandbox (blocking).
 
@@ -499,7 +505,8 @@ async def run_automation(
 
     1. Create sandbox and wait until RUNNING.
     2. Get tarball into sandbox (upload bytes OR download from URL).
-    3. Extract it, run ``setup.sh`` (if present), then run *entrypoint*.
+    3. Extract it, run the setup script (see ``_setup_step``), then run
+       *entrypoint*.
     4. Wait for completion and return the result.
     5. Delete the sandbox (unless *keep_sandbox* is True).
 
@@ -507,8 +514,8 @@ async def run_automation(
     (downloaded directly inside sandbox via curl). URLs avoid downloading
     untrusted/large files on the automation service.
 
-    *env_vars* are exported before setup.sh and the entrypoint run,
-    so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
+    *env_vars* are exported before the setup script and the entrypoint run,
+    so setup can consume injected values such as ``AUTOMATION_API_URL``.
     The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``,
     ``AUTOMATION_CALLBACK_API_KEY``) are **always** injected so the SDK's
     ``local_agent_server_mode`` works and scripts can sign their completion
@@ -593,7 +600,7 @@ async def run_automation(
                 f"{env_prefix}mkdir -p {work_dir}"
                 f" && tar xzf {TARBALL_PATH} -C {work_dir}"
                 f" && cd {work_dir}"
-                f" && ([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {_setup_step(setup_script_path)}"
                 f" && {entrypoint}"
             )
 
@@ -638,6 +645,25 @@ async def run_automation(
 def _is_windows_path(path: str) -> bool:
     """Return True for a drive-qualified or UNC path such as ``C:\\runs\\1``."""
     return not path.startswith("/") and bool(PureWindowsPath(path).drive)
+
+
+DEFAULT_SETUP_SCRIPT = "setup.sh"
+
+
+def _setup_step(setup_script_path: str | None) -> str:
+    """Shell fragment that runs the automation's setup script.
+
+    The default root ``setup.sh`` stays optional, as it always has been. A
+    script the automation names explicitly must exist: skipping it silently
+    only moves the failure to the entrypoint, with nothing pointing at setup.
+    """
+    if not setup_script_path or setup_script_path == DEFAULT_SETUP_SCRIPT:
+        return f"([ ! -f {DEFAULT_SETUP_SCRIPT} ] || bash {DEFAULT_SETUP_SCRIPT})"
+    path = _shell_quote(setup_script_path)
+    missing = _shell_quote(
+        f"setup script not found in the tarball: {setup_script_path}"
+    )
+    return f"([ -f {path} ] || {{ echo {missing} >&2; exit 1; }}) && bash {path}"
 
 
 def _shell_quote(s: str) -> str:
