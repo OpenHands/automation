@@ -73,7 +73,10 @@ from openhands.automation.plugin_specs import (
 )
 from openhands.automation.preset_router import with_current_preset_runner
 from openhands.automation.subjects import conversation_id_for, service_account_id_of
-from openhands.automation.telemetry import capture_automation_event
+from openhands.automation.telemetry import (
+    capture_automation_event,
+    get_automation_backend_distinct_id,
+)
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.app_server_repos import (
@@ -1080,6 +1083,17 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars.update(automation_env_metadata(automation, run))
+    if backend.is_local_mode:
+        # Every local installation owns its rows as the same placeholder user
+        # (auth._get_local_user), so attribute conversations to the
+        # installation instead; never forward the shared placeholder.
+        installation_id = await get_automation_backend_distinct_id(
+            session_factory=session_factory
+        )
+        if installation_id:
+            env_vars["AUTOMATION_USER_ID"] = installation_id
+        else:
+            del env_vars["AUTOMATION_USER_ID"]
     inject_trace_context(env_vars)
     if lmnr_span_context := env_vars.get("LMNR_SPAN_CONTEXT"):
         env_vars["OPENHANDS_OBSERVABILITY_PARENT_SPAN_CONTEXT"] = lmnr_span_context
