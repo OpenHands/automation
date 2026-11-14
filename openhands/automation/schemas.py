@@ -1500,6 +1500,15 @@ class CapabilitiesResponse(_SetupContractModel):
             "that publishes a catalog. A source missing here accepts any key."
         ),
     )
+    event_labels_by_source: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "Human-readable names a setup UI can show for each pattern in "
+            "eventTypesBySource, per source. A source missing here (or a "
+            "pattern missing from its map) has no well-known name, so a "
+            "client shows the raw key."
+        ),
+    )
     triggers: TriggerCapabilities
     features: list[str]
     repo_providers: list[str] = Field(

@@ -23,6 +23,7 @@ from openhands.automation.draft_schemas import (
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.event_schemas.catalog import (
     SOURCE_LABELS,
+    event_labels,
     pattern_can_match,
     supported_event_patterns,
 )
@@ -108,6 +109,7 @@ async def get_capabilities(
             event_sources=[],
             event_types=[],
             event_types_by_source={},
+            event_labels_by_source={},
             triggers=TriggerCapabilities(),
             features=[],
             repo_providers=[],
@@ -148,6 +150,11 @@ async def get_capabilities(
             source: patterns
             for source in event_sources
             if (patterns := supported_event_patterns(source)) is not None
+        },
+        event_labels_by_source={
+            source: labels
+            for source in event_sources
+            if (labels := event_labels(source)) is not None
         },
         triggers=TriggerCapabilities(
             cron=CronCapabilities(
