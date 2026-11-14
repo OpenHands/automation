@@ -68,7 +68,10 @@ Routes: `GET /api/automation/v1/kv`, `GET /api/automation/v1/kv/{key}`,
   `--automation-id` for a missing claim).
 - Users, Agent Canvas and spawned conversations: the normal API key
   (`X-Session-API-Key` or `Authorization: Bearer <key>`) plus
-  `?automation_id=`; membership in the automation's org is the check.
+  `?automation_id=` of an automation in the caller's org. Reads need
+  `view_automations`; writes also need the right to edit that automation
+  (`manage_automations`, or being the user it runs as, never a service
+  account), 403 otherwise. The local key has both permissions.
 - Capability discovery: `GET /v1/capabilities` lists `kvStore` in
   `features` only while the secret is set.
 - Config: `AUTOMATION_KV_SECRET` (required; signs tokens, encrypts values),

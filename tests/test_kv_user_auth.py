@@ -2,7 +2,9 @@
 
 These tests verify that KV endpoints accept user authentication (API key /
 X-Session-API-Key) in addition to the existing per-run KV JWT tokens.  User
-auth requires an ``automation_id`` query parameter and checks org membership.
+auth requires an ``automation_id`` query parameter and checks org membership,
+``view_automations`` for reads and the right to modify the automation for
+writes.
 
 Uses SQLite (no Docker required) and overrides ``authenticate_request`` to
 mock user identity.
@@ -26,8 +28,17 @@ from openhands.automation.auth import (
 from openhands.automation.config import clear_config_cache, get_config
 from openhands.automation.db import get_session, set_sqlite_mode
 from openhands.automation.kv_router import _try_resolve_user
-from openhands.automation.models import Automation, AutomationKV, Base
-from openhands.automation.utils.kv import create_kv_token, encrypt_value
+from openhands.automation.models import (
+    Automation,
+    AutomationKV,
+    AutomationRunAsKind,
+    Base,
+)
+from openhands.automation.utils.kv import (
+    create_kv_token,
+    decrypt_value,
+    encrypt_value,
+)
 
 
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -36,6 +47,8 @@ OTHER_ORG_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 TEST_AUTOMATION_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_AUTOMATION_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 TEST_RUN_ID = uuid.UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+TEAMMATE_USER_ID = uuid.UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
+TEAMMATE_AUTOMATION_ID = uuid.UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
 TEST_KV_SECRET = "test-kv-secret-key-for-testing-only"
 
 # Base path prefix for all KV endpoints (matches app configuration)
@@ -234,16 +247,32 @@ async def test_automation(sqlite_session):
         entrypoint="uv run script.py",
     )
     sqlite_session.add(other)
+
+    # And one in the same org that runs as another member
+    teammate = Automation(
+        id=TEAMMATE_AUTOMATION_ID,
+        user_id=TEAMMATE_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="Teammate Automation",
+        trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+        tarball_path="s3://bucket/code.tar.gz",
+        entrypoint="uv run script.py",
+    )
+    sqlite_session.add(teammate)
     await sqlite_session.commit()
     return automation
 
 
-def seed_keys(session: AsyncSession, mapping: dict) -> None:
-    """Seed per-key rows for TEST_AUTOMATION_ID."""
+def seed_keys(
+    session: AsyncSession,
+    mapping: dict,
+    automation_id: uuid.UUID = TEST_AUTOMATION_ID,
+) -> None:
+    """Seed per-key rows for an automation (TEST_AUTOMATION_ID by default)."""
     for key, value in mapping.items():
         session.add(
             AutomationKV(
-                automation_id=TEST_AUTOMATION_ID,
+                automation_id=automation_id,
                 key=key,
                 value_encrypted=encrypt_value(TEST_KV_SECRET, value),
             )
@@ -381,6 +410,120 @@ class TestUserAuthErrors:
             headers={"X-Session-API-Key": "test-api-key"},
         )
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# User auth: permissions
+# ---------------------------------------------------------------------------
+
+
+class TestUserAuthPermissions:
+    """Reads need view_automations; writes need the right to modify the automation."""
+
+    async def test_member_can_read_a_teammates_automation(
+        self, kv_user_client, test_automation, sqlite_session
+    ):
+        """A member reads the KV data of an automation that runs as someone else."""
+        seed_keys(sqlite_session, {"cursor": 42}, TEAMMATE_AUTOMATION_ID)
+        await sqlite_session.commit()
+
+        resp = await kv_user_client.get(
+            f"{_KV}/cursor",
+            params={"automation_id": str(TEAMMATE_AUTOMATION_ID)},
+            headers={"Authorization": "Bearer test-api-key"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["value"] == 42
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("PUT", "/count", 2),
+            ("PATCH", "/config", {"path": "a", "value": 2}),
+            ("DELETE", "/count", None),
+            ("POST", "/count/incr", None),
+            ("POST", "/count/decr", None),
+            ("POST", "/items/lpush", {"value": "b"}),
+            ("POST", "/items/rpush", {"value": "b"}),
+            ("POST", "/items/lpop", None),
+            ("POST", "/items/rpop", None),
+            (
+                "POST",
+                "/batch",
+                {"operations": [{"op": "set", "key": "count", "value": 2}]},
+            ),
+        ],
+    )
+    async def test_member_cannot_change_a_teammates_automation(
+        self, kv_user_client, test_automation, sqlite_session, method, path, body
+    ):
+        """Every write route refuses a member who may not modify the automation."""
+        seeded = {"count": 1, "items": ["a"], "config": {"a": 1}}
+        seed_keys(sqlite_session, seeded, TEAMMATE_AUTOMATION_ID)
+        await sqlite_session.commit()
+
+        resp = await kv_user_client.request(
+            method,
+            f"{_KV}{path}",
+            params={"automation_id": str(TEAMMATE_AUTOMATION_ID)},
+            headers={"Authorization": "Bearer test-api-key"},
+            json=body,
+        )
+
+        assert resp.status_code == 403
+        stored = await sqlite_session.execute(
+            select(AutomationKV.key, AutomationKV.value_encrypted).where(
+                AutomationKV.automation_id == TEAMMATE_AUTOMATION_ID
+            )
+        )
+        assert {
+            key: decrypt_value(TEST_KV_SECRET, value) for key, value in stored
+        } == seeded
+
+    async def test_admin_can_write_a_teammates_automation(
+        self, kv_admin_client, test_automation
+    ):
+        """A holder of manage_automations writes any automation's KV in the org."""
+        resp = await kv_admin_client.put(
+            f"{_KV}/cursor",
+            params={"automation_id": str(TEAMMATE_AUTOMATION_ID)},
+            headers={"Authorization": "Bearer test-api-key"},
+            json=43,
+        )
+
+        assert resp.status_code == 201
+
+    async def test_caller_without_view_permission_cannot_read(
+        self, kv_user_client, mock_user, test_automation
+    ):
+        """Without view_automations even the caller's own automation is refused."""
+        mock_user.permissions = ["view_org_settings"]
+
+        resp = await kv_user_client.get(
+            _KV,
+            params={"automation_id": str(TEST_AUTOMATION_ID)},
+            headers={"Authorization": "Bearer test-api-key"},
+        )
+
+        assert resp.status_code == 403
+
+    async def test_service_account_cannot_write_the_automation_it_runs(
+        self, kv_user_client, mock_user, test_automation, sqlite_session
+    ):
+        """A service account's key gets no write; its runs use the KV token."""
+        mock_user.role = "service_account"
+        test_automation.run_as_kind = AutomationRunAsKind.SERVICE
+        await sqlite_session.commit()
+
+        resp = await kv_user_client.put(
+            f"{_KV}/cursor",
+            params={"automation_id": str(TEST_AUTOMATION_ID)},
+            headers={"Authorization": "Bearer test-api-key"},
+            json=1,
+        )
+
+        assert resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------
