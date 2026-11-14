@@ -6,6 +6,13 @@ from openhands.automation.config import normalize_git_sync_path
 from openhands.automation.utils.time import UtcDatetime
 
 
+# Bounds for an org's git command timeout. Below the floor a clone can't
+# finish; above the ceiling a hung remote holds the org's sync lease (5x the
+# timeout) for most of a day.
+MIN_GIT_TIMEOUT_SECONDS: float = 10.0
+MAX_GIT_TIMEOUT_SECONDS: float = 3600.0
+
+
 class GitSyncStatusResponse(BaseModel):
     enabled: bool
     repo_url: str
@@ -13,6 +20,7 @@ class GitSyncStatusResponse(BaseModel):
     path: str
     encryption_enabled: bool
     interval_seconds: int
+    git_timeout_seconds: float
     last_synced_commit: str | None
     last_synced_at: UtcDatetime | None
     last_error: str | None
@@ -58,6 +66,9 @@ class GitSyncConfigUpdateRequest(BaseModel):
 
     `interval_seconds` is how often to sync automatically; 0 is manual-only.
 
+    `git_timeout_seconds` bounds each git command of a cycle (clone, fetch,
+    push); `null` reverts to `AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS`.
+
     String fields are stripped, and a blank is treated as `null`. The UI sends
     `""` for a cleared text field, and storing that would wedge sync: both
     `git checkout -B ""` and `git add -A -- ""` are fatal.
@@ -65,6 +76,9 @@ class GitSyncConfigUpdateRequest(BaseModel):
 
     enabled: bool | None = None
     interval_seconds: int | None = Field(default=None, ge=0)
+    git_timeout_seconds: float | None = Field(
+        default=None, ge=MIN_GIT_TIMEOUT_SECONDS, le=MAX_GIT_TIMEOUT_SECONDS
+    )
     repo_url: str | None = None
     branch: str | None = None
     path: str | None = None

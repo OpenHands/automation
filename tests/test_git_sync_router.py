@@ -15,6 +15,9 @@ from openhands.automation.config import (
     clear_config_cache,
 )
 from openhands.automation.git_sync import SyncCycleResult
+from openhands.automation.git_sync.config_override import (
+    resolve_effective_git_sync_settings,
+)
 from openhands.automation.git_sync.router import _background_sync_tasks
 from openhands.automation.models import (
     Automation,
@@ -257,6 +260,44 @@ class TestGitSyncInterval:
         body = response.json()
         assert body["branch"] == "develop"
         assert body["interval_seconds"] == 60
+
+
+class TestGitSyncGitTimeout:
+    async def test_defaults_to_five_minutes(self, async_client):
+        response = await async_client.get("/api/automation/v1/git-sync/status")
+        assert response.json()["git_timeout_seconds"] == 300
+
+    async def test_env_var_sets_the_default(self, async_client, monkeypatch):
+        monkeypatch.setenv("AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS", "120")
+        clear_config_cache()
+        response = await async_client.get("/api/automation/v1/git-sync/status")
+        assert response.json()["git_timeout_seconds"] == 120
+
+    async def test_set_and_cleared_via_config(self, async_client, async_session):
+        put = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"git_timeout_seconds": 900}
+        )
+        assert put.status_code == 200
+        assert put.json()["git_timeout_seconds"] == 900
+
+        status = await async_client.get("/api/automation/v1/git-sync/status")
+        assert status.json()["git_timeout_seconds"] == 900
+
+        # The cycle reads the same merged settings the status reports.
+        settings = await resolve_effective_git_sync_settings(async_session, ORG_ID)
+        assert settings.git_sync_git_timeout_seconds == 900
+
+        cleared = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"git_timeout_seconds": None}
+        )
+        assert cleared.json()["git_timeout_seconds"] == 300
+
+    @pytest.mark.parametrize("value", [0, -5, 5, 3601])
+    async def test_rejects_out_of_range_values(self, async_client, value):
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"git_timeout_seconds": value}
+        )
+        assert response.status_code == 422
 
 
 class TestTriggerGitSync:
