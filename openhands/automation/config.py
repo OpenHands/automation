@@ -684,6 +684,12 @@ class ServiceSettings(BaseSettings):
     # conversation stays resumable in the UI meanwhile.
     sandbox_cleanup_delay_seconds: int = Field(default=0, ge=0)
 
+    # Cloud mode: how long a completed run's sandbox keeps running before it is
+    # deleted or paused. The agent server posts a partial batch of conversation
+    # events to the app server only after WebhookSpec.flush_delay (30 s) without
+    # a new event, so earlier teardown loses the conversation's last events.
+    sandbox_event_flush_grace_seconds: int = Field(default=35, ge=0)
+
     # How long an accepted event stays in `integration_events`. It bounds two
     # things: the dedupe window (a redelivery older than this is indistinguishable
     # from a new event) and the table, which otherwise grows with every delivery.

@@ -1,0 +1,27 @@
+# OpenHands/automation main @ 949c001. Real agent-server 1.62.0 + mock LLM, webhook -> fake app server;
+# real complete_run route + watchdog sweep every 5 s; fake runtime API kills (DELETE) / freezes (PAUSE) the agent-server.
+$ uv run pytest tests/demo_616.py          # default: sandbox deleted at completion
+t= 10.3s  run's conversation starts on the sandbox agent-server
+t= 11.0s  app server webhook <- batch of 5: ['ConversationStateUpdateEvent', 'SystemPromptEvent', 'MessageEvent', 'ConversationStateUpdateEvent', 'ConversationStateUpdateEvent']
+t= 11.2s  app server webhook <- batch of 5: ['ActionEvent', 'ConversationStateUpdateEvent', 'ConversationStateUpdateEvent', 'ObservationEvent', 'ConversationStateUpdateEvent']
+t= 11.3s  conversation finished; the agent-server holds 11 events, last: ['ConversationStateUpdateEvent', 'MessageEvent', 'ConversationStateUpdateEvent']
+t= 16.4s  POST /runs/<id>/complete -> COMPLETED
+t= 16.4s  runtime API: DELETE sandbox -> agent-server killed
+t= 31.5s  done watching (agent-server exited: True)
+
+agent-server (sandbox) events : 11
+app server received           : 10
+BUG: app server never got the last 2: ['MessageEvent(agent: final reply)', 'ConversationStateUpdateEvent(execution_status=finished)']
+
+$ AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS=600 uv run pytest tests/demo_616.py   # paused at completion
+t= 10.8s  run's conversation starts on the sandbox agent-server
+t= 11.4s  app server webhook <- batch of 5: ['ConversationStateUpdateEvent', 'SystemPromptEvent', 'MessageEvent', 'ConversationStateUpdateEvent', 'ConversationStateUpdateEvent']
+t= 11.6s  app server webhook <- batch of 5: ['ConversationStateUpdateEvent', 'ConversationStateUpdateEvent', 'ActionEvent', 'ObservationEvent', 'ConversationStateUpdateEvent']
+t= 11.7s  conversation finished; the agent-server holds 11 events, last: ['ConversationStateUpdateEvent', 'MessageEvent', 'ConversationStateUpdateEvent']
+t= 16.8s  POST /runs/<id>/complete -> COMPLETED
+t= 16.8s  runtime API: PAUSE sandbox -> agent-server frozen
+t= 97.3s  done watching (agent-server exited: False)
+
+agent-server (sandbox) events : 11
+app server received           : 10
+BUG: app server never got the last 2: ['MessageEvent(agent: final reply)', 'ConversationStateUpdateEvent(execution_status=finished)']
