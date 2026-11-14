@@ -21,6 +21,7 @@ from openhands.automation.config import Settings, clear_config_cache
 from openhands.automation.event_schemas import WebhookEvent, parse_event
 from openhands.automation.models import Automation, CustomWebhook
 from openhands.automation.providers import (
+    DEFAULT_BUILTIN_EVENT_ID_HEADER,
     DEFAULT_BUILTIN_SIGNATURE_HEADER,
     DEFAULT_VERIFIER,
     PROVIDERS,
@@ -52,7 +53,9 @@ from openhands.automation.schemas import (
 from openhands.automation.utils.webhook import get_webhook_config
 
 
-BUILTIN_PROVIDER_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
+BUILTIN_PROVIDER_SOURCES = frozenset(
+    {"azure_devops", "bitbucket_data_center", "github", "jira_dc"}
+)
 
 # Header bytes reach an app latin-1 decoded, so a signature header can carry a
 # non-ASCII str. `hmac.compare_digest` raises on those rather than returning
@@ -560,16 +563,19 @@ class TestProviderDescriptors:
             assert provider is not None
             assert provider.capabilities.tolerates_multiple_connections is False
 
-    def test_only_github_names_its_deliveries(self):
-        """`event_id_header` is opt-in, and only GitHub sends one today."""
-        github = get_provider("github")
-        assert github is not None
-        assert github.event_id_header == "X-GitHub-Delivery"
-
-        for source in sorted(BUILTIN_PROVIDER_SOURCES - {"github"}):
+    def test_forwarded_sources_name_their_deliveries_in_the_shared_header(self):
+        """The OpenHands server names every delivery it forwards in GitHub's
+        header, the way it signs every source into GitHub's signature header.
+        Azure DevOps gets no id from it, so its events are not deduplicated."""
+        assert DEFAULT_BUILTIN_EVENT_ID_HEADER == "X-GitHub-Delivery"
+        for source in ("bitbucket_data_center", "github", "jira_dc"):
             provider = get_provider(source)
             assert provider is not None
-            assert provider.event_id_header is None
+            assert provider.event_id_header == DEFAULT_BUILTIN_EVENT_ID_HEADER
+
+        azure_devops = get_provider("azure_devops")
+        assert azure_devops is not None
+        assert azure_devops.event_id_header is None
 
     def test_handshake_is_unset_on_every_builtin(self):
         """The hook is reserved and deliberately unwired, not forgotten."""
@@ -677,6 +683,33 @@ class TestGetWebhookConfigScheme:
         config = await get_webhook_config("legacy", org_id, async_session)
         assert config is not None
         assert config.signature_scheme == DEFAULT_VERIFIER
+
+
+class TestGetWebhookConfigEventIdHeader:
+    @pytest.mark.asyncio
+    async def test_delivery_header_comes_from_descriptor_or_row(
+        self, async_session, org_id, monkeypatch
+    ):
+        """Built-ins use their descriptor; a custom row uses its own field."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "shared")
+        builtin = await get_webhook_config("github", org_id, async_session)
+        assert builtin is not None
+        assert builtin.event_id_header == "X-GitHub-Delivery"
+
+        async_session.add(
+            CustomWebhook(
+                org_id=org_id,
+                name="Canvas",
+                source="github-events",
+                webhook_secret="whsec_abc",
+                event_id_header="X-GitHub-Delivery",
+            )
+        )
+        await async_session.commit()
+
+        custom = await get_webhook_config("github-events", org_id, async_session)
+        assert custom is not None
+        assert custom.event_id_header == "X-GitHub-Delivery"
 
 
 def _make_automation(org_id: uuid.UUID, user_id: uuid.UUID, source: str) -> Automation:

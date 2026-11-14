@@ -14,6 +14,9 @@ Related repositories have different responsibilities:
 
 If a PR is opened in the wrong repository, explicitly recommend closing and moving it to the repository that owns the change rather than merging it here. PRs must follow the repository's contribution and applicable code-review guidance.
 
+For issue triage, read [the review guide](.agents/skills/custom-codereview-guide.md#issue-triage-ownership-and-scope)
+for ownership and scope; PR evidence is not an issue-readiness requirement.
+
 ## Review-Facing Implementation Checklist
 
 Before opening a PR that changes scheduling, dispatch, run state, or sandbox
@@ -50,6 +53,8 @@ automation/
 │       ├── conversations.py    # Routes an event to its subject's conversation
 │       ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
 │       ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│       ├── draft_router.py     # Saved setup draft CRUD and test dispatch routes
+│       ├── draft_schemas.py    # Draft body validation and normalization
 │       ├── event_router.py     # Receives webhook events, triggers automations
 │       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
@@ -68,6 +73,7 @@ automation/
 │       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
 │       ├── trigger_matcher.py  # Trigger matching for event-based automations
 │       ├── uploads.py          # Tarball upload router
+│       ├── usage_router.py     # Instance-wide totals for the OpenHands server's usage report
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
 │       ├── webhook_router.py   # Custom webhook CRUD
 │       ├── backends/           # Execution backends (Cloud, Local)
@@ -93,7 +99,10 @@ automation/
 │       │   └── s3.py           # S3 implementation
 │       └── utils/              # Utility modules
 │           ├── api_key.py      # Per-user API key minting via service key
+│           ├── change_events.py  # Audit hook: one change row per automation write (before_flush)
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
+│           ├── enterprise_client.py  # Enterprise service API: org membership / account type
+│           ├── run_as.py       # Run-as identity: resolve on create, check on change, move uploads
 │           ├── run.py          # Run status transitions (create, mark, update)
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)
@@ -159,12 +168,13 @@ OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url h
 
 - Cloud product events use the server-authoritative Cloud user ID as the PostHog `distinct_id`; never trust a client telemetry header as Cloud identity.
 - Local Agent Canvas requests carry their consented PostHog identity in `X-OpenHands-Telemetry-Distinct-Id`. Store that value on newly created automations and runs so asynchronous lifecycle events retain the same identity.
+- `AUTOMATION_TELEMETRY_DEPLOYMENT_MODE` (`local` | `cloud` | `self_hosted`) overrides the `deployment_mode` / `deployment_kind` event labels; self-hosted Enterprise runs in cloud mode but must report `self_hosted` / `local`. Every `automation_created` capture also carries `automation_name` and `is_first_automation_in_org` (see `automation_created_properties`). Self-hosted deployments send it as `ohe_automation_created` (see `automation_created_event`).
 - Local events with no Canvas attribution fall back to the DB-backed automation backend ID. Keep `automation_backend_id` as an event property for installation analysis rather than substituting it for a known person identity.
 - Local consent is stored per frontend distinct ID. Attributed events require consent for their resolved identity; only unattributed backend-level events use the aggregate installation consent.
 
 ## PR-Specific Documents
 
-When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should **not** be merged to `main`, store them in a `.pr/` directory at the repository root.
+When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should not remain on `main`, store them in a `.pr/` directory at the repository root.
 
 ```bash
 mkdir -p .pr
@@ -175,13 +185,13 @@ mkdir -p .pr
 └── notes.md        # Any other PR-specific content
 ```
 
-The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. If artifacts reach `main`, including through a fork PR, the workflow opens or updates a cleanup PR against `main`.
+The `PR Artifacts` workflow warns reviewers when a PR adds or changes files under `.pr/`. After a same-repository or fork PR merges to `main`, the next release PR update removes the directory from `main` in the same push as its version bump (`cleanup-pr-artifacts` in `.github/workflows/release.yml`). No separate cleanup PR is opened, and the source PR is not modified.
 
 Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
-- Cleanup PRs follow the normal review and required-check protections for `main`.
+- Release-please PRs fail the required `unit-tests` check while their committed tree contains `.pr/`. Refresh the release PR by rerunning the latest `release` workflow on its target branch, then let the check rerun before merging.
 
 
 ## Dispatch Pipeline
@@ -189,36 +199,43 @@ Important notes:
 The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 
 1. **Fetch per-user API key** — `get_api_key_for_automation_run()` mints a key via the service key
-2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox
+2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox. A prompt or plugin preset tarball gets the service's current runner (`main.py`, `setup.sh`, `finish_tool_hook.py`) in place of the one baked in at creation (`with_current_preset_runner`); the stored tarball is not rewritten
 3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
 4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
-6. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
+6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. Presets also pass a finish-required plugin the service writes into the sandbox and, when their runner supports it, the repositories the app server can clone (`selected_repository`, `additional_repositories`): those on a provider and host the owner is connected to, from `provider_tokens_set` in `GET /api/v1/settings`. The runner clones the rest, and all of them if that read fails. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (a missing route or a body it cannot validate) logs `conversation_start_fallback` and the runner creates the conversation as before, unless the automation selected an agent profile: only the app server can launch one, so that run fails with `agent_profile_unsupported`. Any other refusal fails the run. Local mode and custom tarballs skip this step.
+7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
-7. **Return immediately** — Dispatcher does not wait for completion
+   - Native Windows local mode (the run's work dir is a drive path): the agent-server runs commands with cmd.exe, so the tarball, a JSON spec (env vars + entrypoint) and `windows_runner.py` are uploaded into the work dir and `uv run --no-project python <runner> <spec>` does the same steps, running `setup.py` instead of `setup.sh`
+8. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
-- **Happy path**: SDK inside sandbox POSTs to `POST /api/v1/automations/runs/{id}/complete`
+- **Happy path**: SDK inside sandbox POSTs to `POST /v1/runs/{id}/complete` on the service (injected as `AUTOMATION_CALLBACK_URL`; the service serves it under the `/api/automation` base path)
 - **Fallback**: Watchdog scans for runs past their `timeout_at` deadline, verifies status via sandbox bash history, and marks as COMPLETED or FAILED
 
 ### Env Vars Injected Into Sandbox
 
 | Variable | Source | Purpose |
 |----------|--------|---------|
-| `OPENHANDS_API_KEY` | Per-user key issued via service key | SDK auth for get_llm()/get_secrets() |
-| `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`) | Cloud API base URL |
-| `SANDBOX_ID` | From sandbox creation response | SDK reads for settings API calls |
-| `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
+| `OPENHANDS_API_KEY` | Per-user key issued via service key (cloud) | SDK auth for get_llm()/get_secrets() |
+| `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`, cloud) | Cloud API base URL |
+| `AUTOMATION_RUN_MODE` | Both backends (`cloud` / `local`), and `run_automation()` (`cloud`) | Tells the preset scripts which workspace to use. `AGENT_SERVER_URL` never decides this, whether it is set or not. Without the variable (a service from 1.27.0 or earlier) the presets treat `SANDBOX_ID` as cloud and its absence as local |
+| `AGENT_SERVER_URL` | Local backend only; never exported into a cloud sandbox | Agent-server URL from the sandbox's point of view. Scripts stored in existing automations (catalog bundles, scripts written from the openhands-automation skill, preset runners from 1.27.0 and earlier) read its presence as "local Agent Canvas", so a cloud run must not get it |
+| `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
+| `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
+| `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
-| `AUTOMATION_CONVERSATION_ID` | Derived by the service, `continue_conversation` runs only | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
+| `AUTOMATION_CONVERSATION_ID` | Derived by the service for `continue_conversation` runs; the started conversation's id when the app server started it | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
+| `AUTOMATION_CONVERSATION_STARTED` | `app_server`, cloud mode, when the service started the conversation | The stock runners attach to `AUTOMATION_CONVERSATION_ID` with `RemoteConversation.attach` instead of building an agent and creating it, and register it with the workspace so the completion callback reports it as the run's conversation. Absent otherwise |
+| `AUTOMATION_RUNNER_REPOS` | JSON list, set with `AUTOMATION_CONVERSATION_STARTED` when the app server cloned some of a preset's repositories | The repositories the preset runner still clones itself; without it the runner clones every entry of `repos_config.json` |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 
 ## Callback & Race Condition Handling
 
-- **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses standard API key auth — the per-user `OPENHANDS_API_KEY` passed into the sandbox is validated via `authenticate_request`, and ownership is verified against the run's parent automation.
+- **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses `authenticate_request`. Cloud runs use the per-user `OPENHANDS_API_KEY`; local runs use `AUTOMATION_CALLBACK_API_KEY` when configured (the service's local API key, not the agent-server session key). The authenticated user must own the run's parent automation.
 - **Optimistic locking**: Both callback endpoint and watchdog use `UPDATE ... WHERE status = 'RUNNING'` and check `CursorResult.rowcount` to handle races. Returns 409 on conflict.
 - **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`); when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused instead and the watchdog deletes it once `automation_runs.sandbox_cleanup_due_at` passes. On dispatch failure, the dispatcher deletes the sandbox immediately.
 
@@ -231,7 +248,7 @@ Supports **PostgreSQL** (cloud) and **SQLite** (local/self-hosted).
 | Config | `AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc. | `AUTOMATION_DB_URL=sqlite+aiosqlite:///path.db` |
 | Driver | asyncpg | aiosqlite |
 | Row locking | `FOR UPDATE SKIP LOCKED` | Skipped (single-process) |
-| Migrations | `alembic upgrade head` (manual) | Auto-run on startup |
+| Migrations | `alembic upgrade head`, or on startup with `AUTOMATION_RUN_MIGRATIONS_ON_STARTUP=true` | Auto-run on startup |
 
 ### Writing Migrations
 
@@ -282,6 +299,8 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 4. Uploads the tarball to storage (creates `TarballUpload` record)
 5. Creates the `Automation` record referencing the internal upload
 
+Each run swaps in the current `main.py`, `setup.sh` and `finish_tool_hook.py`, so an automation created on an earlier release runs today's runner with its own prompt and repository configuration.
+
 #### Files
 
 - `openhands/automation/preset_router.py` - Endpoint and tarball generation logic
@@ -303,7 +322,39 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
 - Generated presets use `.venv/bin/python main.py` on POSIX (`.venv/Scripts/python.exe main.py` on Windows) as the entrypoint and `setup.sh` as the setup script
+- Prompt and plugin preset tarballs created on Windows also carry `presets/setup.py`, the Python counterpart of their `setup.sh`; keep the two in step
 - Prompt and plugin presets live in separate subdirectories under `openhands/automation/presets/`
+
+## Private Plugin Sources
+
+A plugin-spec automation (and a plugin preset pinned for a service account)
+can use a plugin from a private repository. The source names its credential
+with a `${NAME}` placeholder as the URL user name or password, for example
+`https://x-access-token:${GITHUB_TOKEN}@github.com/org/plugins.git`. It is
+stored and returned with the placeholder; literal credentials are rejected
+(`AutomationPluginSource.validate_source`), and so are placeholders anywhere
+else in the source or in `ref`.
+
+- Every fetch resolves `NAME` for the identity the automation runs as and
+  hands the SDK `LookupSecret` references, never a value
+  (`plugin_secrets.py`): the create and PATCH preflight, the dispatch preflight,
+  `validate_required_plugins`, and the agent server's `POST /api/plugins/fetch`
+  (fresh references, after the sandbox starts).
+- Local mode resolves through the agent server's secret store,
+  `/api/settings/secrets/{name}`; the agent server's own reference uses
+  `AUTOMATION_SANDBOX_AGENT_SERVER_URL` when set.
+- Cloud mode asks the app server for short-lived references,
+  `POST /api/service/users/{user_id}/orgs/{org_id}/secret-lookups` with the
+  service key. A server without that route answers 404 `Not Found`, and the
+  source is refused with "not supported on this deployment yet".
+- `missing_secret`, `auth_failed`, `invalid_source` and refused lookups are
+  permanent and disable the automation; an unreachable lookup is transient.
+  Errors name the secret, never its value.
+- A conversation-runner run then has the app server start its conversation
+  with the same plugin spec, placeholder included (`_conversation_start`). The
+  sandbox's agent server fills the placeholder from the conversation's secrets,
+  which the app server may scope to the agent profile, and uses the checkout
+  the fetch pinned.
 
 ## Catalog Bundles
 
@@ -318,7 +369,8 @@ path gained is the catalog contract the presets already had:
 - **`template` provenance** (`TemplateProvenance` in `schemas.py`), accepted by
   all three creation endpoints and stored under `preset_metadata["template"]`.
   `find_existing_template_automation` (`utils/templates.py`) is consulted first,
-  so enabling an entry twice returns the existing automation with a 200.
+  so enabling an entry twice returns the existing non-draft automation with a
+  200 (a draft test's hidden DRAFT artifact is not an install).
   `record_first_run_outcome` keys on the same value, so bundles get first-run
   telemetry for free.
 - **Preflight**: `POST /v1/validate` accepts `"endpoint": "/v1"`. It validates
@@ -372,6 +424,7 @@ exactly one org, the deterministic local org from `auth.py`'s
   extracted files are committed as plain content and the mode would otherwise
   be lost on the way back in. Slugs are unique per org
   (`AutomationGitSyncState`, `(org_id, slug)`), not globally.
+- Plugin-spec automations also store `plugin_spec` (source, config and pinned required plugins) in `automation.yaml`, with `plugin-spec://runtime` as the source marker and no tarball files. Import validates the stored shape; execution preflight still fetches the manifest and validates its config schema using the run identity. Existing profile and secret references must be available on the destination. Older exports missing the spec are repaired from the live record on the next sync.
 - `git_sync_path` is validated by `normalize_git_sync_path`: repo-relative, no
   `..`, no leading/trailing slashes, never empty. It is joined onto the local
   checkout and passed to `git add -- <path>`, and each slug directory under it
@@ -417,19 +470,27 @@ exactly one org, the deterministic local org from `auth.py`'s
   rather than reporting success against an empty repo.
 - Automations created directly in git (e.g. via a PR) are imported into the org
   and stamped with the user who last saved the org's Git Sync config
-  (`configured_by_user_id`). They run as that user — in cloud mode that means
-  minting their API key, so they must stay a member of the org; re-saving the
-  config re-stamps the owner. Local mode falls back to `_get_local_user()`.
+  (`configured_by_user_id`), who is also their `created_by_user_id`. They run
+  as that user — in cloud mode that means minting their API key, so they must
+  stay a member of the org; re-saving the config re-stamps the owner. Local mode falls back to `_get_local_user()`.
   Outside local mode an org row that was never saved from the UI has no such
   user, so new directories are skipped (logged) while already-synced
   automations keep updating. Anything pushed to the configured repo becomes an
   automation that runs under that user: treat write access to the repo like
   admin access to the org.
+- Known limit: Git Sync updates do not check `run_as_kind`. A push to the repo
+  can enable an automation that runs as a service account, or change its plugin
+  refs, and the automation then runs with the service account's API key. The
+  `manage_automations` check covers the API only.
 - **Encryption**: set the org's encryption key (or, in local mode,
   `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
   SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're
   committed. Reading a repo written before encryption was turned on still
-  works — plaintext files pass through unchanged.
+  works — plaintext files pass through unchanged. Setting, changing or
+  clearing the key via `PUT /v1/git-sync/config` marks every synced
+  automation dirty (`apply_git_sync_config_override`), and the export treats
+  a plaintext file as stale while a key is set, so the next cycle rewrites
+  them all in one commit instead of leaving HEAD readable.
 - **Runtime config**: `PUT /v1/git-sync/config` configures, reconfigures or
   pauses/resumes the org's sync (repo/branch/path/token/encryption key/author)
   without a restart, via `git_sync/config_override.py` (overrides stored as

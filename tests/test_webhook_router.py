@@ -5,6 +5,7 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
+from openhands.automation.models import CustomWebhook
 from openhands.automation.schemas import (
     RESERVED_SOURCES,
     CustomWebhookCreate,
@@ -52,6 +53,12 @@ class TestCustomWebhookCreateSchema:
         """Reserved source 'github' should be rejected."""
         with pytest.raises(ValidationError) as exc_info:
             CustomWebhookCreate(name="Test", source="github")
+        assert "reserved source name" in str(exc_info.value)
+
+    def test_reserved_source_azure_devops_rejected(self):
+        """Reserved source 'azure_devops' should be rejected."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookCreate(name="Test", source="azure_devops")
         assert "reserved source name" in str(exc_info.value)
 
     def test_reserved_source_jira_dc_rejected(self):
@@ -143,6 +150,25 @@ class TestCustomWebhookCreateSchema:
                 signature_header="123-Header",
             )
 
+    def test_event_id_header_defaults_to_none(self):
+        """A webhook that names no delivery header opts out of deduplication."""
+        assert CustomWebhookCreate(name="Test", source="test").event_id_header is None
+
+    def test_event_id_header_is_validated(self):
+        """A configured delivery header can be named, but must be a valid one."""
+        data = CustomWebhookCreate(
+            name="Canvas",
+            source="github-events",
+            event_id_header="X-GitHub-Delivery",
+        )
+        assert data.event_id_header == "X-GitHub-Delivery"
+
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookCreate(
+                name="Test", source="test", event_id_header="Invalid Header!"
+            )
+        assert "alphanumeric" in str(exc_info.value).lower()
+
     def test_user_provided_secret(self):
         """User can provide their own webhook secret."""
         data = CustomWebhookCreate(
@@ -202,6 +228,25 @@ class TestCustomWebhookUpdateSchema:
             CustomWebhookUpdate(signature_header="Invalid Header!")
         assert "alphanumeric" in str(exc_info.value).lower()
 
+    def test_event_id_header_set_clear_and_omit(self):
+        """Omitted leaves it alone, a name sets it, null clears it."""
+        assert "event_id_header" not in CustomWebhookUpdate(name="W").model_dump(
+            exclude_unset=True
+        )
+        assert (
+            CustomWebhookUpdate(event_id_header="X-GitHub-Delivery").event_id_header
+            == "X-GitHub-Delivery"
+        )
+        assert CustomWebhookUpdate(event_id_header=None).model_dump(
+            exclude_unset=True
+        ) == {"event_id_header": None}
+
+    def test_invalid_event_id_header_update(self):
+        """An invalid delivery header in update is rejected."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookUpdate(event_id_header="Invalid Header!")
+        assert "alphanumeric" in str(exc_info.value).lower()
+
 
 class TestReservedSources:
     """Tests for reserved source names."""
@@ -212,7 +257,12 @@ class TestReservedSources:
 
     def test_builtin_sources_reserved(self):
         """Built-in sources should be reserved."""
-        assert RESERVED_SOURCES == {"bitbucket_data_center", "github", "jira_dc"}
+        assert RESERVED_SOURCES == {
+            "azure_devops",
+            "bitbucket_data_center",
+            "github",
+            "jira_dc",
+        }
 
 
 class TestWebhookSecretGeneration:
@@ -302,3 +352,106 @@ class TestWebhookUrlGeneration:
 
         # Restore cache
         clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_event_id_header_flows_through_the_api(async_client):
+    """Create persists it, PATCH sets it, and explicit null clears it."""
+    created = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={
+            "name": "Canvas GitHub Events",
+            "source": "github-events",
+            "event_id_header": "X-GitHub-Delivery",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["event_id_header"] == "X-GitHub-Delivery"
+    webhook_id = created.json()["id"]
+
+    cleared = await async_client.patch(
+        f"/api/automation/v1/webhooks/{webhook_id}",
+        json={"event_id_header": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["event_id_header"] is None
+
+    invalid = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={"name": "Bad", "source": "bad", "event_id_header": "Invalid Header!"},
+    )
+    assert invalid.status_code == 422
+
+
+async def _stored_webhook(session_factory, webhook_id: str) -> CustomWebhook:
+    """Read the row back through a fresh session, not the request's."""
+    async with session_factory() as session:
+        webhook = await session.get(CustomWebhook, uuid.UUID(webhook_id))
+        assert webhook is not None
+        return webhook
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ["name", "enabled", "event_key_expr", "signature_header"]
+)
+async def test_patch_null_on_required_field_is_422(
+    async_client, async_session_factory, field
+):
+    """A NOT NULL field refuses explicit null with 422 and leaves the row alone."""
+    created = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={"name": "Null Guard", "source": f"null-{field.replace('_', '-')}"},
+    )
+    assert created.status_code == 201
+    before = created.json()
+    url = f"/api/automation/v1/webhooks/{before['id']}"
+    stored_before = getattr(
+        await _stored_webhook(async_session_factory, before["id"]), field
+    )
+
+    response = await async_client.patch(url, json={field: None})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"] == ["body", field]
+    stored = await _stored_webhook(async_session_factory, before["id"])
+    assert getattr(stored, field) is not None
+    assert getattr(stored, field) == stored_before
+    after = await async_client.get(url)
+    assert after.json()[field] == before[field]
+
+
+@pytest.mark.asyncio
+async def test_patch_omitted_fields_kept_and_nullable_fields_cleared(
+    async_client, async_session_factory
+):
+    """Omitting a field keeps it; nullable fields store NULL when sent null."""
+    created = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={
+            "name": "Keep Me",
+            "source": "null-nullable",
+            "signature_scheme": "standard_webhooks",
+            "event_id_header": "X-GitHub-Delivery",
+        },
+    )
+    assert created.status_code == 201, created.text
+    webhook_id = created.json()["id"]
+    url = f"/api/automation/v1/webhooks/{webhook_id}"
+
+    response = await async_client.patch(
+        url, json={"signature_scheme": None, "event_id_header": None}
+    )
+
+    assert response.status_code == 200, response.text
+    stored = await _stored_webhook(async_session_factory, webhook_id)
+    assert stored.signature_scheme is None
+    assert stored.event_id_header is None
+    assert stored.name == "Keep Me"
+    assert stored.enabled is True
+    fetched = (await async_client.get(url)).json()
+    # A NULL scheme is served as the default verifier.
+    assert fetched["signature_scheme"] == "hmac_sha256_hex"
+    assert fetched["event_id_header"] is None
+    assert fetched["name"] == "Keep Me"
+    assert fetched["enabled"] is True

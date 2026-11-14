@@ -71,6 +71,16 @@ uv run alembic revision --autogenerate -m "description"
 uv run alembic upgrade head
 ```
 
+SQLite databases are migrated on startup. PostgreSQL databases are not, unless
+`AUTOMATION_RUN_MIGRATIONS_ON_STARTUP=true` (or `1`). With it set, each replica runs
+`alembic upgrade head` before it serves requests, and a failed migration stops it from
+starting. Replicas that start at the same time take turns through an advisory lock.
+
+Set `AUTOMATION_CREATE_DATABASE_IF_MISSING=true` (or `1`) to have the migrations create the
+PostgreSQL database first if it does not exist. This works both on startup and with
+`alembic upgrade head`. The migrations connect to the `postgres` database to create it, so
+the database user needs the `CREATEDB` privilege.
+
 ## Docker
 
 ```bash

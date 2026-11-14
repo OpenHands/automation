@@ -24,8 +24,14 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationState,
 )
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    span,
+)
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
+from openhands.automation.utils.change_events import SYSTEM_ACTOR, set_audit_actor
 from openhands.automation.utils.run import create_pending_run
 
 
@@ -178,6 +184,7 @@ async def poll_and_schedule(
     created_runs: list[AutomationRun] = []
 
     async with session_factory() as session:
+        set_audit_actor(session, SYSTEM_ACTOR)
         automations = await _fetch_enabled_automations(
             session, batch_size, poll_threshold
         )
@@ -207,9 +214,21 @@ async def poll_and_schedule(
 
         for automation in due_automations:
             try:
-                run = await create_pending_run(
-                    session, automation, trigger_source="cron"
+                scheduler_attributes = automation_attributes(automation)
+                scheduler_attributes.update(
+                    {
+                        "automation.run.trigger_source": "cron",
+                        "automation.trigger_source": "cron",
+                    }
                 )
+                with span("automation.scheduler.fire", scheduler_attributes):
+                    run = await create_pending_run(
+                        session, automation, trigger_source="cron"
+                    )
+                    add_event(
+                        "automation.run.created",
+                        automation_attributes(automation, run),
+                    )
                 created_runs.append(run)
                 schedule_properties = {
                     "trigger_source": "cron",

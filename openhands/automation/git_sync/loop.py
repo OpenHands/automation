@@ -11,6 +11,7 @@ import logging
 import shutil
 import tarfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,6 +37,7 @@ from openhands.automation.git_sync.client import (
     commit_and_push,
     diff_names,
     ensure_repo,
+    last_commit_author,
     pull,
 )
 from openhands.automation.git_sync.config_override import (
@@ -43,6 +45,11 @@ from openhands.automation.git_sync.config_override import (
     effective_interval_for,
     effective_settings_for,
     get_or_create_org_config,
+)
+from openhands.automation.git_sync.plugin_spec import (
+    PLUGIN_SPEC_RUNTIME,
+    validate_synced_plugin_entrypoint,
+    validate_synced_plugin_spec,
 )
 from openhands.automation.git_sync.serializer import (
     METADATA_FILENAME,
@@ -54,6 +61,7 @@ from openhands.automation.git_sync.serializer import (
     decrypt_file_tree,
     deserialize_automation,
     encrypt_file_tree,
+    is_encrypted,
     is_generated_path,
     serialize_automation,
 )
@@ -65,9 +73,18 @@ from openhands.automation.models import (
     TarballUpload,
     UploadStatus,
 )
-from openhands.automation.schemas import Trigger, validate_command_string
+from openhands.automation.observability_associations import (
+    validate_observability_associations,
+)
+from openhands.automation.schemas import (
+    Trigger,
+    continue_conversation_keep_alive,
+    validate_command_string,
+)
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
+from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.change_events import GIT_SYNC_ACTOR, set_audit_actor
 from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.state import (
@@ -78,6 +95,7 @@ from openhands.automation.utils.state import (
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
+    get_org_upload,
     is_valid_external_url,
     parse_internal_upload_id,
 )
@@ -274,6 +292,14 @@ def _remove_exported_automation(directory: Path) -> None:
         directory.rmdir()
 
 
+# Resolves the author of the commit behind an imported directory, for the log.
+CommitAuthor = Callable[[], Awaitable[str]]
+
+
+async def _unknown_author() -> str:
+    return "unknown author"
+
+
 # --- Import owner -------------------------------------------------------------
 
 
@@ -326,10 +352,7 @@ async def _read_tarball_bytes(
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, automation.org_id)
     if upload is None:
         raise TarballUnavailableError(
             f"automation {automation.id} references missing upload {upload_id}"
@@ -398,27 +421,24 @@ async def _stored_tarball_matches(
 
 
 async def _delete_superseded_upload(
-    session: AsyncSession, tarball_path: str, pending_storage_deletes: list[str]
+    session: AsyncSession, automation: Automation, pending_storage_deletes: list[str]
 ) -> None:
     """Mark the upload an automation just stopped pointing at for removal.
 
     Without this, every git-side edit left the previous upload row and file
     referenced by nothing, so routine PR edits accumulated a tarball copy per
     merge with no reaper to collect them. Mirrors the cleanup
-    `regenerate_preset_prompt_tarball` does for prompt edits.
+    `regenerate_preset_tarball` does for prompt and repository edits.
 
     Soft-deletes the record in the current transaction; the storage object is
     only queued on `pending_storage_deletes` and removed after the cycle's
     commit. Deleting before the commit destroyed the object irreversibly while
     a rollback revived the record, stranding it pointing at a missing object.
     """
-    upload_id = parse_internal_upload_id(tarball_path)
+    upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, automation.org_id)
     if upload is None or upload.deleted_at is not None:
         return
 
@@ -466,9 +486,7 @@ async def _resolve_tarball_path(
             slug,
         )
         if existing is not None:
-            await _delete_superseded_upload(
-                session, existing.tarball_path, pending_storage_deletes
-            )
+            await _delete_superseded_upload(session, existing, pending_storage_deletes)
         return new_path
 
     tarball_source = fields.get("tarball_source") or {}
@@ -506,7 +524,21 @@ async def _validate_and_resolve_fields(
         raise ValueError("automation.yaml missing required 'name' or 'entrypoint'")
 
     trigger = _TRIGGER_ADAPTER.validate_python(fields.get("trigger") or {})
-    entrypoint = validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
+    # A ValueError skips the directory, like every other invalid field.
+    keep_alive = continue_conversation_keep_alive(trigger, fields.get("keep_alive"))
+    observability_associations = validate_observability_associations(
+        fields.get("observability_associations")
+    )
+    # Export omits an empty list, so a missing key means no tags.
+    raw_tags = fields.get("tags") or []
+    if not isinstance(raw_tags, list):
+        raise ValueError("automation.yaml 'tags' must be a list")
+    tags = normalize_tags(raw_tags)
+    entrypoint = (
+        validate_synced_plugin_entrypoint(raw_entrypoint)
+        if fields.get("plugin_spec") is not None
+        else validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
+    )
     setup_script_path = validate_command_string(
         fields.get("setup_script_path"), "setup_script_path"
     )
@@ -516,9 +548,17 @@ async def _validate_and_resolve_fields(
     raw_enabled = fields.get("enabled")
 
     requested_enabled = parse_automation_enabled(raw_enabled)
-    if requested_enabled is None:
-        requested_enabled = True
-    state = model_automation_state(raw_state, requested_enabled)
+    if raw_state is None and raw_enabled is None:
+        # Neither key given (or both empty in YAML): an update keeps the current
+        # value, and a new folder imports INACTIVE so a person turns it on.
+        # Anyone who can push to the repo could otherwise start an automation
+        # as its owner.
+        state = existing.state if existing is not None else AutomationState.INACTIVE
+        requested_enabled = automation_state_enabled(state)
+    else:
+        if requested_enabled is None:
+            requested_enabled = True
+        state = model_automation_state(raw_state, requested_enabled)
     enabled = automation_state_enabled(state)
 
     if existing is not None and state == AutomationState.DRAFT != existing.state:
@@ -539,24 +579,47 @@ async def _validate_and_resolve_fields(
         validate_agent_profile_selection(agent_profile_id, fields.get("model"))
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
-    tarball_path = await _resolve_tarball_path(
-        session, fields, deserialized, slug, existing, pending_storage_deletes, owner
-    )
+    plugin_spec = fields.get("plugin_spec")
+    if plugin_spec is not None:
+        plugin_spec = validate_synced_plugin_spec(plugin_spec)
+        source = fields.get("tarball_source") or {}
+        if (
+            deserialized.tarball_bytes is not None
+            or source.get("url") != PLUGIN_SPEC_RUNTIME
+        ):
+            raise ValueError(
+                "plugin_spec requires plugin-spec://runtime without tarball files"
+            )
+        tarball_path = PLUGIN_SPEC_RUNTIME
+    else:
+        tarball_path = await _resolve_tarball_path(
+            session,
+            fields,
+            deserialized,
+            slug,
+            existing,
+            pending_storage_deletes,
+            owner,
+        )
 
     return {
         "name": name,
+        "description": fields.get("description"),
         "model": fields.get("model"),
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
+        "observability_associations": observability_associations,
+        "tags": tags,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
         "timeout": timeout,
-        "keep_alive": fields.get("keep_alive"),
+        "keep_alive": keep_alive,
         "enabled": enabled,
         "state": state,
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,
+        "plugin_spec": plugin_spec,
     }
 
 
@@ -568,6 +631,7 @@ async def _create_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     if owner is None:
         # A ValueError skips just this directory (see the import loop) rather
@@ -579,7 +643,14 @@ async def _create_automation_from_git(
     values = await _validate_and_resolve_fields(
         session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
     )
-    automation = Automation(user_id=owner.user_id, org_id=owner.org_id, **values)
+    # The admin who saved the Git Sync config both creates it and is its
+    # run-as identity.
+    automation = Automation(
+        user_id=owner.user_id,
+        created_by_user_id=owner.user_id,
+        org_id=owner.org_id,
+        **values,
+    )
     session.add(automation)
     await session.flush()
 
@@ -594,7 +665,19 @@ async def _create_automation_from_git(
             dirty=False,
         )
     )
-    logger.info("Imported new automation %s from git (slug=%r)", automation.id, slug)
+    logger.info(
+        "Imported new automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        slug,
+        await commit_author(),
+    )
+
+
+def _same_trigger(stored: dict, validated: dict) -> bool:
+    try:
+        return _TRIGGER_ADAPTER.validate_python(stored).model_dump() == validated
+    except ValidationError:
+        return False
 
 
 async def _update_automation_from_git(
@@ -604,6 +687,7 @@ async def _update_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     new_hash = compute_content_hash(dir_files)
     if new_hash == state.content_hash:
@@ -628,12 +712,21 @@ async def _update_automation_from_git(
         existing=automation,
     )
     for column, value in values.items():
+        if column == "trigger" and _same_trigger(automation.trigger, value):
+            # A stored trigger may lack defaults the validated one carries;
+            # do not rewrite it, so the audit row does not list it.
+            continue
         setattr(automation, column, value)
 
     state.content_hash = new_hash
     state.last_synced_commit = head
     state.last_synced_at = utcnow()
-    logger.info("Updated automation %s from git (slug=%r)", automation.id, state.slug)
+    logger.info(
+        "Updated automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        state.slug,
+        await commit_author(),
+    )
 
 
 async def _changed_slugs_since(
@@ -742,6 +835,13 @@ async def _import_from_git(
             continue
 
         dir_files = await asyncio.to_thread(_read_directory_files, directory)
+
+        # Looked up only when a create or update logs it, not for every
+        # directory the diff touched.
+        async def commit_author(directory: Path = directory) -> str:
+            author = await last_commit_author(workdir, directory, timeout)
+            return author or "unknown author"
+
         # A rolled-back savepoint revives the soft-deleted upload rows queued
         # inside it, so their storage paths must not stay pending for deletion.
         pending_snapshot = len(pending_storage_deletes)
@@ -765,6 +865,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
                     result.imported += 1
                 else:
@@ -775,6 +876,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
         except (ValidationError, ValueError) as e:
             del pending_storage_deletes[pending_snapshot:]
@@ -927,6 +1029,10 @@ def _exported_content_is_current(
     Compares decrypted plaintext, not the bytes on disk: Fernet uses a fresh IV
     per encryption, so identical content re-encrypts to different ciphertext
     and every cycle would look changed. Only serializer-owned paths count.
+
+    With a key set, a file still on disk as plaintext is stale too, though it
+    decrypts (passes through) to the same content: it was written before the
+    key was, and skipping it would leave it readable in the repo.
     """
     if not directory.is_dir():
         return False
@@ -937,6 +1043,8 @@ def _exported_content_is_current(
             if is_generated_path(name)
         }
         if encryption_key:
+            if not all(is_encrypted(content) for content in on_disk.values()):
+                return False
             on_disk = decrypt_file_tree(on_disk, encryption_key)
     except Exception:
         # Unreadable or undecryptable (rotated key, corrupted commit): treat as
@@ -955,6 +1063,36 @@ async def _export_dirty_automations(
     encryption_key: str,
     result: SyncCycleResult,
 ) -> bool:
+    # Repair exports from versions that silently omitted plugin_spec.
+    plugin_states = (
+        (
+            await session.execute(
+                select(AutomationGitSyncState)
+                .join(Automation, Automation.id == AutomationGitSyncState.automation_id)
+                .where(
+                    AutomationGitSyncState.org_id == org_id,
+                    AutomationGitSyncState.dirty.is_(False),
+                    Automation.tarball_path == PLUGIN_SPEC_RUNTIME,
+                    Automation.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for state in plugin_states:
+        directory = sync_root / state.slug
+        try:
+            files = await asyncio.to_thread(_read_directory_files, directory)
+            if encryption_key:
+                files = decrypt_file_tree(files, encryption_key)
+            metadata = deserialize_automation(files)
+        except (OSError, ValueError):
+            logger.warning("Could not inspect legacy plugin export %r", state.slug)
+            continue
+        if metadata is not None and "plugin_spec" not in metadata.fields:
+            state.dirty = True
+    await session.flush()
     states = (
         (
             await session.execute(
@@ -1187,6 +1325,8 @@ async def _run_sync_cycle_leased(
     # single-writer lock for the whole transaction, and a push can take up to
     # git_sync_git_timeout_seconds.
     async with session_factory() as session:
+        # Imports, updates and deletes from the repo are audited as Git sync.
+        set_audit_actor(session, GIT_SYNC_ACTOR)
         org_config = await get_or_create_org_config(session, org_id)
         last_commit = org_config.last_synced_commit
         owner = _import_owner(org_config)

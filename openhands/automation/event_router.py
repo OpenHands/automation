@@ -45,15 +45,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
-from openhands.automation.event_schemas.github import (
-    get_event_detection_rules,
-    get_supported_event_types,
+from openhands.automation.event_schemas.catalog import (
+    event_detection_rules,
+    supported_event_types,
 )
 from openhands.automation.ingest import AcceptedEvent, accept_event
+from openhands.automation.observability import span
 from openhands.automation.providers import (
     WebhookVerifier,
     get_header,
-    get_provider,
     get_verifier,
 )
 from openhands.automation.schemas import (
@@ -63,6 +63,7 @@ from openhands.automation.schemas import (
     WebhookConfig,
 )
 from openhands.automation.utils.webhook import (
+    get_event_automation_org_ids,
     get_requested_event_types,
     get_webhook_config,
 )
@@ -71,6 +72,10 @@ from openhands.automation.utils.webhook import (
 logger = logging.getLogger("automation.event_router")
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
+
+# Sources whose forwarder cannot tell an event's organization from the event
+# itself, so it delivers to every org with an automation on the source.
+FAN_OUT_SOURCES = frozenset({"jira_dc"})
 
 
 def _resolve_verifier(config: WebhookConfig, source: str) -> WebhookVerifier:
@@ -97,7 +102,7 @@ def _resolve_verifier(config: WebhookConfig, source: str) -> WebhookVerifier:
 async def requested_event_types(
     source: str,
     request: Request,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> RequestedEventTypesResponse:
     """Return event types currently requested by enabled automations.
 
@@ -128,26 +133,27 @@ async def requested_event_types(
     ):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    if source == "github":
-        # GitHub forwarding is prefiltered at the event-family level. Return all
-        # event families automation can parse so webhook forwarding still works
+    catalog = supported_event_types(source)
+    if catalog is not None:
+        # Forwarding of a cataloged source is prefiltered at the event-type
+        # level. Return every type automation can parse so forwarding works
         # before any org has configured automations; automation performs the
         # granular action/filter matching after receiving the event.
-        event_types = get_supported_event_types()
+        event_types = catalog
     else:
         event_types = await get_requested_event_types(source, session)
-    event_detection_rules = (
-        [
-            EventDetectionRule.model_validate(rule)
-            for rule in get_event_detection_rules()
-        ]
-        if source == "github"
-        else []
-    )
     return RequestedEventTypesResponse(
         source=source,
         event_types=event_types,
-        event_detection_rules=event_detection_rules,
+        event_detection_rules=[
+            EventDetectionRule.model_validate(rule)
+            for rule in event_detection_rules(source)
+        ],
+        org_ids=(
+            await get_event_automation_org_ids(source, session)
+            if source in FAN_OUT_SOURCES
+            else None
+        ),
     )
 
 
@@ -156,7 +162,7 @@ async def receive_event(
     org_id: uuid.UUID,
     source: str,
     request: Request,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> EventResponse:
     """
     Receive a webhook event from a source.
@@ -271,26 +277,36 @@ async def receive_event(
     #
     # The delivery id is where HTTP has to do the looking: `accept_event()`
     # deduplicates on whatever the transport hands it, and for a webhook that
-    # is a header. A provider that names no header, and every custom webhook,
+    # is a header. The header name comes from the resolved config, so a
+    # built-in provider uses its descriptor and a custom webhook uses whatever
+    # it configured; neither is hard-coded here. A source that names no header
     # yields None -- recorded, routed, not deduplicated.
-    provider = get_provider(source)
     provider_event_id = (
-        get_header(request.headers, provider.event_id_header)
-        if provider is not None and provider.event_id_header
+        get_header(request.headers, config.event_id_header)
+        if config.event_id_header
         else None
     )
-    result = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source=source,
-            event_key=event.event_key,
-            payload=webhook_payload,
-            provider_event_id=provider_event_id,
-            parsed_event=event if isinstance(event, BaseModel) else None,
-        ),
-        session,
-        request=request,
-    )
+    with span(
+        "automation.webhook.receive",
+        {
+            "automation.org_id": str(org_id),
+            "automation.event.source": source,
+            "automation.event.key": event.event_key,
+            "automation.event.provider_event_id": provider_event_id,
+        },
+    ):
+        result = await accept_event(
+            org_id,
+            AcceptedEvent(
+                source=source,
+                event_key=event.event_key,
+                payload=webhook_payload,
+                provider_event_id=provider_event_id,
+                parsed_event=event if isinstance(event, BaseModel) else None,
+            ),
+            session,
+            request=request,
+        )
 
     return EventResponse(
         received=True,

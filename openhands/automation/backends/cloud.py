@@ -6,8 +6,10 @@ Creates a fresh Cloud sandbox for each automation run.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Collection
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
@@ -19,14 +21,31 @@ from tenacity import (
     wait_exponential,
 )
 
-from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
+from openhands.automation.auth import X_ORG_ID_HEADER
+from openhands.automation.backends.base import (
+    ConversationStart,
+    ExecutionBackend,
+    ExecutionContext,
+    StartedConversation,
+)
 from openhands.automation.config import get_config
-from openhands.automation.exceptions import ConcurrencyLimitReachedError
+from openhands.automation.exceptions import (
+    ConcurrencyLimitReachedError,
+    ConversationStartError,
+    ConversationStartUnavailable,
+    DailySandboxLimitReachedError,
+    SandboxProvisioningError,
+)
 from openhands.automation.models import AutomationRun
+from openhands.automation.plugin_secrets import (
+    PluginSourceSecrets,
+    cloud_plugin_source_secrets,
+)
 from openhands.automation.utils.api_key import get_api_key_for_automation_run
 from openhands.automation.utils.sandbox import (
     cleanup_sandbox,
     delete_sandbox,
+    find_agent_server_url,
     verify_run_status,
 )
 
@@ -62,6 +81,20 @@ def _concurrency_limit_detail(resp: httpx.Response) -> dict | None:
     a flat ``{"error": ...}`` shape. This is distinct from a transient
     rate-limit 429, which should still be retried (see ``_is_rate_limit_error``).
     """
+    return _quota_limit_detail(resp, "CONCURRENCY_LIMIT_REACHED")
+
+
+def _daily_sandbox_limit_detail(resp: httpx.Response) -> dict | None:
+    """Return the DAILY_SANDBOX_LIMIT_REACHED detail dict if the response is
+    the per-user daily sandbox quota 429, else None.
+
+    Like the concurrency limit this must not be retried (see
+    ``_is_rate_limit_error``): the quota only resets at UTC midnight.
+    """
+    return _quota_limit_detail(resp, "DAILY_SANDBOX_LIMIT_REACHED")
+
+
+def _quota_limit_detail(resp: httpx.Response, error_code: str) -> dict | None:
     if resp.status_code != 429:
         return None
     try:
@@ -69,9 +102,100 @@ def _concurrency_limit_detail(resp: httpx.Response) -> dict | None:
     except Exception:
         return None
     detail = body.get("detail", body) if isinstance(body, dict) else None
-    if isinstance(detail, dict) and detail.get("error") == "CONCURRENCY_LIMIT_REACHED":
+    if isinstance(detail, dict) and detail.get("error") == error_code:
         return detail
     return None
+
+
+# Runtime ingress readiness failures are a fixed set of codes, safe to show.
+_INGRESS_STATUS_DETAIL = re.compile(r"runtime_ingress:[a-z_]+(?::\d{3})?")
+# Raw pod/scheduling text can leak registry hosts, secret names and node
+# taints, so only its class is recorded (same markers as the app server).
+_STATUS_DETAIL_CLASSES = (
+    (("ImagePullBackOff", "ErrImagePull"), "image_pull_error"),
+    (("CreateContainerConfigError",), "container_config_error"),
+    (("CreateContainerError",), "container_create_error"),
+    (("Insufficient cpu",), "insufficient_cpu"),
+    (("Insufficient memory",), "insufficient_memory"),
+    (("Insufficient ephemeral-storage",), "insufficient_ephemeral_storage"),
+    (("Insufficient pods",), "insufficient_pods"),
+    (
+        (
+            "untolerated taint",
+            "node affinity",
+            "node selector",
+            "volume node affinity conflict",
+            "topology spread",
+            "unbound",
+        ),
+        "scheduling_constraint",
+    ),
+)
+
+
+def summarize_status_detail(detail: Any) -> str | None:
+    """Return a user-safe summary of a runtime ``status_detail``."""
+    if not isinstance(detail, str) or not detail:
+        return None
+    if _INGRESS_STATUS_DETAIL.fullmatch(detail):
+        return detail
+    for markers, label in _STATUS_DETAIL_CLASSES:
+        if any(marker in detail for marker in markers):
+            return label
+    return "unclassified"
+
+
+# The app server's conversation start: it attaches to the run's sandbox when
+# ``sandbox_id`` is set and applies the owner's profile, MCP servers and secrets.
+APP_CONVERSATIONS_PATH = "/api/v1/app-conversations"
+# The owner's settings; ``provider_tokens_set`` names their git connections.
+SETTINGS_PATH = "/api/v1/settings"
+# A slow settings read only means the runner clones every repository itself.
+GIT_CONNECTIONS_TIMEOUT_SECONDS = 15.0
+
+
+def _lacks_conversation_start(resp: httpx.Response) -> bool:
+    """Whether an error response means the app server has no such contract.
+
+    That is a missing route (FastAPI's plain 404 or a 405) or a body it cannot
+    validate (a 422 listing field errors, as for an unknown ``trigger``). A 404
+    or 422 with the app server's own detail, such as an agent profile it cannot
+    find or resolve, is a refusal: falling back would run the default agent.
+    """
+    if resp.status_code == 405:
+        return True
+    if resp.status_code not in (404, 422):
+        return False
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        return resp.status_code == 404
+    if resp.status_code == 404:
+        return detail == "Not Found"
+    return isinstance(detail, list)
+
+
+def _response_detail(resp: httpx.Response) -> str:
+    """The ``detail`` of an API error response, else its text, kept short."""
+    try:
+        body = resp.json()
+    except Exception:
+        return resp.text[:500]
+    if isinstance(body, dict) and body.get("detail") is not None:
+        detail = body["detail"]
+        if not isinstance(detail, str):
+            detail = json.dumps(detail)
+        return detail[:500]
+    return resp.text[:500]
+
+
+def launched_agent_profile_id(conversation: dict[str, Any]) -> str | None:
+    """The profile an app-server conversation reports it launched from."""
+    launched = conversation.get("launched_agent_profile")
+    if not isinstance(launched, dict):
+        return None
+    profile_id = launched.get("agent_profile_id")
+    return str(profile_id) if profile_id else None
 
 
 class CloudSandboxBackend(ExecutionBackend):
@@ -181,9 +305,206 @@ class CloudSandboxBackend(ExecutionBackend):
         if ctx.sandbox_id and ctx.api_url and ctx.api_key:
             await delete_sandbox(client, ctx.api_url, ctx.api_key, ctx.sandbox_id)
 
+    async def start_conversation(
+        self,
+        client: httpx.AsyncClient,
+        ctx: ExecutionContext,
+        start: ConversationStart,
+    ) -> StartedConversation:
+        """Ask the app server to start the run's conversation in its sandbox.
+
+        The request carries no prompt and no secrets: the runner sends the
+        prompt once it has attached, and the app server resolves the LLM key,
+        MCP servers and secrets itself. Raises ConversationStartUnavailable
+        when the app server has no such contract (the caller falls back to the
+        runner creating the conversation) and ConversationStartError when it
+        refused or failed.
+        """
+        if not ctx.sandbox_id:
+            raise ConversationStartError(
+                "Cloud runs need a sandbox to start the conversation in",
+                code="no_sandbox",
+            )
+        body: dict[str, Any] = {
+            "sandbox_id": ctx.sandbox_id,
+            "trigger": "automation",
+            "tags": start.tags,
+        }
+        if start.agent_profile_id:
+            body["agent_profile_id"] = start.agent_profile_id
+        if start.llm_profile:
+            body["llm_profile"] = start.llm_profile
+        if start.conversation_id:
+            body["conversation_id"] = start.conversation_id
+        if start.plugins:
+            body["plugins"] = start.plugins
+        if start.repositories:
+            primary, *others = start.repositories
+            body["selected_repository"] = primary["repository"]
+            body["git_provider"] = primary["git_provider"]
+            if primary.get("branch"):
+                body["selected_branch"] = primary["branch"]
+            if others:
+                body["additional_repositories"] = [
+                    {k: v for k, v in repo.items() if v is not None} for repo in others
+                ]
+                # As the runner did: a repository that fails to clone fails the run.
+                body["require_all"] = True
+
+        task = await self._app_server_request(
+            client, "POST", APP_CONVERSATIONS_PATH, json=body, start_request=True
+        )
+        conversation_id = await self._wait_for_start_task(client, task)
+        conversations = await self._app_server_request(
+            client, "GET", APP_CONVERSATIONS_PATH, params={"ids": conversation_id}
+        )
+        conversation = (
+            conversations[0]
+            if isinstance(conversations, list) and conversations
+            else None
+        )
+        if not isinstance(conversation, dict):
+            raise ConversationStartError(
+                f"Conversation {conversation_id} is not visible to its owner",
+                code="conversation_missing",
+            )
+        return StartedConversation(
+            conversation_id=conversation_id,
+            agent_profile_id=launched_agent_profile_id(conversation),
+            reports_repositories="additional_repositories" in conversation,
+        )
+
+    async def git_connections(
+        self,
+        client: httpx.AsyncClient,
+        ctx: ExecutionContext,  # noqa: ARG002
+    ) -> dict[str, str | None]:
+        """The git providers the run's owner is connected to, with their hosts.
+
+        The app server clones a repository only through the owner's connection
+        to its provider, on that connection's host. ``provider_tokens_set`` in
+        the owner's settings lists them as ``{provider: host}``; it holds hosts,
+        not tokens.
+        """
+        settings = await self._app_server_request(
+            client,
+            "GET",
+            SETTINGS_PATH,
+            action="read the owner's git connections",
+            timeout=GIT_CONNECTIONS_TIMEOUT_SECONDS,
+        )
+        connections = (
+            settings.get("provider_tokens_set") if isinstance(settings, dict) else None
+        )
+        if not isinstance(connections, dict):
+            return {}
+        return {
+            str(provider): host if isinstance(host, str) and host else None
+            for provider, host in connections.items()
+        }
+
+    async def _wait_for_start_task(
+        self, client: httpx.AsyncClient, task: dict[str, Any]
+    ) -> str:
+        """Poll a conversation start task until READY; return the conversation id."""
+        task_id = task.get("id")
+        elapsed = 0.0
+        while True:
+            status = task.get("status")
+            if status == "READY" and task.get("app_conversation_id"):
+                return str(task["app_conversation_id"])
+            if status == "ERROR":
+                raise ConversationStartError(
+                    "OpenHands API failed to start the conversation: "
+                    f"{task.get('detail') or 'unknown error'}",
+                    code="start_task_error",
+                )
+            if elapsed >= self._ready_timeout:
+                raise ConversationStartError(
+                    f"Conversation start task {task_id} not ready after "
+                    f"{self._ready_timeout}s",
+                    transient=True,
+                    code="start_task_timeout",
+                )
+            await asyncio.sleep(self._poll_interval)
+            elapsed += self._poll_interval
+            tasks = await self._app_server_request(
+                client,
+                "GET",
+                f"{APP_CONVERSATIONS_PATH}/start-tasks",
+                params={"ids": task_id},
+            )
+            if not (isinstance(tasks, list) and tasks and isinstance(tasks[0], dict)):
+                raise ConversationStartError(
+                    f"Conversation start task {task_id} disappeared",
+                    code="start_task_missing",
+                )
+            task = tasks[0]
+
+    async def _app_server_request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        start_request: bool = False,
+        action: str = "start the conversation",
+        **kwargs: Any,
+    ) -> Any:
+        """Call the OpenHands API as the run's user, in the automation's org.
+
+        429s are retried and a 401/403 re-mints the key once, as for sandboxes.
+        ``start_request`` marks the conversation start, whose errors can also
+        mean an app server without that contract.
+        """
+
+        @self._retry
+        async def _do_request() -> Any:
+            resp = await client.request(
+                method,
+                f"{self.api_url}{path}",
+                headers={
+                    "Authorization": f"Bearer {await self._ensure_api_key()}",
+                    X_ORG_ID_HEADER: str(self._run.automation.org_id),
+                },
+                **kwargs,
+            )
+            if resp.status_code in (401, 403, 429) or resp.status_code >= 500:
+                resp.raise_for_status()
+            if start_request and _lacks_conversation_start(resp):
+                raise ConversationStartUnavailable(
+                    "OpenHands API cannot start conversations in a sandbox "
+                    f"(HTTP {resp.status_code}): {_response_detail(resp)}",
+                    status_code=resp.status_code,
+                )
+            if resp.status_code >= 400:
+                raise ConversationStartError(
+                    f"OpenHands API refused to {action} "
+                    f"(HTTP {resp.status_code}): {_response_detail(resp)}",
+                    status_code=resp.status_code,
+                )
+            return resp.json()
+
+        return await self._with_auth_retry(_do_request)
+
     async def get_api_key(self) -> str:
         """Return the per-user API key (minting if needed)."""
         return await self._ensure_api_key()
+
+    async def plugin_source_secrets(
+        self, client: httpx.AsyncClient, names: Collection[str]
+    ) -> PluginSourceSecrets:
+        """Lookup references for the identity the automation runs as."""
+        if not names:
+            return PluginSourceSecrets()
+        automation = self._run.automation
+        return await cloud_plugin_source_secrets(
+            client,
+            names,
+            user_id=automation.user_id,
+            org_id=automation.org_id,
+            automation_id=automation.id,
+        )
 
     def build_env_vars(self) -> dict[str, str]:
         """Build Cloud mode environment variables.
@@ -198,6 +519,9 @@ class CloudSandboxBackend(ExecutionBackend):
         return {
             "OPENHANDS_API_KEY": self._api_key,
             "OPENHANDS_CLOUD_API_URL": self.api_url,
+            # The presets pick their workspace from this. Cloud runs never
+            # get AGENT_SERVER_URL; scripts read it as a local Agent Canvas.
+            "AUTOMATION_RUN_MODE": "cloud",
         }
 
     async def verify_run(self, run_id: str) -> VerificationResult:
@@ -248,40 +572,82 @@ class CloudSandboxBackend(ExecutionBackend):
     ) -> tuple[str, str, str]:
         """Create a sandbox and poll until RUNNING.
 
-        Returns (sandbox_id, session_api_key, agent_server_url).
+        Returns (sandbox_id, session_api_key, agent_server_url). If the sandbox
+        never becomes usable it is deleted before the error propagates.
         """
         if ready_timeout is None:
             ready_timeout = self._ready_timeout
 
         headers = {"Authorization": f"Bearer {api_key}"}
         sandbox_id = await self._create_sandbox(client, headers)
+        try:
+            return await self._wait_until_running(
+                client, sandbox_id, headers, ready_timeout
+            )
+        except Exception:
+            # Nothing has run in it yet; don't leave it counting against the
+            # user's sandbox limit. delete_sandbox never raises.
+            await delete_sandbox(client, self.api_url, api_key, sandbox_id)
+            raise
 
+    async def _wait_until_running(
+        self,
+        client: httpx.AsyncClient,
+        sandbox_id: str,
+        headers: dict[str, str],
+        ready_timeout: float,
+    ) -> tuple[str, str, str]:
         elapsed = 0.0
+        sb: dict[str, Any] = {}
         while elapsed < ready_timeout:
             sb = await self._poll_sandbox(client, sandbox_id, headers)
             status = sb.get("status", "UNKNOWN")
 
             if status == "RUNNING":
-                result = self._find_agent_server_url(sb)
+                result = find_agent_server_url(sb)
                 if result is None:
                     raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
                 agent_url, session_key = result
                 return sandbox_id, session_key, agent_url
 
             if status in ("ERROR", "MISSING"):
-                error_code = sb.get("error_code", "")
-                error_message = sb.get("error_message", "")
-                error_detail = f"status={status}"
-                if error_code:
-                    error_detail += f", error_code={error_code}"
-                if error_message:
-                    error_detail += f", error_message={error_message}"
-                raise RuntimeError(f"Sandbox {sandbox_id} failed: {error_detail}")
+                raise self._provisioning_error(sandbox_id, sb, f"status={status}")
 
             await asyncio.sleep(self._poll_interval)
             elapsed += self._poll_interval
 
-        raise TimeoutError(f"Sandbox {sandbox_id} not ready after {ready_timeout}s")
+        raise self._provisioning_error(
+            sandbox_id,
+            sb,
+            f"not ready after {ready_timeout}s, status={sb.get('status', 'UNKNOWN')}",
+            timed_out=True,
+        )
+
+    @staticmethod
+    def _provisioning_error(
+        sandbox_id: str,
+        sandbox: dict[str, Any],
+        what: str,
+        timed_out: bool = False,
+    ) -> SandboxProvisioningError:
+        raw_detail = sandbox.get("status_detail")
+        reason = summarize_status_detail(raw_detail)
+        logger.warning(
+            "Sandbox %s failed to provision: %s, status_detail=%r",
+            sandbox_id,
+            what,
+            raw_detail,
+        )
+        message = f"Sandbox failed to start: {what}"
+        if reason:
+            message += f", status_detail={reason}"
+        return SandboxProvisioningError(
+            message,
+            sandbox_id=sandbox_id,
+            status=str(sandbox.get("status", "UNKNOWN")),
+            reason=reason,
+            timed_out=timed_out,
+        )
 
     async def _create_sandbox(
         self, client: httpx.AsyncClient, headers: dict[str, str]
@@ -300,6 +666,13 @@ class CloudSandboxBackend(ExecutionBackend):
             if detail is not None:
                 raise ConcurrencyLimitReachedError(
                     detail.get("message") or "Concurrency limit reached"
+                )
+            # Same for the daily sandbox quota: it only resets at UTC
+            # midnight, so retrying now cannot succeed.
+            detail = _daily_sandbox_limit_detail(resp)
+            if detail is not None:
+                raise DailySandboxLimitReachedError(
+                    detail.get("message") or "Daily sandbox limit reached"
                 )
             resp.raise_for_status()
             return resp.json()["id"]
@@ -322,14 +695,7 @@ class CloudSandboxBackend(ExecutionBackend):
             items = resp.json()
             if not items:
                 raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
-            return items[0]
+            # The batch endpoint returns null for an unknown id.
+            return items[0] or {"id": sandbox_id, "status": "MISSING"}
 
         return await _do_poll()
-
-    @staticmethod
-    def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
-        """Extract (agent_url, session_key) from sandbox response."""
-        for url_info in sandbox.get("exposed_urls") or []:
-            if url_info.get("name") == "AGENT_SERVER":
-                return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
-        return None

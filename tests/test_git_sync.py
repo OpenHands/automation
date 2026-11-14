@@ -33,18 +33,29 @@ from openhands.automation.git_sync.client import (
 )
 from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
+    effective_settings_for,
     get_or_create_org_config,
 )
-from openhands.automation.git_sync.loop import _delete_superseded_upload
-from openhands.automation.git_sync.serializer import encrypt_file_tree
+from openhands.automation.git_sync.loop import (
+    TarballUnavailableError,
+    _delete_superseded_upload,
+    _read_tarball_bytes,
+)
+from openhands.automation.git_sync.serializer import (
+    decrypt_file_tree,
+    encrypt_file_tree,
+)
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
+    AutomationState,
     Base,
     TarballUpload,
     UploadStatus,
 )
+from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
 from openhands.automation.storage.local import LocalFileStore
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.tarball_validation import parse_internal_upload_id
@@ -622,6 +633,59 @@ class TestRunSyncCycle:
             automation = await session.get(Automation, automation_id)
             assert automation.entrypoint == "python main.py --flag"
 
+    async def test_git_update_writes_change_event(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        editor_dir = origin.parent / "editor"
+        await ensure_repo(editor_dir, f"file://{origin}", "main", "", 30)
+        await pull(editor_dir, "main", "", 30)
+        yaml_path = (
+            editor_dir / "automations" / "my-first-automation" / "automation.yaml"
+        )
+        yaml_path.write_text(
+            yaml_path.read_text().replace(
+                "entrypoint: python main.py", "entrypoint: python main.py --flag"
+            )
+        )
+        await commit_and_push(
+            editor_dir,
+            "automations",
+            "edit",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
+        )
+
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        async with sqlite_session_factory() as session:
+            (event,) = (
+                (
+                    await session.execute(
+                        select(AutomationChangeEvent).where(
+                            AutomationChangeEvent.automation_id == automation_id,
+                            AutomationChangeEvent.action != "create",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert event.action == "git_sync_update"
+        assert event.actor_kind == "git_sync"
+        assert event.actor_user_id is None
+        assert event.changed_fields == ["entrypoint"]
+
     async def test_import_only_reads_directories_that_actually_changed(
         self,
         sqlite_session_factory,
@@ -804,6 +868,13 @@ class TestRunSyncCycle:
             automation = await session.get(Automation, automation_id)
             assert automation.deleted_at is not None
             assert automation.enabled is False
+            (event,) = await session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation_id,
+                    AutomationChangeEvent.action == "git_sync_delete",
+                )
+            )
+            assert (event.actor_kind, event.actor_user_id) == ("git_sync", None)
 
     async def test_new_automation_authored_directly_in_git_is_imported(
         self, sqlite_session_factory, git_settings, service_settings, origin
@@ -1134,6 +1205,163 @@ class TestEncryption:
         async with sqlite_session_factory() as session:
             automations = (await session.execute(select(Automation))).scalars().all()
             assert automations == []
+
+
+class TestEncryptionKeyChangeReExports:
+    """Setting, clearing or rotating the key re-exports every automation.
+
+    The export only writes dirty automations, so without this a newly set key
+    left every already-synced automation readable in the repository.
+    """
+
+    _NAMES: tuple[str, ...] = ("First Automation", "Second Automation")
+    _SLUGS: tuple[str, ...] = ("first-automation", "second-automation")
+
+    @pytest.fixture(autouse=True)
+    def _wrapping_secret(self, monkeypatch, git_settings):
+        from openhands.automation.config import clear_config_cache
+
+        # Lets `apply_git_sync_config_override` wrap the key at rest.
+        monkeypatch.setenv("AUTOMATION_GIT_SYNC_SECRET", "test-wrapping-secret")
+        clear_config_cache()
+
+    @staticmethod
+    def _committed_files(origin: Path, slug: str) -> dict[str, bytes]:
+        """The generated files of `slug` at the remote's HEAD."""
+        names = [
+            f"automations/{slug}/automation.yaml",
+            f"automations/{slug}/tarball/main.py",
+        ]
+        return {
+            name: subprocess.run(
+                ["git", "--git-dir", str(origin), "show", f"main:{name}"],
+                check=True,
+                capture_output=True,
+            ).stdout
+            for name in names
+        }
+
+    async def _save_key(self, session_factory, key: str | None) -> GitSyncSettings:
+        """Save the key as `PUT /config` does; return the settings a cycle uses."""
+        async with session_factory() as session:
+            await _apply_override(session, {"git_sync_encryption_key": key})
+            await session.commit()
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            return effective_settings_for(org_config)
+
+    async def _sync(self, session_factory, settings, service_settings):
+        return await run_sync_cycle(
+            session_factory, LOCAL_ORG_ID, settings, service_settings
+        )
+
+    async def _create_and_sync(
+        self, session_factory, file_store, service_settings, key: str | None
+    ) -> None:
+        for name in self._NAMES:
+            await _create_internal_automation(session_factory, file_store, name=name)
+        settings = await self._save_key(session_factory, key)
+        first = await self._sync(session_factory, settings, service_settings)
+        assert first.exported == len(self._NAMES)
+
+    async def _assert_no_dirty_states(self, session_factory) -> None:
+        async with session_factory() as session:
+            states = (
+                (await session.execute(select(AutomationGitSyncState))).scalars().all()
+            )
+            assert len(states) == len(self._NAMES)
+            assert not any(state.dirty for state in states)
+
+    async def _assert_automations_untouched(self, session_factory) -> None:
+        async with session_factory() as session:
+            automations = (await session.execute(select(Automation))).scalars().all()
+            assert len(automations) == len(self._NAMES)
+            assert all(a.deleted_at is None and a.enabled for a in automations)
+
+    async def test_setting_a_key_encrypts_already_synced_automations(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key=None
+        )
+        for slug in self._SLUGS:
+            for content in self._committed_files(origin, slug).values():
+                assert not content.startswith(b"gAAAAA")
+
+        encrypted = await self._save_key(sqlite_session_factory, "the-new-key")
+        result = await self._sync(sqlite_session_factory, encrypted, service_settings)
+
+        assert result.pushed_commit is not None
+        assert result.exported == len(self._NAMES)
+        assert result.deleted_in_db == 0
+        for slug in self._SLUGS:
+            for name, content in self._committed_files(origin, slug).items():
+                assert content.startswith(b"gAAAAA"), f"{name} is still plaintext"
+        await self._assert_no_dirty_states(sqlite_session_factory)
+        await self._assert_automations_untouched(sqlite_session_factory)
+
+        # Unchanged content: no re-encrypt churn on the following cycle.
+        again = await self._sync(sqlite_session_factory, encrypted, service_settings)
+        assert again.pushed_commit is None
+        assert again.exported == 0
+
+    async def test_clearing_the_key_re_exports_plaintext(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key="the-old-key"
+        )
+
+        plaintext = await self._save_key(sqlite_session_factory, None)
+        assert plaintext.git_sync_encryption_key == ""
+        result = await self._sync(sqlite_session_factory, plaintext, service_settings)
+
+        assert result.pushed_commit is not None
+        assert result.exported == len(self._NAMES)
+        assert result.deleted_in_db == 0
+        for slug in self._SLUGS:
+            files = self._committed_files(origin, slug)
+            assert files[f"automations/{slug}/tarball/main.py"] == b"print(1)"
+            assert b"entrypoint" in files[f"automations/{slug}/automation.yaml"]
+        await self._assert_no_dirty_states(sqlite_session_factory)
+        await self._assert_automations_untouched(sqlite_session_factory)
+
+        again = await self._sync(sqlite_session_factory, plaintext, service_settings)
+        assert again.pushed_commit is None
+        assert again.exported == 0
+
+    async def test_rotating_the_key_re_encrypts_with_the_new_key(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key="the-old-key"
+        )
+
+        rotated = await self._save_key(sqlite_session_factory, "the-new-key")
+        result = await self._sync(sqlite_session_factory, rotated, service_settings)
+
+        assert result.pushed_commit is not None
+        assert result.exported == len(self._NAMES)
+        assert result.deleted_in_db == 0
+        for slug in self._SLUGS:
+            files = decrypt_file_tree(
+                self._committed_files(origin, slug), "the-new-key"
+            )
+            assert files[f"automations/{slug}/tarball/main.py"] == b"print(1)"
+        await self._assert_no_dirty_states(sqlite_session_factory)
+        await self._assert_automations_untouched(sqlite_session_factory)
+
+    async def test_saving_the_same_key_again_does_not_re_export(
+        self, sqlite_session_factory, file_store, service_settings
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key="the-key"
+        )
+
+        same = await self._save_key(sqlite_session_factory, "the-key")
+        result = await self._sync(sqlite_session_factory, same, service_settings)
+
+        assert result.exported == 0
+        assert result.pushed_commit is None
 
 
 class TestLastError:
@@ -1892,6 +2120,7 @@ class TestTarballUploadLifecycle:
                     "keep_alive: null",
                     "model: null",
                     "name: My First Automation",
+                    "observability_associations: null",
                     "preset_metadata: null",
                     "prompt: null",
                     "setup_script_path: null",
@@ -1905,6 +2134,7 @@ class TestTarballUploadLifecycle:
                     "keep_alive: null",
                     "model: null",
                     "name: My First Automation",
+                    "observability_associations: null",
                     "preset_metadata: null",
                     "prompt: null",
                     "setup_script_path: null",
@@ -2039,11 +2269,67 @@ class TestTarballUploadLifecycle:
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
             upload_id = parse_internal_upload_id(automation.tarball_path)
-            await _delete_superseded_upload(session, automation.tarball_path, pending)
+            await _delete_superseded_upload(session, automation, pending)
 
         # Assert — only the path was queued; the object is still readable.
         assert pending == [f"uploads/test/{upload_id}.tar"]
         assert file_store.read(pending[0])
+
+    async def _automation_pointing_at_other_org_upload(
+        self, session_factory, file_store
+    ) -> tuple[uuid.UUID, uuid.UUID]:
+        """A local-org automation whose tarball_path names another org's upload."""
+        other_id = await _create_internal_automation(
+            session_factory, file_store, org_id=uuid.uuid4()
+        )
+        async with session_factory() as session:
+            other = await session.get(Automation, other_id)
+            upload_id = parse_internal_upload_id(other.tarball_path)
+            automation = Automation(
+                id=uuid.uuid4(),
+                user_id=LOCAL_USER_ID,
+                org_id=LOCAL_ORG_ID,
+                name="Points elsewhere",
+                trigger={"type": "cron", "schedule": "0 9 * * 1"},
+                tarball_path=other.tarball_path,
+                entrypoint="python main.py",
+            )
+            session.add(automation)
+            await session.commit()
+        assert upload_id is not None
+        return automation.id, upload_id
+
+    async def test_export_does_not_read_other_org_upload(
+        self, sqlite_session_factory, file_store
+    ):
+        """Export treats an upload outside the automation's org as missing."""
+        automation_id, _ = await self._automation_pointing_at_other_org_upload(
+            sqlite_session_factory, file_store
+        )
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            with pytest.raises(TarballUnavailableError):
+                await _read_tarball_bytes(automation, session)
+
+    async def test_superseding_ignores_other_org_upload(
+        self, sqlite_session_factory, file_store
+    ):
+        """A git-side edit never deletes an upload outside the automation's org."""
+        automation_id, upload_id = await self._automation_pointing_at_other_org_upload(
+            sqlite_session_factory, file_store
+        )
+        pending: list[str] = []
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            await _delete_superseded_upload(session, automation, pending)
+            await session.commit()
+
+        assert pending == []
+        async with sqlite_session_factory() as session:
+            upload = await session.get(TarballUpload, upload_id)
+            assert upload.deleted_at is None
 
 
 class TestEnabledKeyWithNullValue:
@@ -2231,10 +2517,218 @@ class TestOrgIsolation:
         async with sqlite_session_factory() as session:
             automation = (await session.execute(select(Automation))).scalars().one()
             assert automation.user_id == admin_id
+            assert automation.created_by_user_id == admin_id
             assert automation.org_id == LOCAL_ORG_ID
             upload = (await session.execute(select(TarballUpload))).scalars().one()
             assert upload.user_id == admin_id
             assert upload.org_id == LOCAL_ORG_ID
+
+
+class TestImportedAutomationDefaults:
+    """What an automation authored in git starts as, and what a git edit keeps."""
+
+    _YAML = (
+        "name: Hand Written\n"
+        "entrypoint: python main.py\n"
+        "trigger:\n"
+        "  type: cron\n"
+        "  schedule: '0 12 * * *'\n"
+        "  timezone: UTC\n"
+    )
+
+    async def _push_hand_written(self, origin, yaml_text: str | None = None) -> None:
+        seed_dir = origin.parent / f"seed-{uuid.uuid4().hex[:6]}"
+        await ensure_repo(seed_dir, f"file://{origin}", "main", "", 30)
+        await pull(seed_dir, "main", "", 30)
+        autodir = seed_dir / "automations" / "hand-written"
+        autodir.mkdir(parents=True, exist_ok=True)
+        (autodir / "automation.yaml").write_text(yaml_text or self._YAML)
+        (autodir / "tarball").mkdir(exist_ok=True)
+        (autodir / "tarball" / "main.py").write_text('print("hi")')
+        await commit_and_push(
+            seed_dir,
+            "automations",
+            "seed",
+            "Repo Writer",
+            "writer@example.com",
+            "main",
+            "",
+            30,
+        )
+
+    async def _cycle(self, factory, git_settings, service_settings):
+        return await run_sync_cycle(
+            factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+    async def test_new_folder_without_enabled_imports_inactive(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin)
+
+        result = await self._cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        assert result.imported == 1
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    async def test_new_folder_with_enabled_true_still_imports_active(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin, self._YAML + "enabled: true\n")
+
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.enabled is True
+
+    @pytest.mark.parametrize("key", ["enabled", "state"])
+    async def test_new_folder_with_null_value_imports_inactive(
+        self, sqlite_session_factory, git_settings, service_settings, origin, key
+    ):
+        await self._push_hand_written(origin, self._YAML + f"{key}:\n")
+
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    @pytest.mark.parametrize("key", ["enabled", "state"])
+    async def test_update_with_null_value_keeps_an_inactive_automation_inactive(
+        self, sqlite_session_factory, git_settings, service_settings, origin, key
+    ):
+        await self._push_hand_written(origin, self._YAML + "enabled: true\n")
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+            automation.enabled = False
+            automation.state = AutomationState.INACTIVE
+            await session.commit()
+
+        await self._push_hand_written(
+            origin, self._YAML.replace("main.py", "main.py --flag") + f"{key}:\n"
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py --flag"
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    async def test_update_without_enabled_keeps_the_current_value(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin, self._YAML + "enabled: true\n")
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+            automation.enabled = False
+            automation.state = AutomationState.INACTIVE
+            await session.commit()
+
+        # The edit drops `enabled` and changes the entrypoint.
+        await self._push_hand_written(
+            origin, self._YAML.replace("main.py", "main.py --flag")
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py --flag"
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    async def test_import_and_update_log_the_commit_author(
+        self,
+        sqlite_session_factory,
+        git_settings,
+        service_settings,
+        origin,
+        caplog,
+    ):
+        caplog.set_level(logging.INFO)
+        await self._push_hand_written(origin)
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+        assert "Repo Writer <writer@example.com>" in caplog.text
+        assert "Imported new automation" in caplog.text
+
+        caplog.clear()
+        await self._push_hand_written(
+            origin, self._YAML.replace("main.py", "main.py --flag")
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        update_logs = [r for r in caplog.messages if "Updated automation" in r]
+        assert update_logs
+        assert "Repo Writer <writer@example.com>" in update_logs[0]
+
+    _CONTINUING_YAML = (
+        "name: Hand Written\n"
+        "entrypoint: python main.py\n"
+        "trigger:\n"
+        "  type: event\n"
+        "  source: qa-src\n"
+        "  'on': qa.*\n"
+        "  destination: continue_conversation\n"
+        "  subject_key_expr: id\n"
+    )
+
+    async def test_continuing_import_without_keep_alive_is_kept_alive(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        """Git sync applies the `continue_conversation` rule the API does."""
+        await self._push_hand_written(origin, self._CONTINUING_YAML)
+
+        result = await self._cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        assert result.imported == 1
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.keep_alive is True
+
+    async def test_continuing_import_with_keep_alive_false_is_skipped(
+        self, sqlite_session_factory, git_settings, service_settings, origin, caplog
+    ):
+        await self._push_hand_written(
+            origin, self._CONTINUING_YAML + "keep_alive: false\n"
+        )
+
+        result = await self._cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        assert result.imported == 0
+        assert CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR in caplog.text
+        async with sqlite_session_factory() as session:
+            assert (await session.execute(select(Automation))).first() is None
+
+    async def test_continuing_update_with_keep_alive_false_is_skipped(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin, self._CONTINUING_YAML)
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        await self._push_hand_written(
+            origin,
+            self._CONTINUING_YAML.replace("main.py", "main.py --flag")
+            + "keep_alive: false\n",
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py"
+        assert automation.keep_alive is True
 
 
 class TestFailureBackoffState:
@@ -2340,3 +2834,209 @@ class TestFailureBackoffState:
         assert row.consecutive_auth_failures == 0
         assert row.last_error is None
         assert row.last_error_at is None
+
+
+class TestPluginSpecSync:
+    @pytest.mark.parametrize("working_dir", [".", "scripts"])
+    async def test_config_edits_round_trip_and_restore(
+        self,
+        sqlite_session_factory,
+        git_settings,
+        service_settings,
+        origin,
+        tmp_path,
+        working_dir,
+    ):
+        import yaml
+
+        from openhands.automation.plugin_specs import (
+            AutomationPluginEntrypoint,
+            AutomationPluginManifest,
+            entrypoint_for_manifest,
+        )
+
+        manifest = AutomationPluginManifest(
+            name="reviewer",
+            schema_version="openhands.automation.plugin.v1",
+            entrypoint=AutomationPluginEntrypoint(
+                command="python worker.py", working_dir=working_dir
+            ),
+        )
+        entrypoint = entrypoint_for_manifest(manifest)
+
+        spec = {
+            "plugin": {
+                "source": "github:OpenHands/extensions",
+                "ref": "abc123",
+                "repo_path": "plugins/reviewer",
+            },
+            "config": {"repos": ["OpenHands/OpenHands"]},
+            "required_plugins": [{"source": "github:OpenHands/tools", "ref": "def456"}],
+        }
+        async with sqlite_session_factory() as session:
+            automation = Automation(
+                user_id=LOCAL_USER_ID,
+                org_id=LOCAL_ORG_ID,
+                name="Plugin reviewer",
+                trigger={"type": "cron", "schedule": "0 * * * *"},
+                tarball_path="plugin-spec://runtime",
+                entrypoint=entrypoint,
+                plugin_spec=spec,
+                enabled=False,
+                state=AutomationState.INACTIVE,
+            )
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+        first = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        assert first.pushed_commit
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            automation.plugin_spec = {
+                **spec,
+                "config": {"repos": ["OpenHands/OpenHands", "OpenHands/docs"]},
+            }
+            await mark_git_sync_dirty(session, automation)
+            await session.commit()
+        second = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        assert second.pushed_commit and second.pushed_commit != first.pushed_commit
+        editor = tmp_path / "editor"
+        await ensure_repo(editor, f"file://{origin}", "main", "", 30)
+        yaml_path = editor / "automations/plugin-reviewer/automation.yaml"
+        fields = yaml.safe_load(yaml_path.read_text())
+        assert fields["plugin_spec"]["config"]["repos"] == [
+            "OpenHands/OpenHands",
+            "OpenHands/docs",
+        ]
+        assert fields["plugin_spec"]["required_plugins"] == spec["required_plugins"]
+        fields["plugin_spec"]["config"]["repos"].append("OpenHands/automation")
+        yaml_path.write_text(yaml.safe_dump(fields))
+        await commit_and_push(
+            editor,
+            "automations",
+            "Edit plugin config",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.plugin_spec == fields["plugin_spec"]
+            assert automation.enabled is False
+            assert automation.tarball_path == "plugin-spec://runtime"
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/restored.db")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            restored_factory = async_sessionmaker(engine, expire_on_commit=False)
+            restored_settings = git_settings.model_copy(
+                update={"git_sync_local_workdir": str(tmp_path / "restored")}
+            )
+            result = await run_sync_cycle(
+                restored_factory, LOCAL_ORG_ID, restored_settings, service_settings
+            )
+            assert result.imported == 1
+            async with restored_factory() as session:
+                restored = (await session.execute(select(Automation))).scalar_one()
+                assert restored.plugin_spec == fields["plugin_spec"]
+                assert restored.entrypoint == entrypoint
+        finally:
+            await engine.dispose()
+
+    async def test_repairs_legacy_export_and_rejects_invalid_import_atomically(
+        self, sqlite_session_factory, git_settings, service_settings, origin, tmp_path
+    ):
+        import yaml
+
+        spec = {
+            "plugin": {"source": "github:OpenHands/extensions"},
+            "config": {"repos": ["OpenHands/docs"]},
+        }
+        async with sqlite_session_factory() as session:
+            automation = Automation(
+                user_id=LOCAL_USER_ID,
+                org_id=LOCAL_ORG_ID,
+                name="Legacy plugin",
+                trigger={"type": "cron", "schedule": "0 * * * *"},
+                tarball_path="plugin-spec://runtime",
+                entrypoint="python worker.py",
+                plugin_spec=spec,
+                enabled=False,
+                state=AutomationState.INACTIVE,
+            )
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        editor = tmp_path / "editor"
+        await ensure_repo(editor, f"file://{origin}", "main", "", 30)
+        yaml_path = editor / "automations/legacy-plugin/automation.yaml"
+        fields = yaml.safe_load(yaml_path.read_text())
+        del fields["plugin_spec"]
+        yaml_path.write_text(yaml.safe_dump(fields))
+        await commit_and_push(
+            editor,
+            "automations",
+            "Old exporter",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
+        )
+        repaired = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        assert repaired.pushed_commit
+        await pull(editor, "main", "", 30)
+        fields = yaml.safe_load(yaml_path.read_text())
+        assert fields["plugin_spec"] == spec
+        fields["name"] = "Invalid edit must not apply"
+        fields["plugin_spec"]["config"] = ["not an object"]
+        yaml_path.write_text(yaml.safe_dump(fields))
+        await commit_and_push(
+            editor,
+            "automations",
+            "Invalid config",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.name == "Legacy plugin"
+            assert automation.plugin_spec == spec
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        'cd "$AUTOMATION_PLUGIN_ROOT/../outside" && python worker.py',
+        'cd "$AUTOMATION_PLUGIN_ROOT" && python worker.py; touch owned',
+        'cd "$AUTOMATION_PLUGIN_ROOT" && $(touch owned)',
+    ],
+)
+def test_synced_plugin_entrypoint_rejects_unsafe_wrappers(entrypoint):
+    from openhands.automation.git_sync.plugin_spec import (
+        validate_synced_plugin_entrypoint,
+    )
+
+    with pytest.raises(ValueError):
+        validate_synced_plugin_entrypoint(entrypoint)

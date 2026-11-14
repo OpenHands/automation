@@ -11,7 +11,7 @@ import json
 import uuid
 from typing import Any, Final
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +21,10 @@ from openhands.automation.git_sync.secret_store import (
     decrypt_secret_fields,
     encrypt_secret_fields,
 )
-from openhands.automation.models import AutomationGitSyncOrgConfig
+from openhands.automation.models import (
+    AutomationGitSyncOrgConfig,
+    AutomationGitSyncState,
+)
 
 
 # Runtime-only config: no env var, set solely from the UI. It rides in the same
@@ -194,10 +197,17 @@ async def apply_git_sync_config_override(
     Changing the repo URL, branch or token clears the auth-failure backoff, so
     a corrected config is retried on its normal interval rather than waiting
     out a backoff earned by the old one.
+
+    Setting, changing or clearing the encryption key marks every one of the
+    org's synced automations dirty. The export only rewrites dirty ones, so
+    otherwise the repo kept each file in whatever form it was last written --
+    readable after a key was set -- until that automation happened to change.
     """
     row = await get_or_create_org_config(session, org_id)
     overrides = _decode_overrides(row)
     before = {key: overrides.get(key) for key in _AUTH_BACKOFF_RESET_FIELDS}
+    base = base_git_sync_settings()
+    key_before = _merge(base, overrides).git_sync_encryption_key
     for key, value in updates.items():
         if value is None:
             overrides.pop(key, None)
@@ -205,6 +215,12 @@ async def apply_git_sync_config_override(
             overrides[key] = value
     if any(overrides.get(key) != before[key] for key in _AUTH_BACKOFF_RESET_FIELDS):
         row.consecutive_auth_failures = 0
+    if _merge(base, overrides).git_sync_encryption_key != key_before:
+        await session.execute(
+            update(AutomationGitSyncState)
+            .where(AutomationGitSyncState.org_id == org_id)
+            .values(dirty=True)
+        )
     row.overrides = json.dumps(encrypt_secret_fields(overrides))
     row.configured_by_user_id = configured_by_user_id
 

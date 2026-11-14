@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import Request
 from sqlalchemy import event
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from openhands.automation.config import ServiceSettings, get_config
+from openhands.automation.utils.change_events import bind_request, register_audit_hook
 
 
 logger = logging.getLogger("automation.db")
@@ -68,15 +69,48 @@ def is_sqlite_url(url: str) -> bool:
     return url.startswith("sqlite")
 
 
-def normalize_sqlite_url_for_alembic(url: str) -> str:
-    """Convert async SQLite URL to sync version for Alembic.
+ALEMBIC_SYNC_DRIVERS = {
+    "sqlite+aiosqlite": "sqlite",
+    "postgresql+asyncpg": "postgresql+pg8000",
+}
 
-    Alembic doesn't support async drivers, so we need to convert
-    sqlite+aiosqlite:// URLs to plain sqlite:// URLs.
+
+def normalize_url_for_alembic(url: str) -> str:
+    """Convert an async database URL to the sync driver Alembic uses.
+
+    Alembic runs synchronously and cannot drive aiosqlite or asyncpg, so
+    sqlite+aiosqlite:// becomes sqlite:// and postgresql+asyncpg:// becomes
+    postgresql+pg8000://. Any other URL is returned unchanged.
     """
-    if url.startswith("sqlite+aiosqlite"):
-        return url.replace("sqlite+aiosqlite", "sqlite", 1)
+    for async_driver, sync_driver in ALEMBIC_SYNC_DRIVERS.items():
+        if url.startswith(async_driver):
+            return url.replace(async_driver, sync_driver, 1)
     return url
+
+
+def alembic_engine_args(url: str) -> tuple[str, dict]:
+    """Return the sync URL and connect args Alembic uses for AUTOMATION_DB_URL.
+
+    The application engine takes TLS for a URL from its ``ssl`` query parameter.
+    pg8000 rejects ``ssl`` as a connect() keyword, so it is removed from the URL
+    and translated into an ``ssl_context``.
+    """
+    sync_url = normalize_url_for_alembic(url)
+    if not sync_url.startswith("postgresql+pg8000"):
+        return sync_url, {}
+    parsed = make_url(sync_url)
+    mode = parsed.query.get("ssl")
+    if isinstance(mode, tuple):
+        mode = mode[-1]
+    if mode is not None and mode.strip().lower() not in {"", *SUPPORTED_DB_SSL_MODES}:
+        raise ValueError(
+            f'Unsupported ssl="{mode}" in AUTOMATION_DB_URL for migrations. '
+            f"Supported values are: {', '.join(sorted(SUPPORTED_DB_SSL_MODES))}."
+        )
+    stripped = parsed.difference_update_query(["ssl"])
+    return stripped.render_as_string(hide_password=False), _build_pg8000_connect_args(
+        mode
+    )
 
 
 @dataclass
@@ -229,6 +263,9 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+# Every ORM session records changes to automations (utils/change_events.py).
+register_audit_hook()
+
 # Module-level flag set after engine creation to indicate SQLite usage.
 # Used by scheduler/dispatcher to skip PostgreSQL-specific features like
 # FOR UPDATE SKIP LOCKED (not supported by SQLite).
@@ -252,11 +289,22 @@ def using_sqlite() -> bool:
 
 
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency that yields a database session from app.state."""
+    """FastAPI dependency that yields a database session from app.state.
+
+    Declare it as ``Depends(get_session, scope="function")``. Function scope
+    commits when the handler returns, before the response is sent and before
+    its background tasks run. With the default request scope the commit lands
+    after the client already has the response: on SQLite in WAL mode a
+    dependent request sent at once reads the pre-commit snapshot (an upload
+    that is then "not found"), and a deferred side effect such as a tarball
+    delete would run before the commit that justifies it.
+    """
     session_factory: async_sessionmaker[AsyncSession] = (
         request.app.state.session_factory
     )
     async with session_factory() as session:
+        # The audit hook takes its actor from the request's authenticated user.
+        bind_request(session, request)
         try:
             yield session
             await session.commit()

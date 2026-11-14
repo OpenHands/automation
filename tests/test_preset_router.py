@@ -15,16 +15,21 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from pydantic import ValidationError
 
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
+    CreatePluginAutomationRequest,
+    CreatePromptAutomationRequest,
     _generate_plugin_tarball,
     _generate_tarball,
     _get_preset_entrypoint,
-    _replace_prompt_in_tarball,
+    _replace_files_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -40,6 +45,10 @@ PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "prese
 
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
+    # Windows has no AF_UNIX; without this guard the module fails to import
+    # there and none of its tests run.
+    if not hasattr(socket, "AF_UNIX"):
+        return False
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")
@@ -98,6 +107,84 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
+def _load_preset_repo_cloner(
+    preset_name: str, phases: list[str]
+) -> Callable[[Any, str], Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_clone_configured_repos"
+    )
+    namespace: dict[str, Any] = {"os": os, "json": json, "report_phase": phases.append}
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[Any, str], Any], namespace["_clone_configured_repos"])
+
+
+class TestPresetRepoCloning:
+    """A configured repository that fails to clone fails the run.
+
+    Continuing would run the agent in an empty workspace, without the repo's
+    context or skills, and still report the run COMPLETED.
+    """
+
+    @staticmethod
+    def _workspace(failed_repos: list[str]) -> MagicMock:
+        workspace = MagicMock()
+        workspace.clone_repos.return_value = MagicMock(
+            success_count=1 - len(failed_repos), failed_repos=failed_repos
+        )
+        return workspace
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_failed_clone_fails_the_run(self, preset_name, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        repos = [{"url": "https://bb.example.com/scm/DEM/app.git"}]
+        config_file.write_text(json.dumps(repos))
+        workspace = self._workspace(["https://bb.example.com/scm/DEM/app.git"])
+        clone = _load_preset_repo_cloner(preset_name, [])
+
+        with pytest.raises(RuntimeError) as error:
+            clone(workspace, str(config_file))
+
+        assert "https://bb.example.com/scm/DEM/app.git" in str(error.value)
+        workspace.clone_repos.assert_called_once_with(repos)
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_successful_clone_returns_result(self, preset_name, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        config_file.write_text(json.dumps([{"url": "owner/repo"}]))
+        workspace = self._workspace([])
+        phases: list[str] = []
+
+        result = _load_preset_repo_cloner(preset_name, phases)(
+            workspace, str(config_file)
+        )
+
+        assert result is workspace.clone_repos.return_value
+        assert phases == ["Cloning repositories"]
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    @pytest.mark.parametrize("config", [None, []])
+    def test_no_configured_repos_clones_nothing(self, preset_name, config, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        if config is not None:
+            config_file.write_text(json.dumps(config))
+        workspace = self._workspace([])
+
+        result = _load_preset_repo_cloner(preset_name, [])(workspace, str(config_file))
+
+        assert result is None
+        workspace.clone_repos.assert_not_called()
+
+
 class TestPresetSessionUrl:
     """The session URL injected into a run must open the conversation in Agent Canvas.
 
@@ -121,6 +208,254 @@ class TestPresetSessionUrl:
         assert builds_canvas_url, f"{preset_name} preset must link to Agent Canvas"
         assert not builds_legacy_url, (
             f"{preset_name} preset still links to the legacy UI"
+        )
+
+
+def _load_preset_mode_detector(
+    preset_name: str,
+) -> Callable[[dict[str, str]], tuple[str, str]]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_detect_execution_mode"
+    )
+    namespace: dict[str, Any] = {}
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(
+        Callable[[dict[str, str]], tuple[str, str]], namespace["_detect_execution_mode"]
+    )
+
+
+MODE_PRESETS = ["prompt", "plugin", "plugin_spec"]
+
+
+class TestPresetExecutionMode:
+    """The presets take their mode from the backend's signal, not from AGENT_SERVER_URL.
+
+    #680 made the cloud dispatcher export AGENT_SERVER_URL into every sandbox (cloud
+    runs no longer get it). A preset that read "AGENT_SERVER_URL is set" as "local
+    mode" then fetched the LLM, secrets and MCP servers from the sandbox's own
+    agent-server, which holds none of them on OHE/Cloud (#688).
+    """
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_cloud_signal_wins_over_agent_server_url(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "cloud",
+                "AGENT_SERVER_URL": "http://10.0.0.5:8000",
+                "SANDBOX_ID": "sbx-1",
+                "SESSION_API_KEY": "sk-1",
+            }
+        )
+        assert mode == "cloud"
+        assert signal == "AUTOMATION_RUN_MODE"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_explicit_local_signal(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "local",
+                "AGENT_SERVER_URL": "http://localhost:3000",
+                "SESSION_API_KEY": "sk-1",
+            }
+        )
+        assert mode == "local"
+        assert signal == "AUTOMATION_RUN_MODE"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_local_backend_shape_without_signal_is_local(self, preset_name):
+        """A local backend that predates AUTOMATION_RUN_MODE (1.27.0 and earlier,
+        say after a rollback): AGENT_SERVER_URL, a session key and no SANDBOX_ID.
+        The missing SANDBOX_ID decides, not the URL."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {"AGENT_SERVER_URL": "http://localhost:3000", "SESSION_API_KEY": "sk-1"}
+        )
+        assert mode == "local"
+        assert signal == "no SANDBOX_ID (no AUTOMATION_RUN_MODE)"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    @pytest.mark.parametrize(
+        "session_key_name", ["SESSION_API_KEY", "OH_SESSION_API_KEYS_0"]
+    )
+    def test_legacy_cloud_pair_without_signal_is_cloud(
+        self, preset_name, session_key_name
+    ):
+        """A cloud dispatcher that predates AUTOMATION_RUN_MODE but already
+        exports AGENT_SERVER_URL (#680): SANDBOX_ID plus a session key means cloud."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AGENT_SERVER_URL": "http://10.0.0.5:8000",
+                "SANDBOX_ID": "sbx-1",
+                session_key_name: "sk-1",
+            }
+        )
+        assert mode == "cloud"
+        assert "SANDBOX_ID" in signal
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_no_signal_and_no_sandbox_id_is_local(self, preset_name):
+        """Only cloud sandboxes carry SANDBOX_ID, and cloud mode cannot run
+        without it."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, _signal = detect({})
+        assert mode == "local"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    @pytest.mark.parametrize(
+        "environ",
+        [
+            {
+                "AUTOMATION_RUN_MODE": "cloud",
+                "SANDBOX_ID": "sbx-1",
+                "SESSION_API_KEY": "sk-1",
+            },
+            {"AUTOMATION_RUN_MODE": "local", "SESSION_API_KEY": "sk-1"},
+            {"SANDBOX_ID": "sbx-1", "OH_SESSION_API_KEYS_0": "sk-1"},
+            {"SANDBOX_ID": "sbx-1"},
+            {"SESSION_API_KEY": "sk-1"},
+            {"AUTOMATION_RUN_MODE": "staging"},
+            {},
+        ],
+    )
+    def test_agent_server_url_never_changes_the_mode(self, preset_name, environ):
+        """Cloud sandboxes no longer receive AGENT_SERVER_URL and local runs do;
+        whether it is there must not change the mode."""
+        detect = _load_preset_mode_detector(preset_name)
+        with_url = {**environ, "AGENT_SERVER_URL": "http://10.0.0.5:8000"}
+        assert detect(with_url) == detect(environ)
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_unknown_signal_value_falls_back_to_env_shape(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, _signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "staging",
+                "AGENT_SERVER_URL": "http://localhost:3000",
+            }
+        )
+        assert mode == "local"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_mode_is_never_derived_from_agent_server_url_presence(self, preset_name):
+        """Guard against the #688 regression coming back.
+
+        ``IS_LOCAL_MODE = bool(os.environ.get("AGENT_SERVER_URL"))`` looked right
+        until #680 started exporting that variable in cloud sandboxes too. The
+        presets are excluded from linting, so pin the shape here: the mode comes
+        from ``_detect_execution_mode`` and no ``bool(...)`` anywhere in the
+        script is fed by AGENT_SERVER_URL.
+        """
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        source = source_path.read_text()
+        module = ast.parse(source, filename=str(source_path))
+
+        assert not re.search(r"IS_LOCAL_MODE\s*=\s*bool\(", source), (
+            f"{preset_name} preset derives IS_LOCAL_MODE with bool(...) again"
+        )
+        for node in ast.walk(module):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "bool"
+            ):
+                segment = ast.get_source_segment(source, node) or ""
+                assert "AGENT_SERVER_URL" not in segment.upper(), (
+                    f"{preset_name} preset turns AGENT_SERVER_URL into a mode: "
+                    f"{segment}"
+                )
+
+        mode_assignments = [
+            node
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "IS_LOCAL_MODE"
+                for target in node.targets
+            )
+        ]
+        assert len(mode_assignments) == 1, (
+            f"{preset_name} preset must assign IS_LOCAL_MODE exactly once"
+        )
+        value_source = ast.get_source_segment(source, mode_assignments[0].value) or ""
+        assert "EXECUTION_MODE" in value_source, (
+            f"{preset_name} preset must derive IS_LOCAL_MODE from the detected "
+            f"EXECUTION_MODE, got: {value_source}"
+        )
+        assert "_detect_execution_mode(os.environ)" in source, (
+            f"{preset_name} preset must detect its mode with _detect_execution_mode"
+        )
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_cloud_mode_never_reads_agent_server_url(self, preset_name):
+        """The script reads AGENT_SERVER_URL once, into ``agent_server_url``,
+        and only local-mode code uses it: the mode check never looks at it, and
+        a cloud run (which no longer receives it) has no use for it."""
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        source = source_path.read_text()
+        module = ast.parse(source, filename=str(source_path))
+
+        reads = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Constant) and node.value == "AGENT_SERVER_URL"
+        ]
+        assert len(reads) == 1, f"{preset_name} reads AGENT_SERVER_URL again"
+
+        detector = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_detect_execution_mode"
+        )
+        code = [
+            ast.get_source_segment(source, statement) or ""
+            for statement in detector.body[1:]  # after the docstring
+        ]
+        assert not any("AGENT_SERVER_URL" in segment for segment in code)
+
+        parents = {
+            child: node
+            for node in ast.walk(module)
+            for child in ast.iter_child_nodes(node)
+        }
+
+        def in_local_mode_branch(node: ast.AST) -> bool:
+            child, parent = node, parents.get(node)
+            while parent is not None:
+                if (
+                    isinstance(parent, ast.If)
+                    and isinstance(parent.test, ast.Name)
+                    and parent.test.id == "IS_LOCAL_MODE"
+                    and any(child is statement for statement in parent.body)
+                ):
+                    return True
+                child, parent = parent, parents.get(parent)
+            return False
+
+        uses = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Name)
+            and node.id == "agent_server_url"
+            and isinstance(node.ctx, ast.Load)
+        ]
+        assert uses
+        outside = [node.lineno for node in uses if not in_local_mode_branch(node)]
+        assert not outside, (
+            f"{preset_name} uses agent_server_url outside local mode on lines {outside}"
         )
 
 
@@ -266,6 +601,51 @@ class TestPresetEntrypoint:
         monkeypatch.setattr("openhands.automation.preset_router.os.name", "nt")
         assert _get_preset_entrypoint() == ".venv/Scripts/python.exe main.py"
 
+    @pytest.mark.parametrize(
+        "generate",
+        [
+            lambda: _generate_tarball("Say hello"),
+            lambda: _generate_plugin_tarball(
+                [PluginSource(source="github:owner/repo")], "Say hello"
+            ),
+        ],
+        ids=["prompt", "plugin"],
+    )
+    @pytest.mark.parametrize(
+        ("os_name", "expected"),
+        [("posix", {"setup.sh"}), ("nt", {"setup.sh", "setup.py"})],
+    )
+    def test_windows_tarballs_carry_setup_py(
+        self, monkeypatch, generate, os_name, expected
+    ):
+        """A Windows agent server cannot run setup.sh, so it gets setup.py too."""
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", os_name)
+        with tarfile.open(fileobj=io.BytesIO(generate()), mode="r:gz") as tar:
+            names = set(tar.getnames())
+            setup_py = tar.extractfile("setup.py") if "setup.py" in names else None
+            setup_py_source = setup_py.read().decode() if setup_py else None
+
+        assert {"setup.sh", "setup.py"} & names == expected
+        if setup_py_source is not None:
+            assert setup_py_source == (PRESETS_DIR / "setup.py").read_text()
+
+    def test_setup_py_mirrors_setup_sh(self):
+        """setup.py must install what setup.sh installs, the same way."""
+        source = (PRESETS_DIR / "setup.py").read_text()
+        compile(source, "setup.py", "exec")
+        setup_sh = (PRESETS_DIR / "prompt" / "setup.sh").read_text()
+        for needle in (
+            "/sdk-version",
+            "cpython>=3.12,<3.14",
+            "openhands-sdk==",
+            "openhands-tools==",
+            "openhands-workspace==",
+            "import openhands.sdk, openhands.tools, openhands.workspace",
+            "Installing dependencies",
+        ):
+            assert needle in setup_sh
+            assert needle in source
+
     def test_prompt_setup_sh_falls_back_when_python3_missing(self):
         setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
         content = setup_sh_path.read_text()
@@ -280,6 +660,7 @@ class TestPresetEntrypoint:
         assert "command -v python" in content
         assert "command -v py" in content
 
+    @pytest.mark.skipif(os.name == "nt", reason="runs setup.sh with bash")
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     @pytest.mark.parametrize(
         "venv_python", [".venv/bin/python", ".venv/Scripts/python.exe"]
@@ -384,6 +765,203 @@ def test_preset_mcp_normalizer_unwraps_without_sdk_coercer(preset_name):
     assert normalize(None) == {}
 
 
+def _load_preset_functions(
+    preset_name: str, names: set[str], namespace: dict[str, Any]
+) -> dict[str, Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    functions = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    assert {node.name for node in functions} == names
+    nodes: list[ast.stmt] = list(functions)
+    exec(
+        compile(ast.Module(body=nodes, type_ignores=[]), str(source_path), "exec"),
+        namespace,
+    )
+    return namespace
+
+
+def _load_preset_mcp_loader(
+    preset_name: str,
+    users_me_mcp_config: Callable[[], Any],
+    *,
+    local_mode: bool = False,
+) -> Callable[[Any], Any]:
+    """The preset's ``_load_mcp_config`` with ``users/me`` answered by a stub."""
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_normalize_mcp_config", "_named_mcp_servers", "_load_mcp_config"},
+        {
+            "_coerce_mcp_config": coerce_mcp_config,
+            "IS_LOCAL_MODE": local_mode,
+            "_users_me_mcp_config": users_me_mcp_config,
+        },
+    )
+    return cast(Callable[[Any], Any], namespace["_load_mcp_config"])
+
+
+def _workspace_returning(mcp_config: dict[str, Any]) -> MagicMock:
+    workspace = MagicMock()
+    workspace.get_mcp_config.return_value = mcp_config
+    return workspace
+
+
+# GET /api/v1/users/me on OpenHands Cloud and Enterprise: a {name: server} map.
+_USERS_ME_MCP_CONFIG = {
+    "jira-dc": {
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-atlassian"],
+        "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        "enabled": True,
+    },
+    "tools": {
+        "url": "https://mcp.example.com/mcp",
+        "transport": "http",
+        "auth": {"strategy": "bearer", "value": "tools-token"},
+        "enabled": True,
+    },
+    "linear": {
+        "url": "https://mcp.linear.app/mcp",
+        "auth": {
+            "strategy": "oauth2",
+            "state": {"tokens": {"access_token": "linear-access-token"}},
+        },
+        "enabled": True,
+    },
+}
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_loads_users_me_mcp_servers_the_sdk_cannot_read(preset_name, capsys):
+    # openhands-sdk 1.59 returns {} for the {name: server} map (automation#93).
+    load = _load_preset_mcp_loader(preset_name, lambda: _USERS_ME_MCP_CONFIG)
+
+    mcp_config = load(_workspace_returning({}))
+
+    assert dump_mcp_config(mcp_config) == {
+        "jira-dc": {
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["mcp-atlassian"],
+            "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        },
+        "tools": {
+            "url": "https://mcp.example.com/mcp",
+            "transport": "http",
+            "auth": {"strategy": "bearer", "value": "tools-token"},
+        },
+    }
+    out = capsys.readouterr().out
+    assert "servers: ['jira-dc', 'tools']" in out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert "OAuth" in out
+    assert "linear-access-token" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reports_configured_servers_it_could_not_load(preset_name, capsys):
+    users_me = {
+        "linear": _USERS_ME_MCP_CONFIG["linear"],
+        "broken": {"transport": "stdio", "env": {"TOKEN": "broken-secret"}},
+    }
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert (
+        "MCP server 'broken' is configured but not loaded: "
+        "its settings could not be read"
+    ) in out
+    assert "broken-secret" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("users_me_mcp_config", [None, {}])
+def test_preset_reports_when_no_mcp_servers_are_configured(
+    preset_name, users_me_mcp_config, capsys
+):
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me_mcp_config)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "no MCP servers configured" in out
+    assert "WARNING" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("local_mode", [False, True])
+def test_preset_keeps_sdk_mcp_servers_without_reading_users_me(preset_name, local_mode):
+    """An SDK that reads the map (or a local agent server) is used as is."""
+
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read")
+
+    load = _load_preset_mcp_loader(
+        preset_name, users_me_not_expected, local_mode=local_mode
+    )
+    sdk_servers = coerce_mcp_config({"fetch": {"command": "uvx"}})
+
+    assert load(_workspace_returning(sdk_servers)) == sdk_servers
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_local_preset_does_not_read_users_me(preset_name, capsys):
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read in local mode")
+
+    load = _load_preset_mcp_loader(preset_name, users_me_not_expected, local_mode=True)
+
+    assert load(_workspace_returning({})) == {}
+    assert "no MCP servers configured" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reads_users_me_with_unmasked_secrets(preset_name, monkeypatch):
+    import httpx
+
+    requests: list[dict[str, Any]] = []
+
+    def fake_get(url, *, params, headers, timeout):
+        requests.append({"url": url, "params": params, "headers": headers})
+        return httpx.Response(
+            200,
+            json={"mcp_config": {"fetch": {"command": "uvx"}}},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_users_me_mcp_config"},
+        {
+            "api_url": "https://ohe.example.com",
+            "api_key": "automation-key",
+            "session_key": "session-key",
+        },
+    )
+
+    assert namespace["_users_me_mcp_config"]() == {"fetch": {"command": "uvx"}}
+    assert requests == [
+        {
+            "url": "https://ohe.example.com/api/v1/users/me",
+            "params": {"expose_secrets": "true"},
+            "headers": {
+                "Authorization": "Bearer automation-key",
+                "X-Session-API-Key": "session-key",
+            },
+        }
+    ]
+
+
 _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
 
 
@@ -407,6 +985,97 @@ _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
             "automation#274",
         ),
         ({"repository": {"full_name": "org/repo"}, "number": 7}, "repo#7"),
+        (
+            {
+                "event_type": "git.pullrequest.created",
+                "payload": {
+                    "eventType": "git.pullrequest.created",
+                    "resource": {
+                        "repository": {"name": "fabrikam-web"},
+                        "pullRequestId": 42,
+                    },
+                },
+                "event_key": "git.pullrequest.created",
+            },
+            "fabrikam-web#42",
+        ),
+        (
+            {
+                "event_type": "ms.vss-code.git-pullrequest-comment-event",
+                "payload": {
+                    "eventType": "ms.vss-code.git-pullrequest-comment-event",
+                    "resource": {
+                        "comment": {"content": "please review"},
+                        "pullRequest": {
+                            "repository": {"name": "fabrikam-web"},
+                            "pullRequestId": 42,
+                        },
+                    },
+                },
+                "event_key": "ms.vss-code.git-pullrequest-comment-event",
+            },
+            "fabrikam-web#42",
+        ),
+        # Bitbucket Data Center and Jira Data Center events are stored as the
+        # parsed event: the provider's payload sits under "payload".
+        (
+            {
+                "event_key_value": "pr:opened",
+                "payload": {
+                    "eventKey": "pr:opened",
+                    "pullRequest": {
+                        "id": 7,
+                        "title": "Add feature",
+                        "toRef": {
+                            "repository": {
+                                "slug": "payments-api",
+                                "project": {"key": "DEM"},
+                            }
+                        },
+                    },
+                },
+                "event_key": "pr:opened",
+            },
+            "payments-api#7",
+        ),
+        (
+            {
+                "event_key_value": "pr:comment:added",
+                "payload": {
+                    "eventKey": "pr:comment:added",
+                    "comment": {"text": "please review"},
+                    "pullRequest": {
+                        "id": 12,
+                        "toRef": {"repository": {"slug": "springboot-demo"}},
+                    },
+                },
+                "event_key": "pr:comment:added",
+            },
+            "springboot-demo#12",
+        ),
+        (
+            {
+                "webhook_event": "comment_created",
+                "payload": {
+                    "webhookEvent": "comment_created",
+                    "comment": {"body": "please review"},
+                    "issue": {"id": "10001", "key": "PROJ-123"},
+                },
+                "event_key": "comment_created",
+            },
+            "PROJ-123",
+        ),
+        (
+            {
+                "webhook_event": "jira:issue_updated",
+                "payload": {
+                    "webhookEvent": "jira:issue_updated",
+                    "issue": {"id": "10002", "key": " ENG-7 "},
+                },
+                "event_key": "jira:issue_updated",
+            },
+            "ENG-7",
+        ),
     ],
 )
 def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
@@ -436,6 +1105,47 @@ def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
         {
             "automation_name": "Issue triage",
             "event": {"number": True, "repository": "junk", "pull_request": [1]},
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_type": "git.push",
+                "payload": {
+                    "eventType": "git.push",
+                    "resource": {"repository": {"name": "fabrikam-web"}},
+                },
+            },
+        },
+        # A Bitbucket Data Center repository event has no pull request number.
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_key_value": "repo:refs_changed",
+                "payload": {
+                    "eventKey": "repo:refs_changed",
+                    "repository": {"slug": "payments-api"},
+                },
+                "event_key": "repo:refs_changed",
+            },
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_key_value": "pr:opened",
+                "payload": {
+                    "eventKey": "pr:opened",
+                    "pullRequest": {"id": True, "toRef": {"repository": {"slug": "r"}}},
+                },
+                "event_key": "pr:opened",
+            },
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "webhook_event": "comment_created",
+                "payload": {"webhookEvent": "comment_created", "issue": {"key": 7}},
+                "event_key": "comment_created",
+            },
         },
     ],
 )
@@ -585,8 +1295,8 @@ class TestGenerateTarball:
             assert repos_config[1]["ref"] == "main"
 
 
-class TestReplacePromptInTarball:
-    """Tests for swapping prompt.txt inside an existing preset tarball."""
+class TestReplaceFilesInTarball:
+    """Tests for swapping files inside an existing preset tarball."""
 
     def test_replaces_prompt_and_preserves_sibling_files(self):
         """The prompt is swapped while every other file is left byte-for-byte intact."""
@@ -599,7 +1309,7 @@ class TestReplacePromptInTarball:
         )
 
         # Act
-        updated = _replace_prompt_in_tarball(original, "New prompt")
+        updated = _replace_files_in_tarball(original, {"prompt.txt": "New prompt"})
 
         # Assert
         assert updated is not None
@@ -640,7 +1350,51 @@ class TestReplacePromptInTarball:
             tar.addfile(info, io.BytesIO(data))
 
         # Act / Assert
-        assert _replace_prompt_in_tarball(buffer.getvalue(), "New prompt") is None
+        assert (
+            _replace_files_in_tarball(buffer.getvalue(), {"prompt.txt": "New prompt"})
+            is None
+        )
+
+    def test_adds_missing_file_and_preserves_others(self):
+        """A replacement the archive lacks is added; existing files are kept."""
+        # Arrange — a prompt preset created without repositories.
+        original = _generate_tarball("Same prompt")
+        with tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as tar:
+            original_names = tar.getnames()
+        assert "repos_config.json" not in original_names
+
+        # Act
+        updated = _replace_files_in_tarball(
+            original, {"repos_config.json": '[{"url": "owner/repo"}]'}
+        )
+
+        # Assert
+        assert updated is not None
+        with tarfile.open(fileobj=io.BytesIO(updated), mode="r:gz") as tar:
+            names = sorted(tar.getnames())
+            repos_file = tar.extractfile("repos_config.json")
+            prompt_file = tar.extractfile("prompt.txt")
+            assert repos_file is not None and prompt_file is not None
+            assert json.loads(repos_file.read()) == [{"url": "owner/repo"}]
+            assert prompt_file.read().decode() == "Same prompt"
+        # The original members depend on the host (Windows adds setup.py).
+        assert names == sorted([*original_names, "repos_config.json"])
+
+    def test_none_removes_file(self):
+        """A ``None`` replacement drops that file from the archive."""
+        # Arrange — a prompt preset that clones a repository.
+        original = _generate_tarball(
+            "Same prompt", repos=[RepoSource(url="owner/repo", provider="github")]
+        )
+
+        # Act
+        updated = _replace_files_in_tarball(original, {"repos_config.json": None})
+
+        # Assert
+        assert updated is not None
+        with tarfile.open(fileobj=io.BytesIO(updated), mode="r:gz") as tar:
+            assert "repos_config.json" not in tar.getnames()
+            assert "prompt.txt" in tar.getnames()
 
 
 class TestRepoSource:
@@ -1314,8 +2068,214 @@ class TestCreateAutomationFromPrompt:
 
         assert response.status_code == 500
 
+    async def test_create_from_prompt_with_an_agent_profile(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        """The profile owns the model, so no model is stored with it."""
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+        assert response.json()["model"] is None
+        assert len(agent_profiles_api.requests) == 1
+
+    async def test_create_from_prompt_rejects_an_unknown_agent_profile(
+        self, async_client, agent_profiles_api, mock_file_store
+    ):
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": str(uuid.uuid4()),
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
+        mock_file_store.write_stream.assert_not_called()
+
+    async def test_create_from_prompt_refuses_a_personal_profile_for_another_identity(
+        self, async_client, agent_profiles_api, mock_file_store
+    ):
+        """A personal profile is the caller's alone, so a run as anyone else
+        could not launch it."""
+        agent_profiles_api.response = httpx.Response(
+            200,
+            json={
+                "profiles": [
+                    {
+                        "id": agent_profiles_api.profile_id,
+                        "name": "mine",
+                        "scope": "personal",
+                    }
+                ]
+            },
+        )
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+                "run_as_user_id": str(uuid.uuid4()),
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "personal" in response.json()["detail"]
+        mock_file_store.write_stream.assert_not_called()
+
+    async def test_create_from_prompt_accepts_a_personal_profile_run_as_the_caller(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        agent_profiles_api.response = httpx.Response(
+            200,
+            json={
+                "profiles": [
+                    {
+                        "id": agent_profiles_api.profile_id,
+                        "name": "mine",
+                        "scope": "personal",
+                    }
+                ]
+            },
+        )
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+
+    async def test_another_members_profiles_are_not_trusted_from_the_cache(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        """Personal profiles make each member's list their own."""
+        body = {
+            "name": "Profiled",
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "agent_profile_id": agent_profiles_api.profile_id,
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json=body,
+            headers=agent_profiles_api.caller_auth,
+        )
+        assert first.status_code == 201
+
+        mock_authenticated_user.user_id = uuid.uuid4()
+        agent_profiles_api.response = httpx.Response(200, json={"profiles": []})
+        second = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json=body,
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert second.status_code == 422
+        assert "not found" in second.json()["detail"]
+        assert len(agent_profiles_api.requests) == 2
+
+    async def test_create_from_prompt_rejects_a_model_with_an_agent_profile(
+        self, async_client, agent_profiles_api, mock_file_store
+    ):
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Profiled",
+                "prompt": "Do something",
+                "model": "fast-profile",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "already specifies the model" in response.json()["detail"]
+        assert agent_profiles_api.requests == []
+        mock_file_store.write_stream.assert_not_called()
+
 
 # --- Plugin Preset Tests ---
+
+
+class TestPresetAutomationDescriptionValidation:
+    @pytest.mark.parametrize(
+        ("request_cls_name", "extra_fields"),
+        [
+            pytest.param("CreatePromptAutomationRequest", {}, id="prompt"),
+            pytest.param(
+                "CreatePluginAutomationRequest",
+                {"plugins": [{"source": "github:owner/repo"}]},
+                id="plugin",
+            ),
+        ],
+    )
+    def test_accepts_description(self, request_cls_name, extra_fields):
+        from openhands.automation import preset_router
+
+        request_cls = getattr(preset_router, request_cls_name)
+        request = request_cls.model_validate(
+            {
+                "name": "Test",
+                "description": "Summarizes weekly support trends.",
+                "prompt": "Test prompt",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                **extra_fields,
+            }
+        )
+
+        assert request.description == "Summarizes weekly support trends."
+
+    @pytest.mark.parametrize(
+        ("request_cls_name", "extra_fields"),
+        [
+            pytest.param("CreatePromptAutomationRequest", {}, id="prompt"),
+            pytest.param(
+                "CreatePluginAutomationRequest",
+                {"plugins": [{"source": "github:owner/repo"}]},
+                id="plugin",
+            ),
+        ],
+    )
+    def test_rejects_description_over_2000_characters(
+        self, request_cls_name, extra_fields
+    ):
+        from openhands.automation import preset_router
+
+        request_cls = getattr(preset_router, request_cls_name)
+        with pytest.raises(ValueError, match="at most 2000 characters"):
+            request_cls.model_validate(
+                {
+                    "name": "Test",
+                    "description": "x" * 2001,
+                    "prompt": "Test prompt",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                    **extra_fields,
+                }
+            )
 
 
 class TestCreatePluginAutomationRequestValidation:
@@ -1526,6 +2486,27 @@ class TestGeneratePluginTarball:
 
 class TestExperimentVariantValidation:
     """Tests for A/B test variant validation on CreatePluginAutomationRequest."""
+
+    def test_variants_reject_an_agent_profile(self):
+        """An experiment run builds its own agent, so it cannot launch a profile."""
+        import pydantic
+
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(pydantic.ValidationError, match="cannot be used with"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "AB Test",
+                    "experiment_id": "my-experiment",
+                    "agent_profile_id": str(uuid.uuid4()),
+                    "variants": [
+                        {"name": "a", "weight": 50, "plugins": [{"source": "x/a"}]},
+                        {"name": "b", "weight": 50, "plugins": [{"source": "x/b"}]},
+                    ],
+                    "prompt": "Test prompt",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
 
     def test_variants_accepted(self):
         """Valid variants request is accepted."""
@@ -2405,3 +3386,454 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+    async def test_create_from_plugin_with_an_agent_profile(
+        self, async_client, agent_profiles_api, mock_authenticated_user
+    ):
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "Profiled",
+                "plugins": [{"source": "github:owner/review"}],
+                "prompt": "/review:run",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+        assert response.json()["model"] is None
+
+
+class TestCreatePresetAsServiceAccount:
+    """``run_as_user_id`` on preset creation: the generated upload follows it."""
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    @pytest.fixture(autouse=True)
+    def file_store(self):
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        store = MagicMock()
+
+        async def write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            return len([chunk async for chunk in stream])
+
+        store.write_stream = AsyncMock(side_effect=write_stream)
+        app.dependency_overrides[get_file_store] = lambda: store
+        yield store
+        app.dependency_overrides.pop(get_file_store, None)
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            ("/api/automation/v1/preset/prompt", {"prompt": "Do something"}),
+            (
+                "/api/automation/v1/preset/plugin",
+                {
+                    "plugins": [
+                        {
+                            "source": "github:owner/plugin",
+                            "ref": "0123456789abcdef0123456789abcdef01234567",
+                        }
+                    ],
+                    "prompt": "Do something",
+                },
+            ),
+        ],
+    )
+    async def test_sa_owns_automation_and_upload(
+        self, async_client, async_session, enterprise_api, path, body
+    ):
+        from sqlalchemy import select
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            path,
+            json={
+                "name": "SA preset",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                **body,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(self.SA_ID)
+        assert response.json()["run_as_kind"] == "service"
+        assert response.json()["created_by_user_id"] == str(TEST_USER_ID)
+        uploads = (await async_session.execute(select(TarballUpload))).scalars().all()
+        assert [upload.user_id for upload in uploads] == [self.SA_ID]
+
+    async def test_preset_as_sa_without_manage_returns_403(
+        self, readonly_client, async_session
+    ):
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_preset_as_non_sa_user_returns_422_and_creates_no_upload(
+        self, async_client, async_session, enterprise_api
+    ):
+        from sqlalchemy import select
+
+        enterprise_api.add_member(
+            self.SA_ID, TEST_ORG_ID, account_type="human", role="member"
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+            },
+        )
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+        assert (await async_session.execute(select(TarballUpload))).first() is None
+
+    FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    @pytest.fixture
+    def resolve_refs_to_full_sha(self, monkeypatch):
+        """Make plugin preflight resolve every ref to FULL_SHA."""
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins",
+            lambda plugins, **_: [
+                {**p.model_dump(exclude_none=True), "resolved_ref": self.FULL_SHA}
+                for p in plugins
+            ],
+        )
+
+    @pytest.mark.parametrize(
+        ("plugin_body", "stored_plugins"),
+        [
+            (
+                {"plugins": [{"source": "github:owner/plugin"}]},
+                [{"source": "github:owner/plugin", "ref": FULL_SHA}],
+            ),
+            (
+                {"plugins": [{"source": "github:owner/plugin", "ref": "main"}]},
+                [{"source": "github:owner/plugin", "ref": FULL_SHA}],
+            ),
+            (
+                {
+                    "variants": [
+                        {
+                            "name": "a",
+                            "weight": 1,
+                            "plugins": [
+                                {"source": "github:owner/plugin", "ref": FULL_SHA}
+                            ],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/plugin", "ref": "v1"}],
+                        },
+                    ],
+                    "experiment_id": "exp",
+                },
+                None,
+            ),
+        ],
+    )
+    async def test_plugin_preset_as_sa_pins_mutable_refs(
+        self,
+        async_client,
+        enterprise_api,
+        file_store,
+        resolve_refs_to_full_sha,
+        plugin_body,
+        stored_plugins,
+    ):
+        # As on a run-as change: a branch, tag or missing ref is resolved to its
+        # commit, and the tarball and metadata store the SHA.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        written: list[bytes] = []
+
+        async def write_stream(path, stream, max_size=None, content_type=""):
+            data = b"".join([chunk async for chunk in stream])
+            written.append(data)
+            return len(data)
+
+        file_store.write_stream.side_effect = write_stream
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                **plugin_body,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"].get("plugins") == stored_plugins
+        (tarball,) = written
+        with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tar:
+            if stored_plugins is not None:
+                member = tar.extractfile("plugins_config.json")
+                assert member is not None
+                assert json.loads(member.read()) == stored_plugins
+            else:
+                member = tar.extractfile("experiment_config.json")
+                assert member is not None
+                refs = [
+                    plugin["ref"]
+                    for variant in json.loads(member.read())["variants"]
+                    for plugin in variant["plugins"]
+                ]
+                assert refs == [self.FULL_SHA, self.FULL_SHA]
+
+    @pytest.mark.parametrize(
+        "plugin",
+        [
+            {"source": "https://u:p@github.com/o/r.git", "ref": "main"},
+            {"source": "github:owner/plugin", "ref": "main", "repo_path": "a\\b"},
+        ],
+    )
+    async def test_plugin_preset_as_sa_with_a_disallowed_source_returns_422(
+        self, async_client, enterprise_api, plugin
+    ):
+        # The SDK model accepts these; the automation plugin source model does not.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [plugin],
+            },
+        )
+
+        assert response.status_code == 422
+
+    async def test_plugin_preset_as_sa_with_unresolvable_ref_returns_422(
+        self, async_client, async_session, enterprise_api, monkeypatch
+    ):
+        from sqlalchemy import select
+
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        def unreachable(plugins, **_):
+            raise PluginSpecError("Failed to preflight required plugin")
+
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins", unreachable
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [{"source": "github:owner/plugin", "ref": "main"}],
+            },
+        )
+
+        assert response.status_code == 422
+        assert "Failed to preflight" in response.json()["detail"]
+        assert (await async_session.execute(select(TarballUpload))).first() is None
+
+    async def test_plugin_preset_as_sa_accepts_a_full_sha_ref(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [{"source": "github:owner/plugin", "ref": self.FULL_SHA}],
+            },
+        )
+
+        assert response.status_code == 201
+
+
+CONTINUING_TRIGGER = {
+    "type": "event",
+    "source": "qa-src",
+    "on": "qa.*",
+    "destination": "continue_conversation",
+    "subject_key_expr": "id",
+}
+
+PRESET_BODIES: dict[str, dict[str, Any]] = {
+    "/v1/preset/prompt": {"name": "Continuing", "prompt": "hi"},
+    "/v1/preset/plugin": {
+        "name": "Continuing",
+        "prompt": "hi",
+        "plugins": [{"source": "github:owner/plugin"}],
+    },
+}
+
+PRESET_MODELS: dict[
+    str, type[CreatePromptAutomationRequest] | type[CreatePluginAutomationRequest]
+] = {
+    "/v1/preset/prompt": CreatePromptAutomationRequest,
+    "/v1/preset/plugin": CreatePluginAutomationRequest,
+}
+
+
+@pytest.mark.parametrize("endpoint", sorted(PRESET_BODIES))
+class TestPresetContinueConversationKeepAlive:
+    """Presets apply the `continue_conversation` keep_alive rule `POST /v1` does.
+
+    The cleanup paths delete a sandbox unless `keep_alive` is true, so a preset
+    that skipped the rule would lose the conversation the next event continues.
+    """
+
+    def test_keep_alive_is_forced_when_omitted(self, endpoint):
+        body = {**PRESET_BODIES[endpoint], "trigger": CONTINUING_TRIGGER}
+
+        assert PRESET_MODELS[endpoint].model_validate(body).keep_alive is True
+
+    def test_keep_alive_false_is_refused(self, endpoint):
+        body = {
+            **PRESET_BODIES[endpoint],
+            "trigger": CONTINUING_TRIGGER,
+            "keep_alive": False,
+        }
+
+        with pytest.raises(ValidationError) as caught:
+            PRESET_MODELS[endpoint].model_validate(body)
+
+        assert CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR in str(caught.value)
+
+    def test_other_triggers_keep_their_own_keep_alive(self, endpoint):
+        body = {
+            **PRESET_BODIES[endpoint],
+            "trigger": {"type": "event", "source": "qa-src", "on": "qa.*"},
+            "keep_alive": False,
+        }
+
+        assert PRESET_MODELS[endpoint].model_validate(body).keep_alive is False
+
+    async def test_omitted_keep_alive_is_stored_true(
+        self, async_client, async_session, preset_file_store, endpoint
+    ):
+        response = await async_client.post(
+            f"/api/automation{endpoint}",
+            json={**PRESET_BODIES[endpoint], "trigger": CONTINUING_TRIGGER},
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["keep_alive"] is True
+        automation = await async_session.get(
+            Automation, uuid.UUID(response.json()["id"])
+        )
+        assert automation is not None
+        assert automation.keep_alive is True
+
+    async def test_keep_alive_false_answers_422_like_post_v1(
+        self, async_client, preset_file_store, endpoint
+    ):
+        response = await async_client.post(
+            f"/api/automation{endpoint}",
+            json={
+                **PRESET_BODIES[endpoint],
+                "trigger": CONTINUING_TRIGGER,
+                "keep_alive": False,
+            },
+        )
+
+        assert response.status_code == 422
+        assert (
+            CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
+            in response.json()["detail"][0]["msg"]
+        )
+
+    @pytest.mark.parametrize(
+        "trigger",
+        [
+            pytest.param({"type": "cron", "schedule": "0 9 * * *"}, id="cron"),
+            pytest.param(
+                {"type": "event", "source": "qa-src", "on": "qa.*"}, id="dispatch-run"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("keep_alive", [None, False, True])
+    async def test_other_triggers_store_keep_alive_as_given(
+        self,
+        async_client,
+        async_session,
+        preset_file_store,
+        endpoint,
+        trigger,
+        keep_alive,
+    ):
+        body: dict[str, Any] = {**PRESET_BODIES[endpoint], "trigger": trigger}
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
+
+        response = await async_client.post(f"/api/automation{endpoint}", json=body)
+
+        assert response.status_code == 201, response.text
+        assert response.json()["keep_alive"] is keep_alive
+        automation = await async_session.get(
+            Automation, uuid.UUID(response.json()["id"])
+        )
+        assert automation is not None
+        assert automation.keep_alive is keep_alive
+
+
+@pytest.fixture
+def preset_file_store():
+    """A file store that accepts the generated preset tarball."""
+    from collections.abc import AsyncIterator
+    from unittest.mock import AsyncMock
+
+    from openhands.automation.app import app
+    from openhands.automation.storage import get_file_store
+
+    async def write_stream(
+        path: str,
+        stream: AsyncIterator[bytes],
+        max_size: int | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> int:
+        return sum([len(chunk) async for chunk in stream])
+
+    store = MagicMock()
+    store.write_stream = AsyncMock(side_effect=write_stream)
+    app.dependency_overrides[get_file_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_file_store, None)

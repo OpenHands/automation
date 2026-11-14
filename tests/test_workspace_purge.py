@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import openhands.automation.utils.workspace as workspace_utils
 import openhands.automation.watchdog as watchdog
 from openhands.automation.models import (
     Automation,
@@ -26,17 +27,22 @@ from openhands.automation.models import (
     Base,
 )
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.workspace import dir_size as _dir_size
 from openhands.automation.watchdog import (
     WORKSPACE_PURGE_BATCH_SIZE,
     WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR,
     DeleteOutcome,
     PurgeResult,
     _delete_workspace,
-    _dir_size,
     _scan_candidates,
-    _workspace_path,
     purge_terminal_workspaces,
 )
+
+
+def _workspace_path(workspace_base: str | os.PathLike[str] | None, run_id) -> Path:
+    return workspace_utils.workspace_path(
+        watchdog._workspace_root(workspace_base), run_id
+    )
 
 
 def _create_junction(source: Path, destination: Path) -> None:
@@ -987,14 +993,14 @@ class TestPurgeTerminalWorkspaces:
             older_id,
             mtime=old_time - timedelta(seconds=1),
         )
-        real_rmtree = watchdog.shutil.rmtree
+        real_rmtree = workspace_utils.shutil.rmtree
 
         def fail_old(path, *args, **kwargs):
             if Path(path) == older_path:
                 raise PermissionError("locked")
             return real_rmtree(path, *args, **kwargs)
 
-        monkeypatch.setattr(watchdog.shutil, "rmtree", fail_old)
+        monkeypatch.setattr(workspace_utils.shutil, "rmtree", fail_old)
         deferred_ids = set()
 
         first_result = await purge_terminal_workspaces(
@@ -1046,7 +1052,7 @@ class TestPurgeTerminalWorkspaces:
 
         def disappear_before_delete(base, candidate_id):
             if path.exists():
-                real_rmtree = watchdog.shutil.rmtree
+                real_rmtree = workspace_utils.shutil.rmtree
                 real_rmtree(path)
             return real_delete(base, candidate_id)
 
@@ -1194,12 +1200,12 @@ class TestPurgeTerminalWorkspaces:
             completed_at=utcnow() - timedelta(days=30),
         )
         path = _make_workspace(workspace_base, run_id)
-        real_rmtree = watchdog.shutil.rmtree
+        real_rmtree = workspace_utils.shutil.rmtree
 
         def fail_rmtree(_path):
             raise PermissionError("locked")
 
-        monkeypatch.setattr(watchdog.shutil, "rmtree", fail_rmtree)
+        monkeypatch.setattr(workspace_utils.shutil, "rmtree", fail_rmtree)
 
         first_result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=1
@@ -1209,7 +1215,7 @@ class TestPurgeTerminalWorkspaces:
         assert first_result.deleted == 0
         assert path.exists()
 
-        monkeypatch.setattr(watchdog.shutil, "rmtree", real_rmtree)
+        monkeypatch.setattr(workspace_utils.shutil, "rmtree", real_rmtree)
         retry_result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=1
         )

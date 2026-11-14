@@ -211,11 +211,24 @@ class SandboxSettings(BaseSettings):
             verification result becomes terminal in seconds (default: 600)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
+        AUTOMATION_SANDBOX_PROVISION_MAX_ATTEMPTS: Sandboxes tried per run when
+            one fails to start before the entrypoint runs; 1 disables retries
+            (default: 3)
+        AUTOMATION_SANDBOX_PROVISION_RETRY_DELAY: Base delay in seconds before
+            the next attempt, doubled per attempt with +/-50% jitter
+            (default: 30)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
         AUTOMATION_EXTERNAL_MAX_FILESIZE: Max tarball size (default: 100MB)
         AUTOMATION_RATE_LIMIT_MIN_WAIT: Initial 429 wait (default: 10)
         AUTOMATION_RATE_LIMIT_MAX_WAIT: Max retry wait (default: 60)
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
+        AUTOMATION_SANDBOX_INTERNAL_URL: URL this service uses to reach
+            sandboxes. The OpenHands API returns sandbox URLs with the public
+            address that browsers use. When set, this URL replaces their
+            origin (scheme://host[:port]) and keeps the path and query. Set it
+            when the public address resolves differently inside the network
+            or a firewall blocks it. Empty uses the URLs unchanged
+            (default: "")
     """
 
     default_run_duration: int = 10 * 60  # 10 minutes
@@ -230,11 +243,14 @@ class SandboxSettings(BaseSettings):
     run_timeout_hard_grace: int = 600
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
+    sandbox_provision_max_attempts: int = Field(default=3, ge=1)
+    sandbox_provision_retry_delay: float = Field(default=30, ge=0)
     external_download_timeout: int = 120
     external_max_filesize: int = 100 * 1024 * 1024  # 100 MB
     rate_limit_min_wait: int = 10
     rate_limit_max_wait: int = 60
     rate_limit_max_retries: int = 5
+    sandbox_internal_url: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
@@ -269,7 +285,10 @@ class KVSettings(BaseSettings):
     # with Retry-After so clients can back off and retry.
     kv_lock_timeout_ms: int = 5000
 
-    # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
+    # Maximum size in bytes for a single KV value (plaintext JSON, before
+    # encryption). This is a per-value limit, not a total across the keys an
+    # automation owns: each key is stored in its own row, so many small values
+    # never add up to a failure.
     #
     # Performance guidance - PostgreSQL TOAST behavior:
     #
@@ -364,6 +383,8 @@ class GitSyncSettings(BaseSettings):
         AUTOMATION_GIT_SYNC_TOKEN: PAT (or other bearer token) for HTTPS
             authentication against the repo. Passed per git-invocation via
             `-c http.extraHeader`, never written to disk or the remote URL.
+            Sent as Basic auth (`x-access-token`), or as a Bearer header for
+            remotes such as Bitbucket Data Center that reject that username.
         AUTOMATION_GIT_SYNC_ENCRYPTION_KEY: When set, encrypts file contents
             (via the SDK's Fernet-based Cipher, same primitive as the KV
             store) before they're written to the synced repo. Empty disables
@@ -501,6 +522,13 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DB_POOL_SIZE: Connection pool size (default: 10)
         AUTOMATION_DB_MAX_OVERFLOW: Max overflow connections (default: 5)
         AUTOMATION_DB_POOL_RECYCLE: Pool recycle time in seconds (default: 1800)
+        AUTOMATION_RUN_MIGRATIONS_ON_STARTUP: Run `alembic upgrade head` on
+            startup for PostgreSQL too (default: false). SQLite always migrates
+            on startup.
+        AUTOMATION_CREATE_DATABASE_IF_MISSING: Have the migrations create the
+            PostgreSQL database first if it does not exist (default: false).
+            Read by migrations/env.py, so it also applies to
+            `alembic upgrade head`. The database user needs CREATEDB.
 
         # Database URL (alternative to host/port config, supports SQLite for local mode)
         AUTOMATION_DB_URL: Full database URL (e.g., sqlite+aiosqlite:////data/automations.db)
@@ -540,6 +568,10 @@ class ServiceSettings(BaseSettings):
         # Workspace retention (local mode only)
         AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
             for terminal runs older than this (default: 604800 — 7 days).
+            A run the watchdog itself terminalizes has its workspace removed
+            right then, so this is the backstop for the ones it never sees:
+            runs completed by callback, cancelled runs, and crashes. Set it to
+            0 to disable the sweep.
 
         # Sandbox cleanup (cloud mode only)
         AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS: Seconds after a run ends before
@@ -564,6 +596,8 @@ class ServiceSettings(BaseSettings):
         # Product telemetry (optional)
         AUTOMATION_POSTHOG_API_KEY: PostHog project key. Empty disables capture.
         AUTOMATION_POSTHOG_HOST: PostHog capture host (default: https://us.i.posthog.com)
+        AUTOMATION_TELEMETRY_DEPLOYMENT_MODE: Label events local, cloud, or self_hosted
+            (default: local in local mode, otherwise cloud)
     """
 
     # Database (PostgreSQL - Cloud mode)
@@ -576,6 +610,7 @@ class ServiceSettings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800  # 30 minutes
+    run_migrations_on_startup: bool = False
 
     # Database URL (alternative config, supports SQLite for local mode)
     # When set, takes precedence over host/port config.
@@ -691,6 +726,9 @@ class ServiceSettings(BaseSettings):
     # project key is configured by the deployment.
     posthog_api_key: str = ""
     posthog_host: str = "https://us.i.posthog.com"
+    # Overrides the deployment_mode / deployment_kind event labels. A self-hosted
+    # (OHE) deployment runs in cloud mode but is not remote.
+    telemetry_deployment_mode: Literal["local", "cloud", "self_hosted"] | None = None
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
