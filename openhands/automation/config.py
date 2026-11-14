@@ -469,9 +469,12 @@ class SlackAppSettings(BaseModel):
     bot_token: str
     team_id: str
     bot_user_id: str
-    # Oldest messages are dropped first when a thread exceeds these bounds.
+    # Bounds on the thread a mention's run is handed; oldest messages go first.
+    # Characters are counted as the run's AUTOMATION_EVENT_PAYLOAD encodes them
+    # (non-ASCII escaped), and the ceiling keeps that variable well under
+    # Linux's 128 KiB limit on a single environment string.
     thread_context_max_messages: int = Field(default=50, ge=1, le=500)
-    thread_context_max_chars: int = Field(default=12_000, ge=100, le=100_000)
+    thread_context_max_chars: int = Field(default=12_000, ge=500, le=60_000)
 
 
 class StreamSettings(BaseSettings):

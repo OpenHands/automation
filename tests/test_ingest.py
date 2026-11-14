@@ -15,6 +15,7 @@ from sqlalchemy import select
 from openhands.automation import telemetry
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import clear_config_cache
+from openhands.automation.conversations import AUTOMATION_CONTEXT_KEY
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.ingest import (
     AcceptedEvent,
@@ -321,6 +322,48 @@ async def test_accept_event_without_parsed_event_stores_raw_payload(
 
     runs = await fetch_runs(async_session)
     assert runs[0].event_payload == slack_payload
+
+
+@pytest.mark.asyncio
+async def test_transport_context_rides_on_the_run_but_not_the_filter(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+    mock_authenticated_user,
+):
+    """A Slack thread reaches the run; filters still read only the envelope."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {
+                "type": "event",
+                "source": "slack",
+                "on": "app_mention",
+                "filter": "!_automation_context && channel == 'C123'",
+            },
+        )
+    )
+    await async_session.commit()
+    context = {"slack_thread": {"messages": [], "omitted": 1, "incomplete": False}}
+
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+            context=context,
+        ),
+        async_session,
+    )
+
+    assert result.matched == 1
+    runs = await fetch_runs(async_session)
+    assert runs[0].event_payload == {
+        **slack_payload,
+        AUTOMATION_CONTEXT_KEY: context,
+    }
 
 
 @pytest.mark.asyncio

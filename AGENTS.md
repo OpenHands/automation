@@ -545,6 +545,13 @@ provider's delivery id.
   `team_id` on every envelope, and assert `team_id` *and* `bot_user_id` against
   `auth.test` before connecting, so a mis-pasted token fails loudly instead of
   bridging the wrong workspace.
+- **Thread context**: a mention inside a thread fetches the thread with
+  `conversations.replies` (after the ack) up to the mention, bounded by the
+  app's `thread_context_max_messages` / `thread_context_max_chars` (counted in
+  the escaped encoding the run's `AUTOMATION_EVENT_PAYLOAD` uses). It travels as
+  `AcceptedEvent.context`, never reaches trigger filters or follow-up turns, and
+  the presets render it as `## Slack Thread Context` (one JSON message per
+  line) via `slack_thread_section`, kept identical in all three runners.
 - **Health** is process-local (`stream_health()`): `last_connected_at`,
   `last_event_at`, `consecutive_failures`. Nothing renders it yet.
 - Slack distributes payloads across up to 10 connections per app, so this one
