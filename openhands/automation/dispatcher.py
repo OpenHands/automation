@@ -40,7 +40,10 @@ from openhands.automation.backends import (
     get_backend,
 )
 from openhands.automation.config import ServiceSettings, get_config
-from openhands.automation.conversations import COALESCED_TURNS_KEY
+from openhands.automation.conversations import (
+    AUTOMATION_CONTEXT_KEY,
+    COALESCED_TURNS_KEY,
+)
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
@@ -659,11 +662,14 @@ def _build_event_payload(
     # parked on the payload. Lift them into a field of our own, so the script
     # still reads the provider's payload exactly as it arrived.
     event = dict(run.event_payload or {})
+    automation_context = event.pop(AUTOMATION_CONTEXT_KEY, None)
     follow_up_turns = event.pop(COALESCED_TURNS_KEY, None)
     if event:
         payload["event"] = event
     if follow_up_turns:
         payload["follow_up_turns"] = follow_up_turns
+    if automation_context:
+        payload["automation_context"] = automation_context
     if automation.model:
         payload["model"] = automation.model
     return payload

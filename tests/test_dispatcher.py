@@ -21,7 +21,10 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import CloudSandboxBackend
 from openhands.automation.config import get_config
-from openhands.automation.conversations import COALESCED_TURNS_KEY
+from openhands.automation.conversations import (
+    AUTOMATION_CONTEXT_KEY,
+    COALESCED_TURNS_KEY,
+)
 from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
@@ -1428,6 +1431,20 @@ class TestBuildEventPayload:
 
         assert "event" not in payload
         assert payload["follow_up_turns"] == ["ping"]
+
+    def test_transport_context_is_lifted_out_of_the_event(self):
+        """A Slack mention's thread reaches the run beside the envelope."""
+        automation = self._make_automation({"type": "event", "source": "slack"})
+        thread = {"slack_thread": {"messages": [], "omitted": 2, "incomplete": False}}
+        run = self._make_run(
+            automation,
+            event_payload={"type": "event_callback", AUTOMATION_CONTEXT_KEY: thread},
+        )
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["event"] == {"type": "event_callback"}
+        assert payload["automation_context"] == thread
 
     def test_cron_trigger_uses_type_string(self):
         """Cron trigger → payload['trigger'] == 'cron' (not the full dict)."""

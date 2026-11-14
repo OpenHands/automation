@@ -17,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from openhands.automation import conversations
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.conversations import (
     COALESCED_TURNS_KEY,
@@ -551,6 +552,46 @@ async def test_two_mentions_in_one_thread_reach_the_same_conversation(
 
     # Still one run in total: the second event started none.
     assert len(await fetch_runs(async_session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_turn_does_not_carry_transport_context(
+    org_id, async_session, mock_authenticated_user, delivered_turns, monkeypatch
+):
+    """The conversation already has the thread; only a new run is handed it."""
+    automation = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger()
+    )
+    async_session.add(automation)
+    await async_session.commit()
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
+
+    composed: list[dict | None] = []
+    real_compose_turn = conversations.compose_turn
+
+    def spy(source, event_key, event_payload, **kwargs):
+        composed.append(event_payload)
+        return real_compose_turn(source, event_key, event_payload, **kwargs)
+
+    monkeypatch.setattr(conversations, "compose_turn", spy)
+    reply = slack_envelope(
+        ts="1755000009.000900", thread_ts="1755000000.000100", text="<@U999> more?"
+    )
+    await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=reply,
+            provider_event_id="Ev2",
+            context={"slack_thread": {"messages": [{"text": "earlier"}]}},
+        ),
+        async_session,
+    )
+
+    assert len(delivered_turns) == 1
+    assert composed == [reply]
 
 
 @pytest.mark.asyncio

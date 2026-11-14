@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.conversations import (
+    AUTOMATION_CONTEXT_KEY,
     CONTINUE_CONVERSATION,
     continue_conversation,
     resolve_subject_key,
@@ -59,6 +60,9 @@ class AcceptedEvent:
     occurred_at: datetime | None = None
     # When set, persisted as the run's event_payload in place of `payload`.
     parsed_event: BaseModel | None = None
+    # What the transport adds for a new run (Slack: the mention's thread). Not
+    # seen by trigger filters and kept out of the provider's payload.
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +224,12 @@ async def accept_event(
         if isinstance(event.parsed_event, BaseModel)
         else webhook_payload
     )
+    # A follow-up turn goes to a conversation that already has the context.
+    run_event_payload = (
+        {**event_payload, AUTOMATION_CONTEXT_KEY: event.context}
+        if event.context
+        else event_payload
+    )
 
     run_ids: list[str] = []
     conversation_ids: list[str] = []
@@ -285,7 +295,7 @@ async def accept_event(
         run = await create_automation_run(
             automation,
             session,
-            event_payload=event_payload,
+            event_payload=run_event_payload,
             subject_key=subject_key,
             trigger_event_id=record.id,
             observability_parent_span_context=event_parent_span_context,

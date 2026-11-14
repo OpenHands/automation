@@ -48,6 +48,9 @@ MAX_SUBJECT_KEY_LENGTH: Final[int] = 500
 # `event_payload`. Underscored and lifted back out by the dispatcher, so the
 # provider's own payload reaches the script exactly as it arrived.
 COALESCED_TURNS_KEY: Final[str] = "_automation_follow_up_turns"
+# Likewise for context the transport adds to a new run's event (`AcceptedEvent.
+# context`); the dispatcher hands it to the run as `automation_context`.
+AUTOMATION_CONTEXT_KEY: Final[str] = "_automation_context"
 
 # A burst is a handful of messages, not a mailbox. The cap bounds one JSON
 # column against a subject that keeps producing events while its run queues.
