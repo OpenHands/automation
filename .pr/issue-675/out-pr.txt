@@ -1,7 +1,0 @@
-installation A, run 1:              AUTOMATION_USER_ID=automation-backend:8e28c003-9dab-46b7-82fd-3248baf3a1cd
-installation B, run 1:              AUTOMATION_USER_ID=automation-backend:65eb8da9-b606-4222-a6fd-47be302b5249
-installation A, after restart:      AUTOMATION_USER_ID=automation-backend:8e28c003-9dab-46b7-82fd-3248baf3a1cd
-
-OK: installations A and B have different identities
-OK: the shared placeholder c1a96d89-eae7-53bd-86ad-07f26266402b is not forwarded
-OK: installation A keeps its identity across a restart
