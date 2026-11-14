@@ -1463,7 +1463,7 @@ async def _execute_run(
         # Align the watchdog deadline with it, plus margin so the bash
         # service's kill always fires first and verification finds a
         # concrete exit code instead of a still-running command.
-        await update_run_timeout_at(
+        still_running = await update_run_timeout_at(
             session_factory,
             run.id,
             utcnow()
@@ -1471,6 +1471,10 @@ async def _execute_run(
                 seconds=effective_timeout + get_config().sandbox.run_timeout_margin
             ),
         )
+        if not still_running and result.bash_command_id:
+            # Cancelled while the command was starting, before cancel_run
+            # could read its id. Stopping a finished command is a no-op.
+            await backend.stop_command(result.bash_command_id)
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),

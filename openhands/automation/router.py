@@ -31,6 +31,7 @@ from openhands.automation.auth import (
     get_http_client,
     require_permission,
 )
+from openhands.automation.backends import get_backend
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
@@ -1984,7 +1985,9 @@ async def cancel_run(
     """Cancel a pending or running automation run.
 
     For PENDING runs, prevents future dispatch.
-    For RUNNING runs, marks as cancelled and cleans up the sandbox.
+    For RUNNING runs, marks as cancelled and stops the run's work: Cloud runs
+    lose their sandbox; local runs share one persistent agent server, so only
+    the run's entrypoint command is stopped.
     Returns 409 if the run is already in a terminal state.
     """
     result = await session.execute(
@@ -2080,6 +2083,8 @@ async def cancel_run(
                     run_id=str(run_id),
                 )
             )
+    elif run.bash_command_id:
+        await get_backend(run).stop_command(run.bash_command_id)
 
     return AutomationRunResponse.model_validate(run)
 

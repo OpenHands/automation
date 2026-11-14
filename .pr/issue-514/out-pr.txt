@@ -1,0 +1,15 @@
+$ pgrep -af 'python3 worker.py|sleep 6001'   # before cancel
+  62615 /bin/sh -c sleep 6001
+  62616 sleep 6001
+  62624 /bin/sh -c set +x && trap 'rm -f '\''/tmp/automation-bc5f8277-c6c3-4078-8bdf-9fb7e29234d8.tar.gz.env'\''' EXIT && 
+  62632 python3 worker.py
+$ curl -X POST http://127.0.0.1:18001/api/automation/v1/runs/<run>/cancel
+  -> {'status': 'CANCELLED', 'completed_at': '2026-11-14T00:22:26.903984Z'}
+$ sleep 5; pgrep -af 'python3 worker.py|sleep 6001'   # after cancel
+  62615 /bin/sh -c sleep 6001
+  62616 sleep 6001
+entrypoint BashCommand exit_code on the agent-server: -15
+run status: CANCELLED
+
+OK: the cancelled run's entrypoint exited (heartbeat stopped at 4 lines)
+OK: the unrelated BashCommand on the shared agent-server is still running

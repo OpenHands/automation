@@ -33,6 +33,26 @@ class BashCommandResult:
     error_info: TransientErrorInfo | None = None
 
 
+async def stop_bash_command(agent_url: str, session_key: str, command_id: str) -> bool:
+    """Stop one BashCommand and its process group on the agent server.
+
+    The server treats finished and unknown ids as already stopped. A failure
+    is logged, not raised, and returns False.
+    """
+    try:
+        async with AsyncRemoteWorkspace(
+            host=agent_url,
+            api_key=session_key,
+            working_dir="/",
+        ) as workspace:
+            await workspace.stop_command(command_id)
+    except Exception:
+        logger.warning("Failed to stop bash command %s", command_id, exc_info=True)
+        return False
+    logger.info("Stopped bash command %s", command_id)
+    return True
+
+
 async def get_last_bash_command_result(
     agent_url: str,
     session_key: str,

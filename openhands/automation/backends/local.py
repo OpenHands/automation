@@ -22,6 +22,7 @@ from openhands.automation.plugin_secrets import (
 )
 from openhands.automation.utils.agent_server import (
     VerificationResult,
+    stop_bash_command,
     verify_run_on_agent_server,
 )
 from openhands.automation.utils.workspace import DeleteOutcome, delete_workspace
@@ -218,6 +219,14 @@ class LocalAgentServerBackend(ExecutionBackend):
             session_key=self.api_key,
             run_id=run_id,
             bash_command_id=self._run.bash_command_id,
+        )
+
+    async def stop_command(self, command_id: str) -> None:
+        """Stop only this command; other commands on the shared server keep running."""
+        await stop_bash_command(
+            agent_url=self.agent_server_url,
+            session_key=self.api_key,
+            command_id=command_id,
         )
 
     async def cleanup_after_verification(self, run_id: str) -> None:
