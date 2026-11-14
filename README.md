@@ -111,3 +111,9 @@ containers/          # Docker configuration
 ## Deployment
 
 This service is deployed via the [deploy repository](https://github.com/All-Hands-AI/deploy). Docker images are automatically built and pushed to `ghcr.io/openhands/automation` on every push to main and on tags.
+
+### Multi-worker / multi-replica
+
+Uvicorn starts the cron scheduler, run dispatcher, and staleness watchdog once per worker process. For multi-worker deployments, run those loops in a single dedicated process (`AUTOMATION_ENABLE_BACKGROUND_WORKERS=true`, the default) and set `AUTOMATION_ENABLE_BACKGROUND_WORKERS=false` on request-serving replicas so they do not start scheduler/dispatcher/watchdog.
+
+The flag does not stop git sync or the stream supervisor; those still start on every process (git sync claims a cross-replica lease). If no process has the flag on, or the single owner is down, request replicas keep accepting triggers and creating PENDING runs that never dispatch, and stale RUNNING runs are never reaped. `/health` and `/ready` do not reflect loop ownership or liveness.
