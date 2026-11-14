@@ -300,6 +300,22 @@ class AutomationRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # When a run blocked by a transient limit (org concurrency cap, daily
+    # sandbox quota) may be dispatched again. NULL on every other run. A
+    # deferred run stays PENDING with this set in the future; the dispatch poll
+    # skips it until the timestamp passes. Cleared when the run is claimed.
+    deferred_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # How many times this run has been deferred by a transient limit. Drives
+    # the bounded exponential backoff between deferrals. Reset to 0 on the
+    # RUNNING transition would lose it, so it lives on the row, not in
+    # status_detail (which is cleared when the run starts).
+    deferral_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
     # The agent-server BashCommand id for this run's dispatched bash chain.
     # Stored so the verifier can filter BashOutput events by this specific
     # command and avoid sampling output from concurrent bash activity on a
@@ -379,6 +395,14 @@ class AutomationRun(Base):
             postgresql_where=(status == AutomationRunStatus.PENDING),
         ),
         Index("ix_automation_runs_status", "status"),
+        # Partial: NULL on nearly every row (only limit-deferred runs stamp it),
+        # so a full index would be almost all NULLs.
+        Index(
+            "ix_automation_runs_deferred_until",
+            "deferred_until",
+            postgresql_where=(deferred_until.isnot(None)),
+            sqlite_where=(deferred_until.isnot(None)),
+        ),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
         Index("ix_automation_runs_status_trigger_source", "status", "trigger_source"),
