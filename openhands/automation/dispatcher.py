@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -92,9 +92,12 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_allowlists_with_client,
 )
 from openhands.automation.utils.run import (
+    count_running_runs,
     disable_automation,
+    expire_aged_deferred_runs,
     mark_run_status,
     mark_run_terminal,
+    requeue_deferred_run,
     run_is_running,
     update_bash_command_id,
     update_run_current_phase,
@@ -604,6 +607,9 @@ async def _poll_pending_runs(
 
     Eagerly loads the ``automation`` relationship so that ``user_id``,
     ``org_id``, and tarball config are available for dispatch.
+
+    A PENDING run whose ``deferred_until`` is still in the future was returned
+    to the queue by a transient limit and is not eligible yet.
     """
     select_query = (
         select(AutomationRun)
@@ -611,6 +617,10 @@ async def _poll_pending_runs(
         .options(selectinload(AutomationRun.automation))
         .where(
             AutomationRun.status == AutomationRunStatus.PENDING,
+            or_(
+                AutomationRun.deferred_until.is_(None),
+                AutomationRun.deferred_until <= utcnow(),
+            ),
             Automation.deleted_at.is_(None),
             or_(
                 AutomationRun.trigger_source == "manual",
@@ -630,6 +640,31 @@ async def _poll_pending_runs(
 
     result = await session.execute(select_query)
     return list(result.scalars().all())
+
+
+# Fixed key for the admission advisory lock. Namespaced away from the hashed
+# per-subject keys in conversations.py so the two can never collide.
+DISPATCH_ADMISSION_LOCK_ID = -0x4F48_4155_544F_0001  # "-OHAUTO-0001"
+
+
+async def _lock_dispatch_admission(session: AsyncSession) -> None:
+    """Serialize the count-and-claim admission step across replicas.
+
+    Under read-committed isolation two replicas each read the same RUNNING
+    count, compute the same free capacity, and then claim *distinct* pending
+    rows under SKIP LOCKED, so their combined admissions exceed the configured
+    cap. A transaction-scoped advisory lock held across the count and the
+    commit closes that gap: the second replica waits until the first commits
+    its RUNNING rows, then sees them. Released by the caller's commit. SQLite
+    runs single-process and skips it (the same pattern as conversations.py).
+    """
+    if using_sqlite():
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+            key=DISPATCH_ADMISSION_LOCK_ID
+        )
+    )
 
 
 def _build_event_payload(
@@ -741,6 +776,126 @@ async def _acquire_execution_context(
         await backend.release_context(client, ctx)
         return None
     return ctx
+
+
+async def _defer_or_skip_blocked_run(
+    run: AutomationRun,
+    automation: Automation,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    kind: RunStatusDetailKind,
+    detail: str,
+    log_ctx: dict[str, Any],
+) -> None:
+    """Handle a run blocked by a transient limit without dropping its work.
+
+    The run is returned to PENDING with ``deferred_until`` set from a bounded
+    exponential backoff, so a later dispatch pass retries it. Past
+    ``AUTOMATION_DEFER_MAX_AGE_SECONDS`` (measured from the run's creation) it
+    is marked terminal SKIPPED with a ``defer_expired`` status detail. When
+    deferral is disabled (``AUTOMATION_DEFER_MAX_AGE_SECONDS == 0``) the run is
+    skipped at once, preserving the previous behavior.
+    """
+    config = get_config().service
+    max_age = config.defer_max_age_seconds
+    now = utcnow()
+    created_at = run.created_at or now
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=now.tzinfo)
+    age_seconds = (now - created_at).total_seconds()
+
+    if max_age > 0 and age_seconds < max_age:
+        attempts = run.deferral_count or 0
+        # Bound the backoff by the time left before the deadline: a run near
+        # max_age must not wait another full backoff and start after its age.
+        remaining = max_age - age_seconds
+        delay = min(config.defer_backoff_base_seconds * (2**attempts), remaining)
+        deferred_until = now + timedelta(seconds=max(1, delay))
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=kind,
+            detail=detail,
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+            extra={
+                "deferral_attempts": attempts + 1,
+                "deferred_until": deferred_until.isoformat(),
+            },
+        )
+        requeued = await requeue_deferred_run(
+            session_factory,
+            run,
+            deferred_until=deferred_until,
+            status_detail=status_detail,
+        )
+        if not requeued:
+            # A terminal transition (cancel, callback, watchdog) won the race;
+            # nothing to defer.
+            return
+        logger.info(
+            "Run deferred after transient limit (attempt %d, retry in %ds)",
+            attempts + 1,
+            delay,
+            extra=log_ctx,
+        )
+        await capture_automation_event(
+            "automation_run_deferred",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "defer_reason": kind.value,
+                "deferral_attempts": attempts + 1,
+                "deferred_until": deferred_until.isoformat(),
+                "retry_delay_seconds": delay,
+            },
+        )
+        return
+
+    # Past the deadline (or deferral disabled): the run is terminal SKIPPED.
+    # With deferral disabled the original limit reason is preserved, so
+    # existing consumers of the status kind and skip_reason are unchanged.
+    if max_age > 0:
+        logger.warning(
+            "Run deferred past max age; marking SKIPPED: %s", detail, extra=log_ctx
+        )
+        skip_kind = RunStatusDetailKind.DEFER_EXPIRED
+        skip_extra = {"blocked_by": kind.value}
+    else:
+        logger.warning(
+            "Run skipped — transient limit (deferral disabled): %s",
+            detail,
+            extra=log_ctx,
+        )
+        skip_kind = kind
+        skip_extra = None
+    status_detail = make_run_status_detail(
+        phase=RunStatusPhase.DISPATCH,
+        kind=skip_kind,
+        detail=detail,
+        transient=False,
+        source="sandbox_api",
+        operation="get_execution_context",
+        extra=skip_extra,
+    )
+    await mark_run_terminal(
+        session_factory,
+        run,
+        AutomationRunStatus.SKIPPED,
+        status_detail=status_detail,
+    )
+    await capture_automation_event(
+        "automation_run_skipped",
+        automation=automation,
+        run=run,
+        session_factory=session_factory,
+        properties={
+            "trigger_source": "dispatcher",
+            "skip_reason": skip_kind.value,
+        },
+    )
 
 
 async def _execute_run(
@@ -957,64 +1112,32 @@ async def _execute_run(
         )
     except ConcurrencyLimitReachedError as exc:
         logger.warning(
-            "Run skipped — organization concurrency limit reached: %s",
+            "Run blocked — organization concurrency limit reached: %s",
             exc,
             extra=_log_ctx(),
         )
-        status_detail = make_run_status_detail(
-            phase=RunStatusPhase.DISPATCH,
+        await _defer_or_skip_blocked_run(
+            run,
+            automation,
+            session_factory,
             kind=RunStatusDetailKind.CONCURRENCY_LIMIT,
             detail=str(exc),
-            transient=True,
-            source="sandbox_api",
-            operation="get_execution_context",
-        )
-        await mark_run_terminal(
-            session_factory,
-            run,
-            AutomationRunStatus.SKIPPED,
-            status_detail=status_detail,
-        )
-        await capture_automation_event(
-            "automation_run_skipped",
-            automation=automation,
-            run=run,
-            session_factory=session_factory,
-            properties={
-                "trigger_source": "dispatcher",
-                "skip_reason": "concurrency_limit",
-            },
+            log_ctx=_log_ctx(),
         )
         return
     except DailySandboxLimitReachedError as exc:
         logger.warning(
-            "Run skipped — daily sandbox limit reached: %s",
+            "Run blocked — daily sandbox limit reached: %s",
             exc,
             extra=_log_ctx(),
         )
-        status_detail = make_run_status_detail(
-            phase=RunStatusPhase.DISPATCH,
+        await _defer_or_skip_blocked_run(
+            run,
+            automation,
+            session_factory,
             kind=RunStatusDetailKind.DAILY_SANDBOX_LIMIT,
             detail=str(exc),
-            transient=True,
-            source="sandbox_api",
-            operation="get_execution_context",
-        )
-        await mark_run_terminal(
-            session_factory,
-            run,
-            AutomationRunStatus.SKIPPED,
-            status_detail=status_detail,
-        )
-        await capture_automation_event(
-            "automation_run_skipped",
-            automation=automation,
-            run=run,
-            session_factory=session_factory,
-            properties={
-                "trigger_source": "dispatcher",
-                "skip_reason": "daily_sandbox_limit",
-            },
+            log_ctx=_log_ctx(),
         )
         return
     except SandboxProvisioningError as exc:
@@ -1525,6 +1648,10 @@ async def dispatch_pending_runs(
     Each run is dispatched as an ``asyncio.create_task`` so the
     dispatcher loop is not blocked by long-running automations.
 
+    When ``AUTOMATION_MAX_CONCURRENT_RUNS`` is set, at most that many runs are
+    admitted per poll; the rest stay PENDING (the table is the queue) and start
+    as slots free.
+
     Args:
         session_factory: Database session factory
         settings: Service settings for API access
@@ -1532,15 +1659,49 @@ async def dispatch_pending_runs(
         batch_size: Number of pending runs to fetch per poll (from config if None)
     """
     # Use config defaults if not provided
+    config = get_config()
     if batch_size is None:
-        config = get_config()
         batch_size = config.service.dispatcher_batch_size
+    max_concurrent = config.service.max_concurrent_runs
+
+    # Expire deferred runs past their max age on every poll, independent of
+    # available capacity: a poll that finds every slot occupied returns before
+    # claiming, so it must still reap aged deferred rows.
+    if config.service.defer_max_age_seconds > 0:
+        await expire_aged_deferred_runs(
+            session_factory,
+            max_age_seconds=config.service.defer_max_age_seconds,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.DEFER_EXPIRED,
+                detail="Deferred past the maximum deferral age",
+                transient=False,
+                source="automation_service",
+                operation="expire_deferred_run",
+            ),
+        )
 
     async with session_factory() as session:
+        capacity: int | None = None
+        if max_concurrent > 0:
+            # Serialize the count-and-claim across replicas so two simultaneous
+            # polls cannot each admit the full apparent capacity.
+            await _lock_dispatch_admission(session)
+            running = await count_running_runs(session)
+            capacity = max(0, max_concurrent - running)
+            if capacity == 0:
+                logger.debug(
+                    "At concurrency cap (%d RUNNING); not admitting more runs",
+                    running,
+                )
+                return []
+
         pending_runs = await _poll_pending_runs(session, batch_size)
 
         dispatched_runs = []
         for run in pending_runs:
+            if capacity is not None and len(dispatched_runs) >= capacity:
+                break
             run_id = str(run.id)
             automation_id = str(run.automation_id) if run.automation_id else None
             extra = log_extra(run_id=run_id, automation_id=automation_id)
