@@ -34,6 +34,7 @@ from openhands.automation.dispatcher import (
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
     DailySandboxLimitReachedError,
+    LicenseLimitReachedError,
     SandboxProvisioningError,
 )
 from openhands.automation.models import (
@@ -1585,14 +1586,22 @@ class TestExecuteRunConcurrencyLimit:
         return run, run_id, automation_id
 
     @pytest.mark.parametrize(
-        ("error_type", "kind"),
+        ("error_type", "kind", "transient"),
         [
-            (ConcurrencyLimitReachedError, "concurrency_limit"),
-            (DailySandboxLimitReachedError, "daily_sandbox_limit"),
+            (ConcurrencyLimitReachedError, "concurrency_limit", True),
+            (DailySandboxLimitReachedError, "daily_sandbox_limit", True),
+            # Stays until the install has a license.
+            (LicenseLimitReachedError, "license_limit", False),
         ],
     )
     async def test_quota_limit_marks_skipped_and_keeps_enabled(
-        self, async_session_factory, mock_settings, mock_client, error_type, kind
+        self,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        error_type,
+        kind,
+        transient,
     ):
         """Persist the quota skip and emit its reason without disabling the job."""
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
@@ -1628,7 +1637,7 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail is not None
             assert updated.status_detail["phase"] == "dispatch"
             assert updated.status_detail["kind"] == kind
-            assert updated.status_detail["transient"] is True
+            assert updated.status_detail["transient"] is transient
             assert updated.status_detail["detail"] == "Sandbox quota reached."
             assert updated.status_detail["source"] == "sandbox_api"
             assert updated.status_detail["operation"] == "get_execution_context"
@@ -1643,7 +1652,7 @@ class TestExecuteRunConcurrencyLimit:
                 .scalars()
                 .first()
             )
-            assert auto.enabled is True  # transient org-level condition: not disabled
+            assert auto.enabled is True  # a limit, not a fault in the job: not disabled
 
         capture_event.assert_awaited_once_with(
             "automation_run_skipped",
