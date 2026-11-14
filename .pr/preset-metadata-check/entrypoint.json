@@ -1,0 +1,6 @@
+{
+  "conversation_id": "61bdd365-8de1-424f-9be5-0c287c5a30d0",
+  "conversation_type": "RemoteConversation",
+  "stopped_before": "conversation.send_message and conversation.run",
+  "entrypoint": "/private/tmp/oh668-runtime/entrypoint/main.py"
+}

@@ -89,11 +89,14 @@ def main() -> int:
         check=True,
     )
 
+    # The entrypoint imports the SDK; verify installation without initializing it here.
     check = subprocess.run(
         [
             str(venv_python),
             "-c",
-            "import openhands.sdk, openhands.tools, openhands.workspace",
+            "from importlib.metadata import version\n"
+            "for package in ('openhands-sdk', 'openhands-tools', 'openhands-workspace'):\n"
+            "    version(package)\n",
         ]
     )
     if check.returncode != 0:
