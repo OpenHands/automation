@@ -375,6 +375,38 @@ class TestSetupScriptPathWiring:
         command = mock_start_bash.await_args.args[1]
         assert "&& ([ ! -f setup.sh ] || bash setup.sh) && python3 main.py" in command
 
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_run_automation_runs_the_stored_setup_script(
+        self, mock_async_client, mock_create_and_wait, mock_upload, mock_bash
+    ):
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = (
+            "sandbox-1",
+            "session-key",
+            "https://agent.example.com",
+        )
+        mock_bash.return_value = (0, "", "")
+
+        result = await run_automation(
+            api_url="https://api.example.com",
+            api_key="api-key",
+            entrypoint="python3 main.py",
+            tarball_source=b"fake tarball bytes",
+            keep_sandbox=True,
+            setup_script_path="scripts/install.sh",
+        )
+
+        assert result.success is True
+        command = mock_bash.await_args.args[1]
+        assert f"&& {_setup_step('scripts/install.sh')} && python3 main.py" in command
+
 
 @pytest.mark.skipif(
     os.name == "nt",
