@@ -455,6 +455,7 @@ class TestVerifierRegistry:
             "hmac_sha256_hex",
             "standard_webhooks",
             "slack_v0",
+            "teams_hmac_sha256",
         }
 
     def test_default_scheme_is_the_existing_behaviour(self):

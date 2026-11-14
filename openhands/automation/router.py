@@ -150,6 +150,7 @@ from openhands.automation.utils.templates import (
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 from openhands.automation.utils.webhook import is_builtin_source
+from openhands.automation.webhook_policy import require_compatible_trigger
 
 
 logger = logging.getLogger(__name__)
@@ -297,6 +298,8 @@ async def create_automation(
 
     state = model_automation_state(body.state, body.enabled)
 
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
+
     auto = Automation(
         user_id=run_as.user_id,
         run_as_kind=run_as.kind,
@@ -381,6 +384,8 @@ async def create_automation_from_plugin_spec(
         user=user,
         session=session,
     )
+
+    await require_compatible_trigger(user.org_id, trigger.model_dump(), session)
 
     # The trigger may come from the manifest, so the rule is applied here
     # rather than on the request model.
@@ -1039,6 +1044,9 @@ async def update_automation(
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
     trigger = update_data.get("trigger") or auto.trigger or {}
+    if body.trigger is not None or update_data.get("enabled") is True:
+        await require_compatible_trigger(user.org_id, trigger, session)
+
     keep_alive = update_data.get("keep_alive", auto.keep_alive)
     try:
         settled_keep_alive = continue_conversation_keep_alive(trigger, keep_alive)

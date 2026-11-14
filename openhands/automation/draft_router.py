@@ -105,6 +105,7 @@ from openhands.automation.utils.tarball_validation import (
     validate_tarball_path,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.webhook_policy import trigger_webhook_validation_errors
 
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,11 @@ async def _validate_draft_body(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
+        errors.extend(
+            await trigger_webhook_validation_errors(
+                user.org_id, trigger.model_dump(), session
+            )
+        )
         delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
         if delivery is None:
             errors.append(

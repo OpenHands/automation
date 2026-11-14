@@ -101,6 +101,7 @@ from openhands.automation.utils.tarball_validation import (
 )
 from openhands.automation.utils.time import ensure_utc
 from openhands.automation.utils.timeout import validate_automation_timeout
+from openhands.automation.webhook_policy import validate_trigger_webhook_compatibility
 
 
 logger = logging.getLogger("automation.git_sync")
@@ -524,6 +525,10 @@ async def _validate_and_resolve_fields(
         raise ValueError("automation.yaml missing required 'name' or 'entrypoint'")
 
     trigger = _TRIGGER_ADAPTER.validate_python(fields.get("trigger") or {})
+    await validate_trigger_webhook_compatibility(
+        owner.org_id, trigger.model_dump(), session
+    )
+
     # A ValueError skips the directory, like every other invalid field.
     keep_alive = continue_conversation_keep_alive(trigger, fields.get("keep_alive"))
     observability_associations = validate_observability_associations(

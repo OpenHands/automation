@@ -31,25 +31,46 @@ Authentication Model:
       nothing in the signed content expires
     - `standard_webhooks` and `slack_v0` sign a timestamp and reject
       deliveries outside a 5-minute window, so they are not replayable
-    - Events are deduplicated by the provider's delivery id, which is not
-      itself signed: that stops a verbatim replay, not a crafted one
+    - Header-based delivery IDs may not themselves be signed; a configured
+      body-derived ID inherits verification of the raw body
+    - Teams verifies the body but does not check timestamp freshness. Its
+      replay protection lasts only while the event deduplication row is retained
 """
 
 import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.automation.acknowledgements import (
+    TEAMS_ACKNOWLEDGEMENT,
+    get_acknowledgement,
+)
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
 from openhands.automation.event_schemas.catalog import (
     event_detection_rules,
     supported_event_types,
 )
-from openhands.automation.ingest import AcceptedEvent, accept_event
+from openhands.automation.filter_eval import (
+    FilterEvaluationError,
+    evaluate_expression,
+)
+from openhands.automation.ingest import (
+    AcceptedEvent,
+    ContinuationNotAllowed,
+    accept_event,
+)
 from openhands.automation.observability import span
 from openhands.automation.providers import (
     WebhookVerifier,
@@ -60,6 +81,7 @@ from openhands.automation.schemas import (
     EventDetectionRule,
     EventResponse,
     RequestedEventTypesResponse,
+    TeamsMessageResponse,
     WebhookConfig,
 )
 from openhands.automation.utils.webhook import (
@@ -67,9 +89,18 @@ from openhands.automation.utils.webhook import (
     get_requested_event_types,
     get_webhook_config,
 )
+from openhands.automation.webhook_policy import validate_webhook_protocol
 
 
 logger = logging.getLogger("automation.event_router")
+
+
+def _log_rejection(source: str, org_id: uuid.UUID, reason: str) -> None:
+    """Log static reason codes, never delivery content or evaluation errors."""
+    logger.warning(
+        "Webhook rejected: reason=%s source=%s org=%s", reason, source, org_id
+    )
+
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
 
@@ -157,13 +188,14 @@ async def requested_event_types(
     )
 
 
-@router.post("/{org_id}/{source}", response_model=EventResponse)
+@router.post("/{org_id}/{source}", response_model=EventResponse | TeamsMessageResponse)
 async def receive_event(
     org_id: uuid.UUID,
     source: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session, scope="function"),
-) -> EventResponse:
+) -> EventResponse | Response:
     """
     Receive a webhook event from a source.
 
@@ -192,6 +224,24 @@ async def receive_event(
             status_code=404,
             detail=f"Unknown webhook source: {source}",
         )
+
+    profile = get_acknowledgement(config.acknowledgement)
+    if profile is None:
+        raise HTTPException(500, "Unsupported webhook acknowledgement profile")
+    teams = config.acknowledgement == TEAMS_ACKNOWLEDGEMENT
+    if not config.is_builtin:
+        try:
+            validate_webhook_protocol(
+                signature_scheme=config.signature_scheme,
+                signature_header=config.signature_header,
+                acknowledgement=config.acknowledgement,
+                event_id_header=config.event_id_header,
+                event_id_expr=config.event_id_expr,
+                admission_expr=config.admission_expr,
+                webhook_secret=config.secret,
+            )
+        except ValueError:
+            raise HTTPException(500, "Invalid webhook protocol configuration") from None
 
     # 3. Get signature from the configured header (source-specific)
     signature = request.headers.get(config.signature_header)
@@ -226,9 +276,48 @@ async def receive_event(
     # 4. Parse JSON payload
     try:
         payload = await request.json()
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        if teams:
+            _log_rejection(source, org_id, "invalid_json")
+            raise HTTPException(400, "Invalid JSON") from None
         logger.warning("Malformed JSON in event payload: %s", e)
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+    if teams and (not isinstance(payload, dict) or payload.get("type") != "message"):
+        _log_rejection(source, org_id, "unrecognized_activity")
+        raise HTTPException(400, "Unrecognized Teams message activity")
+
+    # Extract IDs only from authenticated bytes, never silently dropping an
+    # invalid body ID and accepting without deduplication.
+    provider_event_id = (
+        get_header(request.headers, config.event_id_header)
+        if config.event_id_header
+        else None
+    )
+    if config.event_id_expr is not None:
+        try:
+            provider_event_id = evaluate_expression(config.event_id_expr, payload)
+        except FilterEvaluationError:
+            _log_rejection(source, org_id, "body_id_evaluation_failed")
+            raise HTTPException(400, "Invalid body delivery ID") from None
+        if (
+            not isinstance(provider_event_id, str)
+            or not provider_event_id.strip()
+            or len(provider_event_id) > 255
+        ):
+            _log_rejection(source, org_id, "invalid_body_id")
+            raise HTTPException(400, "Invalid body delivery ID")
+
+    if config.admission_expr is not None:
+        try:
+            admitted = evaluate_expression(config.admission_expr, payload) is True
+        except FilterEvaluationError:
+            admitted = False
+        if not admitted:
+            _log_rejection(source, org_id, "admission_denied")
+            raise HTTPException(
+                403, "Webhook source admission policy rejected delivery"
+            )
 
     # 5. Parse the event into a typed WebhookEvent
     # webhook_payload is the actual webhook payload used for filter matching
@@ -251,6 +340,9 @@ async def receive_event(
     except HTTPException:
         raise  # Re-raise HTTPExceptions as-is
     except ValueError as e:
+        if teams:
+            _log_rejection(source, org_id, "unrecognized_activity")
+            raise HTTPException(400, "Unrecognized Teams message activity") from None
         # Unknown event type (e.g. a GitHub event we don't have a detection
         # rule for). This is normal - the service supports a subset of event
         # types from each source - so acknowledge the webhook with matched=0
@@ -263,6 +355,9 @@ async def receive_event(
         )
         return EventResponse(received=True, matched=0, runs_created=[])
     except Exception as e:
+        if teams:
+            _log_rejection(source, org_id, "invalid_activity")
+            raise HTTPException(400, "Invalid Teams message activity") from None
         logger.warning("Failed to parse event: %s", e)
         raise HTTPException(status_code=400, detail=f"Failed to parse event: {e}")
 
@@ -275,17 +370,6 @@ async def receive_event(
 
     # 6. Record, match triggers and create runs (transport-neutral)
     #
-    # The delivery id is where HTTP has to do the looking: `accept_event()`
-    # deduplicates on whatever the transport hands it, and for a webhook that
-    # is a header. The header name comes from the resolved config, so a
-    # built-in provider uses its descriptor and a custom webhook uses whatever
-    # it configured; neither is hard-coded here. A source that names no header
-    # yields None -- recorded, routed, not deduplicated.
-    provider_event_id = (
-        get_header(request.headers, config.event_id_header)
-        if config.event_id_header
-        else None
-    )
     with span(
         "automation.webhook.receive",
         {
@@ -295,22 +379,35 @@ async def receive_event(
             "automation.event.provider_event_id": provider_event_id,
         },
     ):
-        result = await accept_event(
-            org_id,
-            AcceptedEvent(
-                source=source,
-                event_key=event.event_key,
-                payload=webhook_payload,
-                provider_event_id=provider_event_id,
-                parsed_event=event if isinstance(event, BaseModel) else None,
-            ),
-            session,
-            request=request,
-        )
+        try:
+            result = await accept_event(
+                org_id,
+                AcceptedEvent(
+                    source=source,
+                    event_key=event.event_key,
+                    payload=webhook_payload,
+                    provider_event_id=provider_event_id,
+                    parsed_event=event if isinstance(event, BaseModel) else None,
+                ),
+                session,
+                request=request,
+                allow_conversation_continuation=profile.deadline_seconds is None,
+                defer_telemetry=profile.deadline_seconds is not None,
+            )
+        except ContinuationNotAllowed:
+            raise HTTPException(
+                409, "Deadline-bound sources cannot continue conversations"
+            ) from None
 
-    return EventResponse(
+    metadata = EventResponse(
         received=True,
         matched=result.matched,
         runs_created=result.run_ids,
         conversations_continued=result.conversation_ids,
     )
+    if profile.deadline_seconds is not None:
+        # FastAPI owns this best-effort work after the response body is sent
+        # and the function-scoped database dependency has closed. Telemetry
+        # therefore cannot hold intake locks or consume the protocol deadline.
+        background_tasks.add_task(result.capture_telemetry, request=request)
+    return profile.response(metadata.model_dump())

@@ -6,6 +6,7 @@ from openhands.automation.filter_eval import (
     FilterEvaluationError,
     evaluate_filter,
     validate_filter,
+    validate_payload_expression,
 )
 
 
@@ -280,3 +281,36 @@ class TestErrorHandling:
         # glob expects strings, passing number should fail
         with pytest.raises(FilterEvaluationError):
             evaluate_filter("glob(value, '*')", payload)
+
+
+@pytest.mark.parametrize(
+    "expression, valid",
+    [
+        ("icontain(text, 'x')", False),
+        ("icontains(text)", False),
+        ("contains(text, 'x', 'y')", False),
+        ("not_null()", False),
+        ("`false` && unknown(text)", False),
+        ("map(&lower(@, 'x'), values)", False),
+        ("values[?unknown(@)]", False),
+        ("{key: unknown(text)}", False),
+        ("broken[", False),
+        ("not_null(id)", True),
+        ("not_null(id, other, third)", True),
+        ("join('/', [conversation.id, id])", True),
+        ("icontains(text, 'x')", True),
+        ("map(&lower(@), values)", True),
+        ("channelData.tenant.id == 'allowed'", True),
+        ("a[0:2]", True),
+        ("a[::-1]", True),
+        ("length(a[1:])", True),
+        ("a[?b][0:2].c", True),
+        ("a[0:2] | unknown(@)", False),
+    ],
+)
+def test_payload_expression_function_contract(expression, valid):
+    assert validate_payload_expression(expression)[0] is valid
+
+
+def test_routing_filter_validation_preserves_compile_only_behavior():
+    assert validate_filter("unknown(text)") == (True, None)
