@@ -527,6 +527,7 @@ prefix, never on the reason text.
 | 400 | `automation_id query parameter is required for user-authenticated KV access` | User credentials without `?automation_id=` |
 | 400 | `{"error": "operation_failed", "message", "operation_index", "operation"}` | A batch operation failed; nothing in the batch was applied |
 | 401 | `Missing token`, `Invalid authorization header format`, `Invalid or expired KV token`, `Authentication required: ...` | No usable KV token or user credentials (an expired token is a 401 too) |
+| 403 | `Requires view_automations permission`, `Only admins, owners, or the automation creator can modify it` | User credentials without `view_automations`, or a write to an automation the user may not modify |
 | 404 | `key_not_found` | Key does not exist |
 | 404 | `invalid_path` | GET `?path=` is well formed but names a field the value does not have |
 | 404 | `Automation not found` | The token's (or `?automation_id=`'s) automation does not exist or is not accessible |
