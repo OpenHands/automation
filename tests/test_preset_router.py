@@ -9,6 +9,7 @@ import socket
 import subprocess
 import tarfile
 import uuid
+import venv
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -640,11 +641,14 @@ class TestPresetEntrypoint:
             "openhands-sdk==",
             "openhands-tools==",
             "openhands-workspace==",
-            "import openhands.sdk, openhands.tools, openhands.workspace",
+            "from importlib.metadata import version",
             "Installing dependencies",
         ):
             assert needle in setup_sh
             assert needle in source
+        # The entrypoint imports the SDK; setup must not pay for it again (#668).
+        assert "import openhands" not in setup_sh
+        assert "import openhands" not in source
 
     def test_prompt_setup_sh_falls_back_when_python3_missing(self):
         setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
@@ -659,6 +663,134 @@ class TestPresetEntrypoint:
         assert "command -v python3" in content
         assert "command -v python" in content
         assert "command -v py" in content
+
+    @staticmethod
+    def _fake_run_venv(tmp_path: Path, missing_distribution: str | None) -> None:
+        """A run venv whose SDK modules raise on import (#668).
+
+        Successful installation is represented by real distribution metadata.
+        Imports are deliberately unusable: setup should inspect the install,
+        leaving module initialization to the preset's entrypoint.
+        """
+        venv_dir = tmp_path / ".venv"
+        venv.EnvBuilder(with_pip=False).create(venv_dir)
+        python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        site_packages = Path(
+            subprocess.check_output(
+                [
+                    str(python),
+                    "-c",
+                    "import sysconfig; print(sysconfig.get_path('purelib'))",
+                ],
+                text=True,
+            ).strip()
+        )
+        for distribution in ("openhands-sdk", "openhands-tools", "openhands-workspace"):
+            module = distribution.removeprefix("openhands-")
+            package = site_packages / "openhands" / module
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text(
+                'raise RuntimeError("unexpected SDK import during setup")\n'
+            )
+            if distribution != missing_distribution:
+                metadata = (
+                    site_packages / f"{distribution.replace('-', '_')}-1.0.dist-info"
+                )
+                metadata.mkdir()
+                (metadata / "METADATA").write_text(
+                    f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 1.0\n"
+                )
+
+    @pytest.mark.skipif(os.name == "nt", reason="runs setup.sh with bash")
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin", "plugin_spec"])
+    @pytest.mark.parametrize(
+        "missing_distribution",
+        [None, "openhands-sdk", "openhands-tools", "openhands-workspace"],
+    )
+    def test_setup_verifies_installed_distributions_without_importing_sdk(
+        self, tmp_path, preset_name, missing_distribution
+    ):
+        """Verify the run venv's packages without starting the SDK twice (#668)."""
+        self._fake_run_venv(tmp_path, missing_distribution)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # The installer is outside this verification test; it has completed above.
+        for name, script in {
+            "uv": "#!/bin/sh\nexit 0\n",
+            "curl": '#!/bin/sh\ncat <<\'JSON\'\n{"version":"1.0"}\nJSON\n',
+        }.items():
+            command = bin_dir / name
+            command.write_text(script)
+            command.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "AUTOMATION_API_URL": "https://automation.invalid",
+        }
+
+        result = subprocess.run(
+            ["bash", str(PRESETS_DIR / preset_name / "setup.sh")],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+        assert "unexpected SDK import" not in result.stderr
+        if missing_distribution is None:
+            assert result.returncode == 0, result.stderr
+            assert "[setup] Done" in result.stdout
+        else:
+            assert result.returncode != 0
+            assert (
+                "[setup] ERROR: OpenHands SDK is not importable from .venv"
+                in result.stderr
+            )
+
+    @pytest.mark.parametrize(
+        "missing_distribution",
+        [None, "openhands-sdk", "openhands-tools", "openhands-workspace"],
+    )
+    def test_windows_setup_py_verifies_installed_distributions_without_importing_sdk(
+        self, tmp_path, monkeypatch, capsys, missing_distribution
+    ):
+        """setup.py, setup.sh's Windows counterpart, checks metadata too (#668)."""
+        import importlib.util
+
+        self._fake_run_venv(tmp_path, missing_distribution)
+        spec = importlib.util.spec_from_file_location(
+            "preset_windows_setup", PRESETS_DIR / "setup.py"
+        )
+        assert spec is not None and spec.loader is not None
+        setup_py = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(setup_py)
+
+        real_run = subprocess.run
+
+        def run(args, **kwargs):
+            # The installer is outside this verification test; it has completed.
+            if args[0] == "uv":
+                return subprocess.CompletedProcess(args, 0)
+            return real_run(args, capture_output=True, text=True, **kwargs)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(setup_py.subprocess, "run", run)
+        monkeypatch.setattr(
+            setup_py.urllib.request,
+            "urlopen",
+            lambda *_args, **_kwargs: io.BytesIO(b'{"version": "1.0"}'),
+        )
+
+        exit_code = setup_py.main()
+
+        err = capsys.readouterr().err
+        if missing_distribution is None:
+            assert exit_code == 0, err
+        else:
+            assert exit_code == 1
+            assert "[setup] ERROR: OpenHands SDK is not importable from .venv" in err
 
     @pytest.mark.skipif(os.name == "nt", reason="runs setup.sh with bash")
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])

@@ -1,0 +1,28 @@
+# PR branch, same simulation
+$ uv run pytest tests/demo_616.py          # default
+t= 10.3s  run's conversation starts on the sandbox agent-server
+t= 10.6s  app server webhook <- batch of 5: ['ConversationStateUpdateEvent', 'SystemPromptEvent', 'MessageEvent', 'ConversationStateUpdateEvent', 'ConversationStateUpdateEvent']
+t= 10.9s  app server webhook <- batch of 5: ['ActionEvent', 'ConversationStateUpdateEvent', 'ObservationEvent', 'ConversationStateUpdateEvent', 'MessageEvent']
+t= 10.9s  conversation finished; the agent-server holds 10 events, last: ['ConversationStateUpdateEvent', 'MessageEvent', 'ConversationStateUpdateEvent']
+t= 16.0s  POST /runs/<id>/complete -> COMPLETED
+t= 40.9s  app server webhook <- batch of 3: ['ConversationStateUpdateEvent', 'ConversationStateUpdateEvent', 'ConversationStateUpdateEvent']
+t= 51.3s  runtime API: DELETE sandbox -> agent-server killed
+t= 66.4s  done watching (agent-server exited: True)
+
+agent-server (sandbox) events : 10
+app server received           : 13
+OK: app server has every event, including the final reply and the `finished` state update
+
+$ AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS=600 uv run pytest tests/demo_616.py
+t= 10.5s  run's conversation starts on the sandbox agent-server
+t= 10.8s  app server webhook <- batch of 5: ['ConversationStateUpdateEvent', 'SystemPromptEvent', 'MessageEvent', 'ConversationStateUpdateEvent', 'ConversationStateUpdateEvent']
+t= 11.1s  app server webhook <- batch of 5: ['ActionEvent', 'ConversationStateUpdateEvent', 'ObservationEvent', 'ConversationStateUpdateEvent', 'MessageEvent']
+t= 11.2s  conversation finished; the agent-server holds 10 events, last: ['ConversationStateUpdateEvent', 'MessageEvent', 'ConversationStateUpdateEvent']
+t= 16.3s  POST /runs/<id>/complete -> COMPLETED
+t= 41.1s  app server webhook <- batch of 3: ['ConversationStateUpdateEvent', 'ConversationStateUpdateEvent', 'ConversationStateUpdateEvent']
+t= 51.3s  runtime API: PAUSE sandbox -> agent-server frozen
+t= 96.8s  done watching (agent-server exited: False)
+
+agent-server (sandbox) events : 10
+app server received           : 13
+OK: app server has every event, including the final reply and the `finished` state update

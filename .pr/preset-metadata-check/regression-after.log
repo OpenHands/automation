@@ -1,0 +1,33 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.8, pytest-9.0.3, pluggy-1.6.0 -- /private/tmp/openhands-automation-668/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /private/tmp/openhands-automation-668
+configfile: pyproject.toml
+plugins: cov-7.1.0, xdist-3.8.0, timeout-2.4.0, anyio-4.14.2, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 275 items / 263 deselected / 12 selected
+
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[None-prompt] PASSED [  8%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[None-plugin] PASSED [ 16%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[None-plugin_spec] PASSED [ 25%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-sdk-prompt] PASSED [ 33%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-sdk-plugin] PASSED [ 41%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-sdk-plugin_spec] PASSED [ 50%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-tools-prompt] PASSED [ 58%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-tools-plugin] PASSED [ 66%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-tools-plugin_spec] PASSED [ 75%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-workspace-prompt] PASSED [ 83%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-workspace-plugin] PASSED [ 91%]
+tests/test_preset_router.py::TestPresetEntrypoint::test_setup_verifies_installed_distributions_without_importing_sdk[openhands-workspace-plugin_spec] PASSED [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /private/tmp/openhands-automation-668/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+openhands/automation/app.py:272
+  /private/tmp/openhands-automation-668/openhands/automation/app.py:272: DeprecationWarning: get_settings() is deprecated. Use get_config().service instead.
+    base_path = get_settings().base_path
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================ 12 passed, 263 deselected, 2 warnings in 4.54s ================

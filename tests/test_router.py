@@ -4315,13 +4315,20 @@ class TestCompleteRun:
         assert run.status_detail["phase"] == "callback"
         assert run.status_detail["kind"] == "unknown"
 
-    async def test_complete_run_default_keep_alive_null_cleans_up_sandbox(
+    async def test_complete_run_keeps_sandbox_until_buffered_events_flush(
         self, async_client, async_session
     ):
-        """Default null keep_alive preserves explicit sandbox deletion."""
+        """The agent server posts a partial event batch only after 30 s idle.
+
+        Neither a deletion nor a pause may start before then, or the app
+        server's copy of the conversation loses its last events (#616).
+        """
         import asyncio
+        from datetime import timedelta
 
         from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        agent_server_flush_delay = timedelta(seconds=30)
 
         automation = Automation(
             user_id=TEST_USER_ID,
@@ -4342,9 +4349,14 @@ class TestCompleteRun:
         async_session.add(run)
         await async_session.commit()
 
-        with patch(
-            "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
-        ) as mock_cleanup:
+        with (
+            patch(
+                "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
+            ) as mock_cleanup,
+            patch(
+                "openhands.automation.router.pause_sandbox", new_callable=AsyncMock
+            ) as mock_pause,
+        ):
             response = await async_client.post(
                 f"/api/automation/v1/runs/{run.id}/complete",
                 json={"status": "COMPLETED"},
@@ -4352,7 +4364,13 @@ class TestCompleteRun:
             await asyncio.sleep(0)
 
         assert response.status_code == 200
-        mock_cleanup.assert_awaited_once()
+        mock_cleanup.assert_not_called()
+        mock_pause.assert_not_called()
+
+        await async_session.refresh(run)
+        assert run.completed_at is not None
+        assert run.sandbox_cleanup_due_at is not None
+        assert run.sandbox_cleanup_due_at > run.completed_at + agent_server_flush_delay
 
     async def test_complete_run_keep_alive_true_does_not_cleanup_sandbox(
         self, async_client, async_session
@@ -4391,15 +4409,20 @@ class TestCompleteRun:
         assert response.status_code == 200
         mock_cleanup.assert_not_called()
 
-    async def test_complete_run_keep_alive_false_cleans_up_sandbox(
-        self, async_client, async_session
+    async def test_complete_run_without_flush_grace_deletes_at_once(
+        self, async_client, async_session, monkeypatch
     ):
-        """keep_alive=false preserves explicit sandbox deletion."""
+        """With no grace and no delay, keep_alive=false deletes the sandbox now."""
         import asyncio
 
+        from openhands.automation.config import get_config
         from openhands.automation.models import (
             AutomationRun,
             AutomationRunStatus,
+        )
+
+        monkeypatch.setattr(
+            get_config().service, "sandbox_event_flush_grace_seconds", 0
         )
 
         automation = Automation(
@@ -4434,10 +4457,17 @@ class TestCompleteRun:
         assert response.status_code == 200
         mock_cleanup.assert_awaited_once()
 
+        await async_session.refresh(run)
+        assert run.sandbox_cleanup_due_at is None
+
     async def test_complete_run_with_cleanup_delay_pauses_and_stamps_due_at(
         self, async_client, async_session, monkeypatch
     ):
-        """A configured delay pauses the sandbox and books its deletion."""
+        """A configured delay pauses the sandbox and books its deletion.
+
+        The pause waits out the flush grace: a paused agent server cannot post
+        its buffered events either.
+        """
         import asyncio
         from datetime import timedelta
 
@@ -4445,6 +4475,9 @@ class TestCompleteRun:
         from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         monkeypatch.setattr(get_config().service, "sandbox_cleanup_delay_seconds", 600)
+        monkeypatch.setattr(
+            get_config().service, "sandbox_event_flush_grace_seconds", 1
+        )
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -4476,7 +4509,9 @@ class TestCompleteRun:
                 f"/api/automation/v1/runs/{run.id}/complete",
                 json={"status": "COMPLETED"},
             )
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.5)
+            mock_pause.assert_not_called()
+            await asyncio.sleep(1)
 
         assert response.status_code == 200
         mock_pause.assert_awaited_once_with(

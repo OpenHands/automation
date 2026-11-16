@@ -172,6 +172,16 @@ class ExecutionBackend(ABC):
             run_id: Run ID string for logging
         """
 
+    async def stop_command(self, command_id: str) -> None:  # noqa: ARG002
+        """Stop a run's entrypoint command when the run is cancelled.
+
+        For Cloud mode: a no-op; cancelling deletes the run's sandbox, which
+        kills every process in it.
+        For Local mode: the agent server is shared and persistent, so only
+        this command (and its process group) is stopped.
+        """
+        return None
+
     @property
     @abstractmethod
     def is_local_mode(self) -> bool:

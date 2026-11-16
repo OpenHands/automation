@@ -596,7 +596,12 @@ class CreateAutomationRequest(BaseModel):
     )
     setup_script_path: str | None = Field(
         default=None,
-        description="Relative path inside tarball to setup script (e.g., setup.sh)",
+        description=(
+            "Relative path inside the tarball to a setup script, run with bash "
+            "from the tarball root before the entrypoint. Defaults to setup.sh, "
+            "which is skipped when absent; any other path must exist or the "
+            "run fails."
+        ),
     )
     entrypoint: str = Field(
         ..., description='Command to execute the automation (e.g., "uv run script.py")'
@@ -1425,6 +1430,8 @@ class AutomationRunResponse(BaseModel):
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None
+    # Set only while a run blocked by a transient limit waits to be retried.
+    deferred_until: UtcDatetime | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None
