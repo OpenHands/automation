@@ -125,6 +125,8 @@ async def _private_plugin_run(async_session_factory, source: str):
             tarball_path="plugin-spec://runtime",
             entrypoint='cd "$AUTOMATION_PLUGIN_ROOT" && bash run.sh',
             plugin_spec={"plugin": {"source": source}, "config": {}},
+            # What /plugin-spec stores: the manifest's path inside the plugin.
+            setup_script_path="scripts/setup.sh",
             enabled=True,
         )
         session.add(automation)
@@ -174,6 +176,10 @@ async def test_local_run_fetches_a_private_plugin_at_both_points(
     execute = await _dispatch(run, mock_settings, async_session_factory, agent)
 
     execute.assert_awaited_once()
+    # The manifest's setup script lives in the fetched plugin, not the runtime
+    # bundle; the bundle's root setup.sh wrapper runs it.
+    assert execute.await_args is not None
+    assert execute.await_args.kwargs["setup_script_path"] is None
     # The service's preflight and the agent server's fetch each read the
     # secret from the agent server's store.
     assert store.requests == ["/api/settings/secrets/PLUGIN_TOKEN"] * 2

@@ -207,7 +207,7 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
 6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. Presets also pass a finish-required plugin the service writes into the sandbox and, when their runner supports it, the repositories the app server can clone (`selected_repository`, `additional_repositories`): those on a provider and host the owner is connected to, from `provider_tokens_set` in `GET /api/v1/settings`. The runner clones the rest, and all of them if that read fails. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (a missing route or a body it cannot validate) logs `conversation_start_fallback` and the runner creates the conversation as before, unless the automation selected an agent profile: only the app server can launch one, so that run fails with `agent_profile_unsupported`. Any other refusal fails the run. Local mode and custom tarballs skip this step.
 7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
-   - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
+   - Extracts tarball, runs the setup script (the automation's `setup_script_path`; the default root `setup.sh` is skipped when absent, any other path must exist), exports env vars, runs entrypoint. Plugin-spec runs always use the bundle's root `setup.sh` wrapper
    - Native Windows local mode (the run's work dir is a drive path): the agent-server runs commands with cmd.exe, so the tarball, a JSON spec (env vars + entrypoint) and `windows_runner.py` are uploaded into the work dir and `uv run --no-project python <runner> <spec>` does the same steps, running `setup.py` instead of `setup.sh`
 8. **Return immediately** — Dispatcher does not wait for completion
 
@@ -240,7 +240,7 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 - **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses `authenticate_request`. Cloud runs use the per-user `OPENHANDS_API_KEY`; local runs use `AUTOMATION_CALLBACK_API_KEY` when configured (the service's local API key, not the agent-server session key). The authenticated user must own the run's parent automation.
 - **Optimistic locking**: Both callback endpoint and watchdog use `UPDATE ... WHERE status = 'RUNNING'` and check `CursorResult.rowcount` to handle races. Returns 409 on conflict.
-- **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`); when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused instead and the watchdog deletes it once `automation_runs.sandbox_cleanup_due_at` passes. On dispatch failure, the dispatcher deletes the sandbox immediately.
+- **Sandbox cleanup**: On callback (unless `keep_alive=True`), the sandbox keeps running for `AUTOMATION_SANDBOX_EVENT_FLUSH_GRACE_SECONDS` (default 35) so its agent server can post the conversation's last buffered events to the app server (it flushes a partial batch only after 30 s idle). The watchdog then deletes it once `automation_runs.sandbox_cleanup_due_at` passes; when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused after the grace period and deleted after the delay. With both at 0 it is deleted at once. On dispatch failure, the dispatcher deletes the sandbox immediately.
 
 ## Database
 
@@ -294,15 +294,31 @@ NULL`). Zero factories is a valid state; there is no default factory.
 - `id` is never reused. Other services keep it as a plain reference with no
   foreign key, because their data lives in other databases.
 - Read routes need `view_automations`; creating, renaming and deleting a
-  factory, and setting or clearing `factory_id`, need `manage_automations`.
-  The creator exception of `_assert_can_manage` does not apply to `factory_id`.
-  `authorize_factory_change` is the one check: `POST /v1`, `/v1/plugin-spec`,
-  `/v1/preset/prompt`, `/v1/preset/plugin` and `PATCH /v1/{id}` all use it (403
-  without the permission, 404 for an unknown or other-org factory). Drafts store
+  factory, and *changing* an automation's factory, need `manage_automations`.
+  `authorize_factory_change` is the one check (403 without the permission, 404
+  for an unknown or other-org factory): `POST /v1`, `/v1/plugin-spec`,
+  `/v1/preset/prompt` and `/v1/preset/plugin` run it when `factory_id` is set,
+  `PATCH /v1/{id}` only when the value differs from the stored one (resending
+  it or `null` on an automation with no factory is not a change), and the draft
+  validators report it as a `factory_id_403`/`factory_id_404` error. Drafts store
   `factory_id`, but their hidden test-run automation never gets it.
+- Membership gives an automation access to its factory's data, so the creator
+  exception of `_assert_can_manage` stops at the factory: any `PATCH` of an
+  automation that is in a factory needs `manage_automations`.
+- Re-enabling an installed template (`template` on a create endpoint) returns
+  the existing automation unchanged; if the request names a `factory_id` the
+  automation is not in, it is `409` rather than silently ignored. Move it with
+  `PATCH`.
 - Deleting a factory returns `409` while a live automation belongs to it.
   Otherwise one transaction detaches its soft-deleted automations (through the
-  ORM, so the change audit records it) and removes the row.
+  ORM, so the change audit records it) and removes the row with a single
+  conditional `DELETE ... WHERE NOT EXISTS (live member)`.
+- Assigning takes `lock_factory_for_assignment` right before the write, not
+  before the slow lookups: `FOR KEY SHARE` on PostgreSQL (conflicts with the
+  delete's `FOR UPDATE`, not with a rename), a no-op write on SQLite to take its
+  write lock. The delete-versus-assign race is tested with per-request sessions
+  (`race_client` in `tests/test_factories.py`); the shared-session `async_client`
+  cannot show it.
 - Git sync neither writes nor reads `factory_id`: a factory's id is
   local to an install.
 
@@ -429,8 +445,10 @@ path gained is the catalog contract the presets already had:
 - **`template` provenance** (`TemplateProvenance` in `schemas.py`), accepted by
   all three creation endpoints and stored under `preset_metadata["template"]`.
   `find_existing_template_automation` (`utils/templates.py`) is consulted first,
-  so enabling an entry twice returns the existing non-draft automation with a
-  200 (a draft test's hidden DRAFT artifact is not an install).
+  so a member enabling an entry twice gets their existing non-draft automation
+  back with a 200 (a draft test's hidden DRAFT artifact is not an install).
+  The lookup is per member (`created_by_user_id`), not per org: another
+  member enabling the same entry gets their own automation, running as them.
   `record_first_run_outcome` keys on the same value, so bundles get first-run
   telemetry for free.
 - **Preflight**: `POST /v1/validate` accepts `"endpoint": "/v1"`. It validates
@@ -666,7 +684,12 @@ and `app.py` version lines.
 
 ### SDK dependency bumps
 
-When bumping `openhands-sdk` / `openhands-workspace` pins:
+The `bump-pins` workflow (`.github/workflows/bump-pins.yml`, a caller of the
+reusable workflow in `OpenHands/release-actions`) opens a `fix: bump SDK to <ver>`
+PR from the `bump-pins` branch when a newer SDK release is on PyPI, and rebuilds
+that branch when the next one is. Run it by hand from the Actions tab if needed.
+
+To bump the `openhands-sdk` / `openhands-workspace` pins by hand instead:
 1. Update both versions in `pyproject.toml` dependencies.
 2. Run `uv lock` to regenerate `uv.lock`.
 3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —

@@ -6,10 +6,11 @@ factories themselves.
 """
 
 import uuid
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import (
@@ -65,19 +66,19 @@ async def _get_org_factory(
     org_id: uuid.UUID,
     factory_id: uuid.UUID,
     *,
-    lock: str | None = None,
+    lock: Literal["update", "key_share"] | None = None,
 ) -> Factory:
     """Fetch a factory of the caller's org by id, or raise 404.
 
-    ``lock`` is ``"update"`` or ``"share"`` and takes a row lock on PostgreSQL.
-    Deleting a factory locks it for update and assigning an automation locks it
-    for share, so an assignment cannot slip in between the delete's count of live
-    automations and the row's removal. SQLite has a single writer and no row
-    locks.
+    ``lock`` takes a row lock on PostgreSQL: ``"update"`` for a delete,
+    ``"key_share"`` for an assignment. They conflict with each other, but
+    ``"key_share"`` does not block a rename.
     """
     query = select(Factory).where(Factory.org_id == org_id, Factory.id == factory_id)
-    if lock is not None and not using_sqlite():
-        query = query.with_for_update(read=lock == "share")
+    if lock == "update" and not using_sqlite():
+        query = query.with_for_update()
+    elif lock == "key_share" and not using_sqlite():
+        query = query.with_for_update(read=True, key_share=True)
     factory = (await session.execute(query)).scalars().first()
     if factory is None:
         raise HTTPException(
@@ -95,7 +96,8 @@ async def authorize_factory_change(
     Membership is a factory-level act: features built on factories hand a
     factory's automations access to the factory's data. It needs
     ``manage_automations`` (403), even for the automation's creator, and the
-    factory must belong to the caller's org (404).
+    factory must belong to the caller's org (404). This takes no lock; call
+    ``lock_factory_for_assignment`` right before the write.
     """
     if "manage_automations" not in user.permissions:
         raise HTTPException(
@@ -103,7 +105,58 @@ async def authorize_factory_change(
             detail="Only admins and owners can change an automation's factory",
         )
     if factory_id is not None:
-        await _get_org_factory(session, user.org_id, factory_id, lock="share")
+        await _get_org_factory(session, user.org_id, factory_id)
+
+
+def reject_factory_conflict(
+    existing: Automation, requested_factory_id: uuid.UUID | None
+) -> None:
+    """Refuse a template re-enable that asks for a factory the existing
+    automation is not in, rather than returning it as if the request applied.
+
+    The re-enable stays a lookup with no write; ``PATCH`` moves the automation.
+    """
+    if requested_factory_id is None or existing.factory_id == requested_factory_id:
+        return
+    where = (
+        f"in factory {existing.factory_id}"
+        if existing.factory_id
+        else "not in a factory"
+    )
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"This template is already enabled as automation {existing.id}, which "
+            f"is {where}; change its factory with PATCH /v1/{existing.id}"
+        ),
+    )
+
+
+async def lock_factory_for_assignment(
+    session: AsyncSession, org_id: uuid.UUID, factory_id: uuid.UUID
+) -> None:
+    """Keep the factory from being deleted until this transaction ends, or raise
+    404 if it is already gone.
+
+    Call it right before the write, not before slow calls, so the lock is short.
+    SQLite has no row locks, so a no-op write takes its single write lock
+    instead: a delete then runs wholly before this (404 here) or wholly after the
+    commit (409 for the new member).
+    """
+    if using_sqlite():
+        result = await session.execute(
+            update(Factory)
+            .where(Factory.org_id == org_id, Factory.id == factory_id)
+            .values(updated_at=Factory.updated_at)
+            .returning(Factory.id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.first() is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Factory not found"
+            )
+    else:
+        await _get_org_factory(session, org_id, factory_id, lock="key_share")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -191,8 +244,34 @@ async def delete_factory(
     delete.
     """
     factory = await _get_org_factory(session, user.org_id, factory_id, lock="update")
-    live = await _count_live(session, factory.id)
-    if live:
+
+    # Loaded and set through the ORM, not left to the foreign key's SET NULL, so
+    # each detach reaches the automation change audit.
+    detached = await session.scalars(
+        select(Automation).where(
+            Automation.factory_id == factory.id, Automation.deleted_at.is_not(None)
+        )
+    )
+    for automation in detached:
+        automation.factory_id = None
+    await session.flush()
+
+    # One statement checks for live members and deletes, so on SQLite an
+    # assignment cannot commit between the two. On PostgreSQL the row lock above
+    # already holds assignments back, and this statement reads after it.
+    deleted = await session.execute(
+        delete(Factory)
+        .where(
+            Factory.id == factory.id,
+            ~exists().where(
+                Automation.factory_id == factory.id, Automation.deleted_at.is_(None)
+            ),
+        )
+        .returning(Factory.id)
+        .execution_options(synchronize_session=False)
+    )
+    if deleted.first() is None:
+        live = await _count_live(session, factory.id)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -200,16 +279,5 @@ async def delete_factory(
                 "remove them from it first"
             ),
         )
-
-    # Loaded and set through the ORM, not left to the foreign key's SET NULL, so
-    # each detach reaches the automation change audit.
-    detached = await session.scalars(
-        select(Automation).where(Automation.factory_id == factory.id)
-    )
-    for automation in detached:
-        automation.factory_id = None
-    await session.flush()
-    factory_id = factory.id
-    await session.delete(factory)
     await session.commit()
     background_tasks.add_task(notify_factory_deleted, client, user.org_id, factory_id)

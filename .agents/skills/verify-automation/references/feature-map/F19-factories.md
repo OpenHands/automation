@@ -144,13 +144,16 @@ Preconditions:
 
 - The `id` is the only handle for a factory, in URLs and for other services.
   A deleted factory's id is never handed out again.
-- Setting `factory_id` is a factory-level act: it needs `manage_automations`
+- Changing `factory_id` is a factory-level act: it needs `manage_automations`
   even for the automation's own creator, unlike the other fields of a PATCH,
-  and on every create endpoint that accepts `factory_id`. A draft stores the
-  field but its hidden test-run automation never carries it, so a draft cannot
-  block a factory delete.
-  The local key holds the permission, so that refusal needs an org member
-  and is covered by the unit tests, not here.
+  and on every create endpoint that accepts `factory_id`. Resending the stored
+  value is not a change. Any PATCH of an automation that is in a factory needs
+  the permission too. A draft stores the field but its hidden test-run
+  automation never carries it, so a draft cannot block a factory delete; a draft
+  naming an unusable factory validates as `factory_id_403`/`factory_id_404`.
+  Re-enabling an installed template with a different `factory_id` is 409.
+  The local key holds the permission, so those refusals need an org member
+  and are covered by the unit tests, not here.
 - `automation_count` and the delete check count live (not soft-deleted)
   automations only, in any state, including drafts.
 - `GET /v1/factories` pages with `limit` (1 to 100) and `offset` like the

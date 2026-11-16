@@ -7,6 +7,7 @@ Neither endpoint writes.
 """
 
 import logging
+import uuid
 from zoneinfo import available_timezones
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -26,6 +27,7 @@ from openhands.automation.event_schemas.catalog import (
     pattern_can_match,
     supported_event_patterns,
 )
+from openhands.automation.factory_router import authorize_factory_change
 from openhands.automation.filter_eval import FilterFunctions
 from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
@@ -230,6 +232,8 @@ async def validate_draft(
     except HTTPException as e:
         errors.append(_agent_profile_error(e))
 
+    errors.extend(await factory_id_errors(draft.factory_id, user, session))
+
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
@@ -276,6 +280,26 @@ async def validate_draft(
         errors=errors,
         sample_event_matched=sample_event_matched,
     )
+
+
+async def factory_id_errors(
+    factory_id: uuid.UUID | None, user: AuthenticatedUser, session: AsyncSession
+) -> list[DraftValidationError]:
+    """The problems creating the draft in ``factory_id`` would hit: the same
+    checks the create endpoints make, reported before the real create fails."""
+    if factory_id is None:
+        return []
+    try:
+        await authorize_factory_change(session, user, factory_id)
+    except HTTPException as e:
+        return [
+            DraftValidationError(
+                field="factory_id",
+                code=f"factory_id_{e.status_code}",
+                message=str(e.detail),
+            )
+        ]
+    return []
 
 
 def _agent_profile_error(error: HTTPException) -> DraftValidationError:

@@ -382,6 +382,26 @@ class TestNonInteractive:
         assert "PATH" in env
 
 
+class TestTimeout:
+    async def test_timeout_error_says_how_to_raise_it(self, tmp_path, monkeypatch):
+        """The banner is the only place an operator sees this, so it names the
+        setting to change rather than just the elapsed time."""
+        hang = tmp_path / "hang.sh"
+        hang.write_text("#!/bin/sh\nsleep 30\n")
+        hang.chmod(0o755)
+        monkeypatch.setenv("GIT_SSH_COMMAND", str(hang))
+
+        with pytest.raises(GitSyncError) as excinfo:
+            await check_remote_access(
+                "ssh://git@example.invalid/org/repo.git", "main", "", timeout=0.5
+            )
+
+        message = str(excinfo.value)
+        assert "timed out after 0.5s" in message
+        assert "git_timeout_seconds" in message
+        assert "AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS" in message
+
+
 class TestCurrentHead:
     async def test_none_on_unborn_branch(self, tmp_path, origin):
         workdir = tmp_path / "clone"

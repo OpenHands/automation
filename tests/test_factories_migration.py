@@ -1,4 +1,4 @@
-"""Migration 038: factories and automations.factory_id, with data in place."""
+"""Migration 039: factories and automations.factory_id, with data in place."""
 
 import os
 import sqlite3
@@ -31,7 +31,7 @@ def _alembic(db_url: str, *args: str) -> str:
 def test_existing_rows_survive_the_upgrade_with_no_factory(tmp_path):
     db_path = str(tmp_path / "factories.db")
     db_url = f"sqlite:///{db_path}"
-    _alembic(db_url, "upgrade", "037")
+    _alembic(db_url, "upgrade", "038")
     automation_id = uuid.uuid4()
     with sqlite3.connect(db_path) as con:
         con.execute(
@@ -81,7 +81,7 @@ def test_the_upgrade_adds_one_head_and_downgrades(tmp_path):
     _alembic(db_url, "upgrade", "head")
 
     assert _alembic(db_url, "heads").count("(head)") == 1
-    _alembic(db_url, "downgrade", "037")
+    _alembic(db_url, "downgrade", "038")
 
     engine = create_engine(db_url)
     inspector = inspect(engine)

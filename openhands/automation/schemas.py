@@ -596,7 +596,12 @@ class CreateAutomationRequest(BaseModel):
     )
     setup_script_path: str | None = Field(
         default=None,
-        description="Relative path inside tarball to setup script (e.g., setup.sh)",
+        description=(
+            "Relative path inside the tarball to a setup script, run with bash "
+            "from the tarball root before the entrypoint. Defaults to setup.sh, "
+            "which is skipped when absent; any other path must exist or the "
+            "run fails."
+        ),
     )
     entrypoint: str = Field(
         ..., description='Command to execute the automation (e.g., "uv run script.py")'
@@ -788,8 +793,9 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         description=(
             "Factory this automation belongs to. Null removes it from its "
-            "factory; omit to leave it unchanged. Requires manage_automations, "
-            "even for the automation's creator."
+            "factory; omit to leave it unchanged. Changing it requires "
+            "manage_automations, even for the automation's creator; resending "
+            "the current value is not a change."
         ),
     )
     tarball_path: str | None = Field(default=None)
@@ -1262,20 +1268,8 @@ class FactoryCreate(BaseModel):
         return stripped
 
 
-class FactoryUpdate(BaseModel):
+class FactoryUpdate(FactoryCreate):
     """Request to rename a factory."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(..., min_length=1, max_length=255)
-
-    @field_validator("name")
-    @classmethod
-    def strip_name(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("name must not be blank")
-        return stripped
 
 
 class FactoryResponse(BaseModel):
@@ -1436,6 +1430,8 @@ class AutomationRunResponse(BaseModel):
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None
+    # Set only while a run blocked by a transient limit waits to be retried.
+    deferred_until: UtcDatetime | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None

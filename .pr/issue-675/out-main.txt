@@ -1,0 +1,7 @@
+installation A, run 1:              AUTOMATION_USER_ID=c1a96d89-eae7-53bd-86ad-07f26266402b
+installation B, run 1:              AUTOMATION_USER_ID=c1a96d89-eae7-53bd-86ad-07f26266402b
+installation A, after restart:      AUTOMATION_USER_ID=c1a96d89-eae7-53bd-86ad-07f26266402b
+
+BUG: both installations attribute their conversations to the same identity
+BUG: the shared local placeholder c1a96d89-eae7-53bd-86ad-07f26266402b is forwarded
+OK: installation A keeps its identity across a restart
