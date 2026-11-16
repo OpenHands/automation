@@ -169,7 +169,8 @@ async def list_webhooks(
     query = (
         select(CustomWebhook)
         .where(CustomWebhook.org_id == auth.org_id)
-        .order_by(CustomWebhook.created_at.desc())
+        # id breaks exact created_at ties, so offset pages stay stable.
+        .order_by(CustomWebhook.created_at.desc(), CustomWebhook.id.desc())
         .limit(limit)
         .offset(offset)
     )

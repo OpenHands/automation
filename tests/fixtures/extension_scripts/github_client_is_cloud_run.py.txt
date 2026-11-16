@@ -1,0 +1,12 @@
+import os
+
+
+def is_cloud_run() -> bool:
+    """Whether this run is on OpenHands Cloud or Enterprise.
+
+    The automation service hands a run the Agent Server URL only on a local
+    Agent Canvas; elsewhere the run talks to the OpenHands API instead.
+    """
+    return bool(os.environ.get("OPENHANDS_CLOUD_API_URL")) and not os.environ.get(
+        "AGENT_SERVER_URL"
+    )

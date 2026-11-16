@@ -1,0 +1,334 @@
+[
+  {
+    "case": "omitted",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example"
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": true,
+      "errors": [],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "populated",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example",
+        "tags": [
+          "example-tag"
+        ]
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "empty",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example",
+        "tags": []
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "normalized",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example",
+        "tags": [
+          " Example Tag ",
+          "example-tag"
+        ]
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "invalid_slug",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example",
+        "tags": [
+          "Bad Tag!"
+        ]
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "too_many",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example",
+        "tags": [
+          "tag-0",
+          "tag-1",
+          "tag-2",
+          "tag-3",
+          "tag-4",
+          "tag-5",
+          "tag-6",
+          "tag-7",
+          "tag-8",
+          "tag-9",
+          "tag-10"
+        ]
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "too_long",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example",
+        "tags": [
+          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ]
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "unknown_field",
+    "method": "POST",
+    "path": "/v1/validate",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "tags-live-probe",
+        "trigger": {
+          "type": "cron",
+          "schedule": "*/10 * * * *",
+          "timezone": "UTC"
+        },
+        "entrypoint": "python run.py",
+        "tarball_path": "oh-internal://uploads/example",
+        "unexpected": "value"
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "unexpected",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "/v1/preset/prompt_tags",
+    "request": {
+      "endpoint": "/v1/preset/prompt",
+      "draft": {
+        "name": "preset-probe",
+        "tags": []
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "/v1/preset/plugin_tags",
+    "request": {
+      "endpoint": "/v1/preset/plugin",
+      "draft": {
+        "name": "preset-probe",
+        "tags": []
+      }
+    },
+    "http_status": 200,
+    "response": {
+      "valid": false,
+      "errors": [
+        {
+          "field": "tags",
+          "code": "extra_forbidden",
+          "message": "Extra inputs are not permitted"
+        }
+      ],
+      "sampleEventMatched": null
+    }
+  },
+  {
+    "case": "saved_draft",
+    "request": {
+      "endpoint": "/v1",
+      "draft": {
+        "name": "saved-tag-probe",
+        "tags": [
+          " Example Tag ",
+          "example-tag"
+        ]
+      }
+    },
+    "http_status": 422,
+    "response": {
+      "detail": {
+        "message": "Draft body does not match endpoint schema",
+        "errors": [
+          {
+            "field": "tags",
+            "code": "extra_forbidden",
+            "message": "Extra inputs are not permitted"
+          }
+        ]
+      }
+    }
+  }
+]

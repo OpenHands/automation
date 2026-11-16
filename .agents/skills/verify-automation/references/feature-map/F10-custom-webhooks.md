@@ -28,7 +28,7 @@ Routes: `POST /api/automation/v1/webhooks`, `GET /api/automation/v1/webhooks`,
 - `F10.list`: `GET /v1/webhooks` pages newest first with `limit`/`offset`, reports `total`, never includes `webhook_secret`, and rejects `limit=101` and `offset=-1` with 422.
 - `F10.get-missing`: GET, PATCH, DELETE and rotate on an unknown id answer 404 `Webhook not found`; a non-UUID id answers 422.
 - `F10.patch`: PATCH changes `name`, `event_key_expr`, `signature_header` and `event_id_header` (set, then cleared with `null`), bumps `updated_at`, and a GET reads the change back; `signature_scheme: null` stores NULL and reads as `hmac_sha256_hex`; `{}` changes nothing; `source` and `webhook_secret` are refused with 422.
-- `F10.patch-null-required`: an explicit `null` for a NOT NULL field (`name`, `enabled`) should be refused with 422 but answers 500 (known bug).
+- `F10.patch-null-required`: an explicit `null` for a NOT NULL field (`name`, `enabled`, `event_key_expr`, `signature_header`) answers 422 naming the field and leaves the row unchanged.
 - `F10.disable`: `enabled: false` makes deliveries answer 404 `Unknown webhook source`, and re-enabling restores them.
 - `F10.rotate`: rotate-secret answers 200 with a new `whsec_` secret; a delivery signed with the old secret answers 401 and one signed with the new secret 200; GET still shows no secret.
 - `F10.delete`: DELETE answers 204 with an empty body; the webhook is gone from GET and the list, deliveries answer 404, and a second DELETE answers 404.
@@ -114,7 +114,6 @@ Preconditions:
 - **List (`F10.list`).** Newest first, paged, never a secret.
   ```sh
   control-automation api POST /v1/webhooks --json '{"name":"qa list a","source":"qa-list-a","webhook_secret":"qa-list-secret"}' --expect 201 --quiet
-  sleep 1.1
   control-automation api POST /v1/webhooks --json '{"name":"qa list b","source":"qa-list-b","webhook_secret":"qa-list-secret"}' --expect 201 --quiet
   TOTAL=$(control-automation api GET /v1/webhooks --expect 200 --field total)
   test "$TOTAL" -ge 2
@@ -125,8 +124,8 @@ Preconditions:
   control-automation api GET /v1/webhooks --query offset=-1 --expect 422 --check detail.0.loc contains offset
   ```
   `qa-list-b` (created last) comes first, `offset=1` skips it, and no row has
-  a `webhook_secret` key. The `sleep 1.1` is deliberate: `created_at` has
-  one-second resolution and the list has no tiebreaker (see Gotchas).
+  a `webhook_secret` key. No `sleep` is needed: `created_at` has
+  microseconds, so back-to-back creates list newest first (see Gotchas).
 - **Unknown and malformed ids (`F10.get-missing`).** Every id route answers 404 for an unknown UUID and 422 for a non-UUID.
   ```sh
   NOPE=00000000-0000-0000-0000-000000000000
@@ -157,15 +156,18 @@ Preconditions:
   `updated_at`; `event_id_header: null` clears it; a NULL
   `signature_scheme` is stored as SQL NULL and served as `hmac_sha256_hex`;
   the refused PATCHes leave the row as it was.
-- **Explicit null on a required field (`F10.patch-null-required`), known bug.** The update model accepts `null` for every field, the handler writes it, and the NOT NULL constraint fails at commit with no handler, so the client gets a bare 500 instead of a 422. The row is left unchanged.
+- **Explicit null on a required field (`F10.patch-null-required`).** The update model refuses `null` for a NOT NULL field with a 422 before anything is written.
   ```sh
   NUL_ID=$(control-automation api POST /v1/webhooks --json '{"name":"qa null","source":"qa-null","webhook_secret":"qa-null-secret"}' --expect 201 --field id)
-  control-automation api PATCH "/v1/webhooks/$NUL_ID" --json '{"name":null}' --expect 422 --save F10.patch-null-required/name-null  # bug: status eq 500
+  control-automation api PATCH "/v1/webhooks/$NUL_ID" --json '{"name":null}' --expect 422 --check detail.0.loc.1 eq name --save F10.patch-null-required/name-null
+  control-automation api PATCH "/v1/webhooks/$NUL_ID" --json '{"enabled":null}' --expect 422 --check detail.0.loc.1 eq enabled
+  control-automation api PATCH "/v1/webhooks/$NUL_ID" --json '{"event_key_expr":null}' --expect 422 --check detail.0.loc.1 eq event_key_expr
+  control-automation api PATCH "/v1/webhooks/$NUL_ID" --json '{"signature_header":null}' --expect 422 --check detail.0.loc.1 eq signature_header
+  control-automation api GET "/v1/webhooks/$NUL_ID" --expect 200 --check name eq 'qa null' --check enabled eq true --check event_key_expr eq type --check signature_header eq X-Signature-256
   ```
-  Expected: 422 naming `name` (and the same for `enabled`, `event_key_expr`,
-  `signature_header`). Actual: `500 Internal Server Error` with an
-  `IntegrityError` traceback in the service log; a GET afterwards still shows
-  `name: qa null`.
+  The message is `<field> cannot be null; omit it to leave it unchanged`.
+  The nullable `signature_scheme` and `event_id_header` still clear with
+  `null` (`F10.patch`).
 - **Disable stops deliveries (`F10.disable`).** A disabled webhook is unknown to the event route until re-enabled.
   ```sh
   D_ID=$(control-automation api POST /v1/webhooks --json '{"name":"qa disable","source":"qa-disable","webhook_secret":"qa-disable-secret"}' --expect 201 --field id)
@@ -217,18 +219,18 @@ Preconditions:
   `--unsafe-unredacted` to hand the clear value to the capturing shell.
 - `source` is lowercased before validation and before the uniqueness check,
   so `QA-DUP` collides with `qa-dup`, and the 409 names the lowercased form.
-  `github`, `jira_dc` and `bitbucket_data_center` are reserved; `slack` is not
-  (F17 uses that).
+  `github`, `jira_dc`, `bitbucket_data_center` and `azure_devops` (since
+  #626) are reserved; `slack` is not (F17 uses that).
 - `source` cannot be changed by PATCH; delete and recreate instead (the new
   webhook gets a new secret and the external service must be reconfigured).
 - PATCH applies `exclude_unset`: an omitted field is untouched, an explicit
   `null` is written. That clears the nullable `event_id_header` and
-  `signature_scheme` (served as `hmac_sha256_hex`), but for `name`,
-  `enabled`, `event_key_expr` and `signature_header` it is the 500 of
+  `signature_scheme` (served as `hmac_sha256_hex`); for `name`, `enabled`,
+  `event_key_expr` and `signature_header` it is the 422 of
   `F10.patch-null-required`.
-- The list orders by `created_at` only, stored with one-second resolution on
-  SQLite and with no tiebreaker, so webhooks created in the same second can
-  come back in either order and can shift between pages.
+- The list orders by `created_at` (microseconds) and then `id`, so pages
+  are stable. Webhooks from a release before that fix have whole-second
+  `created_at` on SQLite and order among themselves by random `id`.
 - `updated_at` comes back with microseconds after a write and without them in
   the create response; compare values, not formats.
 - A disabled webhook and an unknown source give the same 404 on the event

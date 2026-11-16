@@ -15,23 +15,28 @@ in the ExecutionBackend (see automation/backends/).
 """
 
 import asyncio
+import io
 import json
 import logging
 import random
+import tarfile
 import uuid
+from collections.abc import Collection, Mapping
 from datetime import timedelta
 from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import X_ORG_ID_HEADER
 from openhands.automation.backends import (
+    ConversationStart,
     ExecutionBackend,
     ExecutionContext,
+    StartedConversation,
     get_backend,
 )
 from openhands.automation.config import ServiceSettings, get_config
@@ -39,12 +44,14 @@ from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    ConversationStartError,
+    ConversationStartUnavailable,
     DailySandboxLimitReachedError,
     PermanentDispatchError,
     SandboxProvisioningError,
     TarballNotFoundError,
 )
-from openhands.automation.execution import execute_in_context
+from openhands.automation.execution import execute_in_context, upload_files
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -58,19 +65,39 @@ from openhands.automation.observability import (
     inject_trace_context,
     span,
 )
-from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
+from openhands.automation.plugin_secrets import PluginSourceSecrets
+from openhands.automation.plugin_specs import (
+    PluginSpecError,
+    build_execution_payload,
+    plugin_secret_names,
+)
+from openhands.automation.preset_router import with_current_preset_runner
 from openhands.automation.subjects import conversation_id_for, service_account_id_of
-from openhands.automation.telemetry import capture_automation_event
+from openhands.automation.telemetry import (
+    capture_automation_event,
+    get_automation_backend_distinct_id,
+)
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
+from openhands.automation.utils.app_server_repos import (
+    RepositorySplit,
+    split_repositories,
+)
+from openhands.automation.utils.finish_plugin import (
+    finish_plugin_dir,
+    finish_plugin_files,
+)
 from openhands.automation.utils.kv import create_kv_token
 from openhands.automation.utils.model_profiles import (
     validate_agent_profile_allowlists_with_client,
 )
 from openhands.automation.utils.run import (
+    count_running_runs,
     disable_automation,
+    expire_aged_deferred_runs,
     mark_run_status,
     mark_run_terminal,
+    requeue_deferred_run,
     run_is_running,
     update_bash_command_id,
     update_run_current_phase,
@@ -196,6 +223,216 @@ def _api_key_error_message(exc: APIKeyError, what: str) -> str:
     return f"Failed to get API key to {what}: {exc}"
 
 
+# Presets whose runner the service ships, so it can be told to attach to a
+# conversation the app server started for the run.
+_STOCK_PRESET_TYPES = frozenset({"prompt", "plugin"})
+_PLUGIN_SOURCE_KEYS = frozenset({"source", "ref", "repo_path"})
+
+
+def _conversation_tags(automation: Automation, run: AutomationRun) -> dict[str, str]:
+    """The tags the stock runners put on their conversations."""
+    return {
+        "automationtrigger": "automation",
+        "automationid": str(automation.id),
+        "automationname": automation.name[:256],
+        "automationrunid": str(run.id),
+    }
+
+
+def _conversation_start(
+    automation: Automation,
+    run: AutomationRun,
+    resolved_runtime: dict[str, Any] | None,
+    plugin_fetches: list[dict[str, Any]],
+    env_vars: dict[str, str],
+    runner_takes_repository_list: bool = False,
+    git_connections: Mapping[str, str | None] | None = None,
+) -> ConversationStart | None:
+    """What the app server needs to start this run's conversation, or None.
+
+    Only a run whose runner the service ships can attach to a conversation
+    started for it: the prompt and plugin presets, and plugin-spec runs on the
+    stock conversation runner. Custom tarballs keep creating their own.
+    A preset's repositories go to the app server only when its runner clones
+    just the ones it is told to (``AUTOMATION_RUNNER_REPOS``): an older runner
+    clones them all and would fail on the app server's checkouts. Of those,
+    only the ones on a provider and host the owner is connected to
+    (``git_connections``) go: the app server clones through that connection.
+    Without the owner's connections (None) the runner clones them all.
+    """
+    preset_type = (automation.preset_metadata or {}).get("preset_type")
+    if resolved_runtime is not None:
+        if resolved_runtime.get("runner") != "conversation":
+            return None
+        agent_profile_id = (
+            resolved_runtime.get("agent_profile_id") or automation.agent_profile_id
+        )
+        # The agent profile owns the model for plugin-spec runs.
+        llm_profile = None
+        plugins = [
+            {k: v for k, v in plugin.items() if k in _PLUGIN_SOURCE_KEYS}
+            for plugin in plugin_fetches
+        ]
+        repositories: list[dict[str, Any]] = []
+    elif preset_type in _STOCK_PRESET_TYPES:
+        preset_plugins: list[dict[str, Any]] = []
+        if preset_type == "plugin":
+            preset_plugins = (automation.preset_metadata or {}).get("plugins") or []
+            if not preset_plugins:
+                # An A/B experiment: the runner picks the variant's plugins and
+                # model itself, so only it can create that conversation.
+                return None
+        # The presets require the finish tool; the app server's start request
+        # takes that requirement as a plugin (see utils/finish_plugin.py).
+        plugins = [{"source": finish_plugin_dir(str(run.id))}, *preset_plugins]
+        agent_profile_id = automation.agent_profile_id
+        llm_profile = automation.model
+        repositories = (
+            [
+                {
+                    "repository": r.repository,
+                    "git_provider": r.git_provider,
+                    "branch": r.branch,
+                }
+                for r in _repository_split(automation, git_connections).app_server
+            ]
+            if runner_takes_repository_list and git_connections is not None
+            else []
+        )
+    else:
+        return None
+    return ConversationStart(
+        agent_profile_id=str(agent_profile_id) if agent_profile_id else None,
+        llm_profile=llm_profile or None,
+        conversation_id=env_vars.get("AUTOMATION_CONVERSATION_ID"),
+        plugins=plugins,
+        tags=_conversation_tags(automation, run),
+        repositories=repositories,
+    )
+
+
+def _repository_split(
+    automation: Automation, git_connections: Mapping[str, str | None] | None
+) -> RepositorySplit:
+    """A preset's repositories: those the app server clones, and the rest."""
+    return split_repositories(
+        (automation.preset_metadata or {}).get("repos"), git_connections or {}
+    )
+
+
+def _runner_repositories(
+    automation: Automation,
+    start: ConversationStart,
+    started: StartedConversation,
+    git_connections: Mapping[str, str | None] | None,
+) -> list[dict[str, Any]]:
+    """Repositories the runner still clones itself after the app server start.
+
+    Those the app server cannot take, plus the additional ones when it does
+    not report repositories (an app server from before it cloned several).
+    """
+    split = _repository_split(automation, git_connections)
+    runner = list(split.runner)
+    if not started.reports_repositories and len(start.repositories) > 1:
+        recorded = [
+            r
+            for r in (automation.preset_metadata or {}).get("repos") or []
+            if r not in split.runner
+        ]
+        runner.extend(recorded[1:])
+    return runner
+
+
+async def _owner_git_connections(
+    backend: ExecutionBackend,
+    client: httpx.AsyncClient,
+    ctx: ExecutionContext,
+    log_extra: dict[str, Any],
+) -> dict[str, str | None] | None:
+    """The run owner's git connections, or None when they cannot be read.
+
+    Without them no repository goes to the app server: the runner clones them
+    all, as it did before the app server cloned any.
+    """
+    try:
+        return await backend.git_connections(client, ctx)
+    except Exception as exc:
+        logger.warning(
+            "git_connections_unavailable: %s; the runner clones every repository",
+            str(exc) or type(exc).__name__,
+            extra=log_extra,
+        )
+        return None
+
+
+def _runner_takes_repository_list(tarball_source: bytes | str | None) -> bool:
+    """Whether a preset tarball's runner clones only ``AUTOMATION_RUNNER_REPOS``.
+
+    A preset tarball keeps the runner it was created with, so an automation
+    created before this support still clones every recorded repository itself.
+    """
+    if not isinstance(tarball_source, bytes):
+        return False
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tarball_source), mode="r:*") as tar:
+            member = tar.extractfile("main.py")
+            source = member.read() if member is not None else b""
+    except (tarfile.TarError, KeyError, OSError):
+        return False
+    return b"AUTOMATION_RUNNER_REPOS" in source
+
+
+def _check_launched_profile(
+    started: StartedConversation, requested: str | None
+) -> None:
+    """Fail when the app server launched from another profile, or none.
+
+    An app server that cannot resolve the profile falls back to composed
+    settings and reports no launched profile; the run must not go on as if
+    it had the one the automation selected.
+    """
+    if requested is None:
+        return
+    launched = started.agent_profile_id
+    if launched is not None and launched.lower() == requested.lower():
+        return
+    raise ConversationStartError(
+        f"Conversation {started.conversation_id} was launched from agent profile "
+        f"{launched or 'none'} instead of {requested}",
+        code="agent_profile_mismatch",
+    )
+
+
+def _conversation_start_status_detail(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, ConversationStartError):
+        if exc.status_code is not None:
+            kind = _run_status_kind_for_http_status(exc.status_code)
+        elif exc.code == "start_task_timeout":
+            kind = RunStatusDetailKind.TIMEOUT
+        else:
+            kind = RunStatusDetailKind.UNKNOWN
+        return make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=kind,
+            detail=str(exc),
+            transient=exc.transient,
+            source=(
+                "agent_server"
+                if exc.code == "finish_plugin_upload"
+                else "openhands_api"
+            ),
+            operation="start_conversation",
+            code=exc.code or type(exc).__name__,
+            status_code=exc.status_code,
+        )
+    return run_status_detail_from_exception(
+        exc,
+        phase=RunStatusPhase.DISPATCH,
+        source="openhands_api",
+        operation="start_conversation",
+    )
+
+
 def _plugin_agent_profile_requirement(
     resolved_runtime: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -265,16 +502,24 @@ async def _fetch_plugins_on_agent_server(
     agent_url: str,
     session_key: str,
     plugin_fetches: list[dict[str, Any]],
+    secrets: PluginSourceSecrets | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch already-preflighted plugins on the target agent server."""
+    """Fetch already-preflighted plugins on the target agent server.
+
+    A private source gets references for the secrets it names (``secrets``),
+    which the agent server resolves; the source itself is sent unexpanded.
+    """
     fetched: list[dict[str, Any]] = []
     headers = {"X-Session-API-Key": session_key} if session_key else {}
     for plugin in plugin_fetches:
-        request = {
+        request: dict[str, Any] = {
             key: value
             for key, value in plugin.items()
             if key in {"source", "ref", "repo_path"}
         }
+        names = plugin_secret_names([plugin])
+        if names and secrets is not None:
+            request["secrets"] = secrets.fetch_request_secrets(names)
         response = await client.post(
             f"{agent_url.rstrip('/')}/api/plugins/fetch",
             json=request,
@@ -286,6 +531,9 @@ async def _fetch_plugins_on_agent_server(
                 detail: Any = response.json().get("detail")
             except Exception:
                 detail = response.text
+            code = detail.get("code") if isinstance(detail, dict) else None
+            if isinstance(detail, dict) and "message" in detail:
+                detail = f"{detail['message']} ({code})"
             message = (
                 f"Agent server failed to fetch plugin {request.get('source')!r}: "
                 f"{detail}"
@@ -294,7 +542,11 @@ async def _fetch_plugins_on_agent_server(
                 raise httpx.HTTPStatusError(
                     message, request=response.request, response=response
                 )
-            raise PluginSpecError(message)
+            raise PluginSpecError(
+                message,
+                code=code if isinstance(code, str) else None,
+                status_code=response.status_code,
+            )
         fetched.append(response.json())
     return fetched
 
@@ -355,6 +607,9 @@ async def _poll_pending_runs(
 
     Eagerly loads the ``automation`` relationship so that ``user_id``,
     ``org_id``, and tarball config are available for dispatch.
+
+    A PENDING run whose ``deferred_until`` is still in the future was returned
+    to the queue by a transient limit and is not eligible yet.
     """
     select_query = (
         select(AutomationRun)
@@ -362,6 +617,10 @@ async def _poll_pending_runs(
         .options(selectinload(AutomationRun.automation))
         .where(
             AutomationRun.status == AutomationRunStatus.PENDING,
+            or_(
+                AutomationRun.deferred_until.is_(None),
+                AutomationRun.deferred_until <= utcnow(),
+            ),
             Automation.deleted_at.is_(None),
             or_(
                 AutomationRun.trigger_source == "manual",
@@ -381,6 +640,31 @@ async def _poll_pending_runs(
 
     result = await session.execute(select_query)
     return list(result.scalars().all())
+
+
+# Fixed key for the admission advisory lock. Namespaced away from the hashed
+# per-subject keys in conversations.py so the two can never collide.
+DISPATCH_ADMISSION_LOCK_ID = -0x4F48_4155_544F_0001  # "-OHAUTO-0001"
+
+
+async def _lock_dispatch_admission(session: AsyncSession) -> None:
+    """Serialize the count-and-claim admission step across replicas.
+
+    Under read-committed isolation two replicas each read the same RUNNING
+    count, compute the same free capacity, and then claim *distinct* pending
+    rows under SKIP LOCKED, so their combined admissions exceed the configured
+    cap. A transaction-scoped advisory lock held across the count and the
+    commit closes that gap: the second replica waits until the first commits
+    its RUNNING rows, then sees them. Released by the caller's commit. SQLite
+    runs single-process and skips it (the same pattern as conversations.py).
+    """
+    if using_sqlite():
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+            key=DISPATCH_ADMISSION_LOCK_ID
+        )
+    )
 
 
 def _build_event_payload(
@@ -494,6 +778,126 @@ async def _acquire_execution_context(
     return ctx
 
 
+async def _defer_or_skip_blocked_run(
+    run: AutomationRun,
+    automation: Automation,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    kind: RunStatusDetailKind,
+    detail: str,
+    log_ctx: dict[str, Any],
+) -> None:
+    """Handle a run blocked by a transient limit without dropping its work.
+
+    The run is returned to PENDING with ``deferred_until`` set from a bounded
+    exponential backoff, so a later dispatch pass retries it. Past
+    ``AUTOMATION_DEFER_MAX_AGE_SECONDS`` (measured from the run's creation) it
+    is marked terminal SKIPPED with a ``defer_expired`` status detail. When
+    deferral is disabled (``AUTOMATION_DEFER_MAX_AGE_SECONDS == 0``) the run is
+    skipped at once, preserving the previous behavior.
+    """
+    config = get_config().service
+    max_age = config.defer_max_age_seconds
+    now = utcnow()
+    created_at = run.created_at or now
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=now.tzinfo)
+    age_seconds = (now - created_at).total_seconds()
+
+    if max_age > 0 and age_seconds < max_age:
+        attempts = run.deferral_count or 0
+        # Bound the backoff by the time left before the deadline: a run near
+        # max_age must not wait another full backoff and start after its age.
+        remaining = max_age - age_seconds
+        delay = min(config.defer_backoff_base_seconds * (2**attempts), remaining)
+        deferred_until = now + timedelta(seconds=max(1, delay))
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=kind,
+            detail=detail,
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+            extra={
+                "deferral_attempts": attempts + 1,
+                "deferred_until": deferred_until.isoformat(),
+            },
+        )
+        requeued = await requeue_deferred_run(
+            session_factory,
+            run,
+            deferred_until=deferred_until,
+            status_detail=status_detail,
+        )
+        if not requeued:
+            # A terminal transition (cancel, callback, watchdog) won the race;
+            # nothing to defer.
+            return
+        logger.info(
+            "Run deferred after transient limit (attempt %d, retry in %ds)",
+            attempts + 1,
+            delay,
+            extra=log_ctx,
+        )
+        await capture_automation_event(
+            "automation_run_deferred",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "defer_reason": kind.value,
+                "deferral_attempts": attempts + 1,
+                "deferred_until": deferred_until.isoformat(),
+                "retry_delay_seconds": delay,
+            },
+        )
+        return
+
+    # Past the deadline (or deferral disabled): the run is terminal SKIPPED.
+    # With deferral disabled the original limit reason is preserved, so
+    # existing consumers of the status kind and skip_reason are unchanged.
+    if max_age > 0:
+        logger.warning(
+            "Run deferred past max age; marking SKIPPED: %s", detail, extra=log_ctx
+        )
+        skip_kind = RunStatusDetailKind.DEFER_EXPIRED
+        skip_extra = {"blocked_by": kind.value}
+    else:
+        logger.warning(
+            "Run skipped — transient limit (deferral disabled): %s",
+            detail,
+            extra=log_ctx,
+        )
+        skip_kind = kind
+        skip_extra = None
+    status_detail = make_run_status_detail(
+        phase=RunStatusPhase.DISPATCH,
+        kind=skip_kind,
+        detail=detail,
+        transient=False,
+        source="sandbox_api",
+        operation="get_execution_context",
+        extra=skip_extra,
+    )
+    await mark_run_terminal(
+        session_factory,
+        run,
+        AutomationRunStatus.SKIPPED,
+        status_detail=status_detail,
+    )
+    await capture_automation_event(
+        "automation_run_skipped",
+        automation=automation,
+        run=run,
+        session_factory=session_factory,
+        properties={
+            "trigger_source": "dispatcher",
+            "skip_reason": skip_kind.value,
+        },
+    )
+
+
 async def _execute_run(
     run: AutomationRun,
     settings: ServiceSettings,
@@ -506,8 +910,10 @@ async def _execute_run(
     1. Build env vars and calculate timeout
     2. Get execution context (creates sandbox in Cloud, returns config in local)
     3. Prepare tarball source
-    4. Execute in context (upload tarball, start entrypoint)
-    5. Store sandbox_id for watchdog verification (if applicable)
+    4. Start the run's conversation through the app server (cloud mode,
+       stock runners), so the run gets the owner's agent profile, MCP and secrets
+    5. Execute in context (upload tarball, start entrypoint)
+    6. Store sandbox_id for watchdog verification (if applicable)
 
     The SDK inside the execution environment fires the completion callback on exit.
     The watchdog will verify status if the callback is missed.
@@ -579,19 +985,31 @@ async def _execute_run(
     resolved_runtime: dict[str, Any] | None = None
     plugin_fetches: list[dict[str, Any]] = []
     tarball_source: bytes | str | None = None
+
+    async def preflight_secrets(names: Collection[str]) -> Mapping[str, Any]:
+        # Private sources resolve their ${NAME} placeholders for the identity
+        # the automation runs as.
+        if not names:
+            return {}
+        return (await backend.plugin_source_secrets(client, names)).preflight
+
     try:
         if automation.plugin_spec:
-            tarball_source, plugin_env, resolved_runtime, plugin_fetches = (
-                build_execution_payload(
-                    plugin_spec=automation.plugin_spec,
-                    agent_profile_id=str(automation.agent_profile_id)
-                    if automation.agent_profile_id
-                    else None,
-                    agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
-                    llm_profile_name=automation.model,
-                    work_dir=work_dir,
-                    allow_local_sources=backend.is_local_mode,
-                )
+            (
+                tarball_source,
+                plugin_env,
+                resolved_runtime,
+                plugin_fetches,
+            ) = await build_execution_payload(
+                plugin_spec=automation.plugin_spec,
+                agent_profile_id=str(automation.agent_profile_id)
+                if automation.agent_profile_id
+                else None,
+                agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
+                llm_profile_name=automation.model,
+                work_dir=work_dir,
+                allow_local_sources=backend.is_local_mode,
+                secrets=preflight_secrets,
             )
             profile_id, profile_kind = await _validate_plugin_run_agent_profile(
                 client=client,
@@ -694,64 +1112,32 @@ async def _execute_run(
         )
     except ConcurrencyLimitReachedError as exc:
         logger.warning(
-            "Run skipped — organization concurrency limit reached: %s",
+            "Run blocked — organization concurrency limit reached: %s",
             exc,
             extra=_log_ctx(),
         )
-        status_detail = make_run_status_detail(
-            phase=RunStatusPhase.DISPATCH,
+        await _defer_or_skip_blocked_run(
+            run,
+            automation,
+            session_factory,
             kind=RunStatusDetailKind.CONCURRENCY_LIMIT,
             detail=str(exc),
-            transient=True,
-            source="sandbox_api",
-            operation="get_execution_context",
-        )
-        await mark_run_terminal(
-            session_factory,
-            run,
-            AutomationRunStatus.SKIPPED,
-            status_detail=status_detail,
-        )
-        await capture_automation_event(
-            "automation_run_skipped",
-            automation=automation,
-            run=run,
-            session_factory=session_factory,
-            properties={
-                "trigger_source": "dispatcher",
-                "skip_reason": "concurrency_limit",
-            },
+            log_ctx=_log_ctx(),
         )
         return
     except DailySandboxLimitReachedError as exc:
         logger.warning(
-            "Run skipped — daily sandbox limit reached: %s",
+            "Run blocked — daily sandbox limit reached: %s",
             exc,
             extra=_log_ctx(),
         )
-        status_detail = make_run_status_detail(
-            phase=RunStatusPhase.DISPATCH,
+        await _defer_or_skip_blocked_run(
+            run,
+            automation,
+            session_factory,
             kind=RunStatusDetailKind.DAILY_SANDBOX_LIMIT,
             detail=str(exc),
-            transient=True,
-            source="sandbox_api",
-            operation="get_execution_context",
-        )
-        await mark_run_terminal(
-            session_factory,
-            run,
-            AutomationRunStatus.SKIPPED,
-            status_detail=status_detail,
-        )
-        await capture_automation_event(
-            "automation_run_skipped",
-            automation=automation,
-            run=run,
-            session_factory=session_factory,
-            properties={
-                "trigger_source": "dispatcher",
-                "skip_reason": "daily_sandbox_limit",
-            },
+            log_ctx=_log_ctx(),
         )
         return
     except SandboxProvisioningError as exc:
@@ -820,6 +1206,17 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars.update(automation_env_metadata(automation, run))
+    if backend.is_local_mode:
+        # Every local installation owns its rows as the same placeholder user
+        # (auth._get_local_user), so attribute conversations to the
+        # installation instead; never forward the shared placeholder.
+        installation_id = await get_automation_backend_distinct_id(
+            session_factory=session_factory
+        )
+        if installation_id:
+            env_vars["AUTOMATION_USER_ID"] = installation_id
+        else:
+            del env_vars["AUTOMATION_USER_ID"]
     inject_trace_context(env_vars)
     if lmnr_span_context := env_vars.get("LMNR_SPAN_CONTEXT"):
         env_vars["OPENHANDS_OBSERVABILITY_PARENT_SPAN_CONTEXT"] = lmnr_span_context
@@ -852,6 +1249,19 @@ async def _execute_run(
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
+        # Cloud mode does not inject this in build_env_vars() (unlike local
+        # mode), so fill it in here from the execution context: it lets
+        # fire_callback() helpers sign the completion POST. It is the same
+        # per-user key already exported as OPENHANDS_API_KEY, which
+        # authenticates against /v1/runs/{id}/complete.
+        # AGENT_SERVER_URL is never exported here: scripts stored in existing
+        # automations (catalog bundles, scripts written from the
+        # openhands-automation skill, preset runners from 1.27.0 and earlier)
+        # read it as "running on a local Agent Canvas" and would then take
+        # their secrets, LLM and conversations from the sandbox's own
+        # agent-server, which has none of the user's.
+        if ctx.api_key:
+            env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", ctx.api_key)
 
     # Inject a KV token whenever the service has a KV secret configured.
     # The KV store is always available to automations — there is no per-
@@ -870,11 +1280,20 @@ async def _execute_run(
         if automation.plugin_spec:
             assert isinstance(tarball_source, bytes)
             env_vars.update(plugin_env)
+            # Fresh references: a cloud reference is short-lived, and the
+            # sandbox can take minutes to start after the preflight.
+            secret_names = plugin_secret_names(plugin_fetches)
+            fetch_secrets = (
+                await backend.plugin_source_secrets(client, secret_names)
+                if secret_names
+                else None
+            )
             fetched_plugins = await _fetch_plugins_on_agent_server(
                 client=client,
                 agent_url=ctx.agent_url,
                 session_key=ctx.session_key,
                 plugin_fetches=plugin_fetches,
+                secrets=fetch_secrets,
             )
             if fetched_plugins:
                 env_vars["AUTOMATION_PLUGIN_ROOT"] = fetched_plugins[0]["path"]
@@ -902,15 +1321,50 @@ async def _execute_run(
             if upload_id is None:
                 raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
             async with session_factory() as session:
-                tarball_source = await _download_internal_tarball(
+                stored_tarball = await _download_internal_tarball(
                     upload_id, automation.org_id, session
                 )
+            # A preset keeps the runner it was created with; run today's.
+            tarball_source = with_current_preset_runner(stored_tarball)
             logger.info(
-                "Internal tarball downloaded (%d bytes)",
-                len(tarball_source),
+                "Internal tarball downloaded (%d bytes)%s",
+                len(stored_tarball),
+                ""
+                if tarball_source is stored_tarball
+                else ", preset runner replaced with the current one",
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
-    except (PermanentDispatchError, PluginSpecError) as exc:
+    except PluginSpecError as exc:
+        status_code = exc.status_code
+        transient = status_code is not None and _is_retryable_http_status(status_code)
+        logger.log(
+            logging.WARNING if transient else logging.ERROR,
+            "%s plugin fetch error%s: %s",
+            "Transient" if transient else "Permanent",
+            "" if transient else ", disabling automation",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await backend.release_context(client, ctx)
+        await _fail(
+            str(exc),
+            disable=not transient,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=_run_status_kind_for_http_status(status_code)
+                if transient and status_code is not None
+                else RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=transient,
+                source="automation_service",
+                operation="fetch_plugin",
+                code=exc.code or type(exc).__name__,
+                status_code=status_code,
+            ),
+        )
+        return
+    except PermanentDispatchError as exc:
         logger.error(
             "Permanent dispatch error, disabling automation: %s",
             exc,
@@ -972,7 +1426,101 @@ async def _execute_run(
         )
         return
 
-    # 6. Execute in context
+    # 6. Start the run's conversation through the profile owner. On OpenHands
+    # Cloud/Enterprise the agent profile, MCP servers and secrets live on the
+    # app server; a conversation the runner creates on the sandbox's own agent
+    # server gets none of them. The stock runners attach to the one started here.
+    runner_takes_repository_list = _runner_takes_repository_list(tarball_source)
+    git_connections = None
+    if (
+        runner_takes_repository_list
+        and not backend.is_local_mode
+        and (automation.preset_metadata or {}).get("repos")
+    ):
+        git_connections = await _owner_git_connections(
+            backend, client, ctx, _log_ctx(sandbox_id=ctx.sandbox_id)
+        )
+    conversation_start = _conversation_start(
+        automation,
+        run,
+        resolved_runtime,
+        plugin_fetches,
+        env_vars,
+        runner_takes_repository_list=runner_takes_repository_list,
+        git_connections=git_connections,
+    )
+    if conversation_start is not None:
+        started: StartedConversation | None = None
+        try:
+            finish_dir = finish_plugin_dir(run_id)
+            if not backend.is_local_mode and any(
+                p.get("source") == finish_dir for p in conversation_start.plugins
+            ):
+                try:
+                    await upload_files(
+                        ctx.agent_url, ctx.session_key, finish_plugin_files(run_id)
+                    )
+                except Exception as exc:
+                    raise ConversationStartError(
+                        f"Could not write the finish-required plugin: {exc}",
+                        transient=True,
+                        code="finish_plugin_upload",
+                    ) from exc
+            try:
+                started = await backend.start_conversation(
+                    client, ctx, conversation_start
+                )
+            except ConversationStartUnavailable as exc:
+                # The sandbox's own agent server has no agent profiles.
+                if conversation_start.agent_profile_id is None:
+                    raise
+                raise ConversationStartError(
+                    f"{exc}. Only the OpenHands API can launch agent profile "
+                    f"{conversation_start.agent_profile_id}.",
+                    status_code=exc.status_code,
+                    code="agent_profile_unsupported",
+                ) from exc
+            if started is not None:
+                _check_launched_profile(started, conversation_start.agent_profile_id)
+        except ConversationStartUnavailable as exc:
+            # An app server without this contract, and no profile requested:
+            # the runner creates the conversation as before.
+            logger.warning(
+                "conversation_start_fallback: %s",
+                exc,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            started = None
+        except Exception as exc:
+            logger.warning(
+                "Failed to start the run's conversation: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            await backend.release_context(client, ctx)
+            await _fail(
+                str(exc) or "Failed to start the run's conversation",
+                status_detail=_conversation_start_status_detail(exc),
+            )
+            return
+        if started is not None:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = started.conversation_id
+            env_vars["AUTOMATION_CONVERSATION_STARTED"] = "app_server"
+            if conversation_start.repositories:
+                env_vars["AUTOMATION_RUNNER_REPOS"] = json.dumps(
+                    _runner_repositories(
+                        automation, conversation_start, started, git_connections
+                    )
+                )
+            logger.info(
+                "Conversation %s started by the OpenHands API from agent profile %s",
+                started.conversation_id,
+                started.agent_profile_id or "(owner's active profile)",
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+
+    # 7. Execute in context
     try:
         result = await execute_in_context(
             agent_url=ctx.agent_url,
@@ -984,6 +1532,11 @@ async def _execute_run(
             timeout=effective_timeout,
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
+            # A plugin spec stores its manifest's setup script, which lives in
+            # the fetched plugin; the runtime bundle runs it via a root setup.sh.
+            setup_script_path=(
+                None if automation.plugin_spec else automation.setup_script_path
+            ),
         )
     except PermanentDispatchError as exc:
         logger.error(
@@ -1024,7 +1577,7 @@ async def _execute_run(
         )
         return
 
-    # 7. Handle result
+    # 8. Handle result
     if result.success:
         add_event(
             "automation.entrypoint.start",
@@ -1052,7 +1605,7 @@ async def _execute_run(
         # Align the watchdog deadline with it, plus margin so the bash
         # service's kill always fires first and verification finds a
         # concrete exit code instead of a still-running command.
-        await update_run_timeout_at(
+        still_running = await update_run_timeout_at(
             session_factory,
             run.id,
             utcnow()
@@ -1060,6 +1613,10 @@ async def _execute_run(
                 seconds=effective_timeout + get_config().sandbox.run_timeout_margin
             ),
         )
+        if not still_running and result.bash_command_id:
+            # Cancelled while the command was starting, before cancel_run
+            # could read its id. Stopping a finished command is a no-op.
+            await backend.stop_command(result.bash_command_id)
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
@@ -1095,6 +1652,10 @@ async def dispatch_pending_runs(
     Each run is dispatched as an ``asyncio.create_task`` so the
     dispatcher loop is not blocked by long-running automations.
 
+    When ``AUTOMATION_MAX_CONCURRENT_RUNS`` is set, at most that many runs are
+    admitted per poll; the rest stay PENDING (the table is the queue) and start
+    as slots free.
+
     Args:
         session_factory: Database session factory
         settings: Service settings for API access
@@ -1102,15 +1663,49 @@ async def dispatch_pending_runs(
         batch_size: Number of pending runs to fetch per poll (from config if None)
     """
     # Use config defaults if not provided
+    config = get_config()
     if batch_size is None:
-        config = get_config()
         batch_size = config.service.dispatcher_batch_size
+    max_concurrent = config.service.max_concurrent_runs
+
+    # Expire deferred runs past their max age on every poll, independent of
+    # available capacity: a poll that finds every slot occupied returns before
+    # claiming, so it must still reap aged deferred rows.
+    if config.service.defer_max_age_seconds > 0:
+        await expire_aged_deferred_runs(
+            session_factory,
+            max_age_seconds=config.service.defer_max_age_seconds,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.DEFER_EXPIRED,
+                detail="Deferred past the maximum deferral age",
+                transient=False,
+                source="automation_service",
+                operation="expire_deferred_run",
+            ),
+        )
 
     async with session_factory() as session:
+        capacity: int | None = None
+        if max_concurrent > 0:
+            # Serialize the count-and-claim across replicas so two simultaneous
+            # polls cannot each admit the full apparent capacity.
+            await _lock_dispatch_admission(session)
+            running = await count_running_runs(session)
+            capacity = max(0, max_concurrent - running)
+            if capacity == 0:
+                logger.debug(
+                    "At concurrency cap (%d RUNNING); not admitting more runs",
+                    running,
+                )
+                return []
+
         pending_runs = await _poll_pending_runs(session, batch_size)
 
         dispatched_runs = []
         for run in pending_runs:
+            if capacity is not None and len(dispatched_runs) >= capacity:
+                break
             run_id = str(run.id)
             automation_id = str(run.automation_id) if run.automation_id else None
             extra = log_extra(run_id=run_id, automation_id=automation_id)

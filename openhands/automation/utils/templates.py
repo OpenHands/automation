@@ -11,7 +11,7 @@ from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.db import using_sqlite
-from openhands.automation.models import Automation
+from openhands.automation.models import Automation, AutomationState
 from openhands.automation.schemas import AutomationResponse
 
 
@@ -21,8 +21,9 @@ TEMPLATE_EXISTS_RESPONSE: dict[int | str, dict[str, Any]] = {
     200: {
         "model": AutomationResponse,
         "description": (
-            "An automation created from this template already exists in this "
-            "organization; it is returned unchanged."
+            "The caller already enabled this template; their existing "
+            "automation is returned unchanged. Other members of the "
+            "organization each get their own automation from it."
         ),
     },
 }
@@ -31,9 +32,19 @@ TEMPLATE_EXISTS_RESPONSE: dict[int | str, dict[str, Any]] = {
 async def find_existing_template_automation(
     session: AsyncSession,
     org_id: uuid.UUID,
+    created_by_user_id: uuid.UUID,
     template_id: str,
 ) -> Automation | None:
-    """Find the org's live automation created from the given template.
+    """Find the caller's live automation created from the given template.
+
+    Scoped to the member who enabled it (``created_by_user_id``), not the org:
+    an automation runs as its owner, so handing another member's install back
+    would drop the caller's trigger and config and send its runs' output to
+    someone else's account.
+
+    DRAFT rows are hidden artifacts materialized by a draft test dispatch, not
+    installs of the template, so they are skipped; an INACTIVE install still
+    counts and is returned.
 
     JSON extraction mirrors ``get_event_automations``: ``json_extract`` on
     SQLite, ``->``/``->>`` on PostgreSQL. Rows without provenance yield NULL and
@@ -56,7 +67,9 @@ async def find_existing_template_automation(
         select(Automation)
         .where(
             Automation.org_id == org_id,
+            Automation.created_by_user_id == created_by_user_id,
             Automation.deleted_at.is_(None),
+            Automation.state != AutomationState.DRAFT,
             template_filter,
         )
         .order_by(Automation.created_at.asc())

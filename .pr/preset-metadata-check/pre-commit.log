@@ -1,0 +1,9 @@
+[INFO] Initializing environment for https://github.com/jumanjihouse/pre-commit-hook-yamlfmt.
+[INFO] Installing environment for https://github.com/jumanjihouse/pre-commit-hook-yamlfmt.
+[INFO] Once installed this environment will be reused.
+[INFO] This may take a few minutes...
+Format YAML files........................................................Passed
+Ruff format..............................................................Passed
+Ruff lint................................................................Passed
+PEP8 style check (pycodestyle)...........................................Passed
+Type check with pyright..................................................Passed

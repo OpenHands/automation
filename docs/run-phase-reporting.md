@@ -20,11 +20,11 @@ The dispatcher injects everything you need into the run's environment:
 | Variable | Description |
 |----------|-------------|
 | `AUTOMATION_PHASE_URL` | Full URL to POST phase updates to (`{service}/v1/runs/{run_id}/phase`) |
-| `AUTOMATION_CALLBACK_API_KEY` | Auth token (local / self-hosted mode) |
+| `AUTOMATION_CALLBACK_API_KEY` | Auth token (local and Cloud mode; in Cloud mode the same key as `OPENHANDS_API_KEY`) |
 | `OPENHANDS_API_KEY` | Auth token (Cloud mode) |
 | `AUTOMATION_RUN_ID` | This run's ID (informational; already encoded in the URL) |
 
-Use whichever token is present: `AUTOMATION_CALLBACK_API_KEY` in local mode, `OPENHANDS_API_KEY` in Cloud mode.
+Use `AUTOMATION_CALLBACK_API_KEY`, which both modes set. `OPENHANDS_API_KEY` also works in Cloud mode.
 
 ## Reporting a Phase
 

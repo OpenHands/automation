@@ -1,25 +1,42 @@
 FROM python:3.12-slim-trixie AS snapshot-base
 
-ARG DEBIAN_SNAPSHOT=20261012T000000Z
+ARG DEBIAN_SNAPSHOT=20261112T000000Z
+# snapshot.debian.org intermittently returns 5xx under load; retry with
+# backoff like the agent-server image (SDK #6502) so a single 503 does not
+# fail the whole build.
+ARG APT_OPTS="-o Acquire::Retries=5 -o Acquire::http::Timeout=120 -o Acquire::https::Timeout=120 -o Acquire::Retry-Delay=10 -o Acquire::Queue-Mode=access -o Acquire::Pipeline-Depth=0"
 
 RUN printf '%s\n' \
         'Types: deb' \
-        "URIs: http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" \
+        "URIs: https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" \
         'Suites: trixie' \
         'Components: main' \
         'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
         'Check-Valid-Until: no' \
         '' \
         'Types: deb' \
-        "URIs: http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/" \
+        "URIs: https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/" \
         'Suites: trixie-security' \
         'Components: main' \
         'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
         'Check-Valid-Until: no' \
         > /etc/apt/sources.list.d/debian.sources && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends git && \
-    apt-get upgrade -y --no-install-recommends && \
+    printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Timeout "120";' \
+        'Acquire::https::Timeout "120";' \
+        'Acquire::Retry-Delay "10";' \
+        'Acquire::Queue-Mode "access";' \
+        'Acquire::Pipeline-Depth "0";' \
+        > /etc/apt/apt.conf.d/80-snapshot-resilience && \
+    for attempt in 1 2 3 4 5; do \
+        apt-get ${APT_OPTS} update \
+            && apt-get install -y --no-install-recommends git \
+            && apt-get upgrade -y --no-install-recommends \
+            && break; \
+        echo "apt failed (attempt ${attempt}/5), retrying in 10s..."; \
+        sleep 10; \
+    done; \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 FROM snapshot-base AS builder

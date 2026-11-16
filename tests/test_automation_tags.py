@@ -259,12 +259,25 @@ async def test_patch_rejects_null_tags(async_client):
     assert response.status_code == 422, response.text
 
 
-async def test_only_the_creator_can_edit_tags(async_client, async_session):
+async def test_manager_can_edit_another_users_tags(async_client, async_session):
     automation = _row("Teammate's", ["qa"], user_id=OTHER_USER_ID)
     async_session.add(automation)
     await async_session.commit()
 
     response = await async_client.patch(
+        f"{BASE}/{automation.id}", json={"tags": ["software-factory"]}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tags"] == ["software-factory"]
+
+
+async def test_member_cannot_edit_another_users_tags(readonly_client, async_session):
+    automation = _row("Teammate's", ["qa"], user_id=OTHER_USER_ID)
+    async_session.add(automation)
+    await async_session.commit()
+
+    response = await readonly_client.patch(
         f"{BASE}/{automation.id}", json={"tags": ["software-factory"]}
     )
 

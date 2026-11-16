@@ -467,8 +467,62 @@ async def test_create_plugin_spec_applies_config_defaults(
 
 
 @pytest.mark.asyncio
-async def test_patch_plugin_spec_updates_plugin_source(
+async def test_patch_plugin_config_and_trigger_in_place(
     async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["config_schema"]["properties"]["repos"] = {
+        "type": "array",
+        "items": {"type": "string"},
+    }
+    _write_plugin_automation(plugin, manifest)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Reviewer",
+            "plugin": {"source": str(plugin)},
+            "config": {"message": "old", "repos": ["OpenHands/OpenHands"]},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    original = created.json()
+    endpoint = f"/api/automation/v1/{original['id']}"
+    trigger = {"type": "cron", "schedule": "0 10 * * *"}
+    config = {"message": "new", "repos": ["OpenHands/OpenHands", "OpenHands/docs"]}
+    response = await async_client.patch(
+        endpoint, json={"config": config, "trigger": trigger}
+    )
+    assert response.status_code == 200
+    saved = (await async_client.get(endpoint)).json()
+    assert saved["plugin_spec"] == {**original["plugin_spec"], "config": config}
+    assert saved["trigger"]["schedule"] == trigger["schedule"]
+    for field in ("id", "user_id", "created_at", "agent_profile_id", "entrypoint"):
+        assert saved[field] == original[field]
+
+    for invalid_config in (None, {"message": 123}, {"unknown": True}):
+        rejected = await async_client.patch(
+            endpoint,
+            json={"config": invalid_config, "trigger": original["trigger"]},
+        )
+        assert rejected.status_code == 422
+        unchanged = (await async_client.get(endpoint)).json()
+        assert unchanged["trigger"] == saved["trigger"]
+        assert unchanged["plugin_spec"] == saved["plugin_spec"]
+
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["config_schema"]["properties"]["message"]["default"] = "default"
+    _write_plugin_automation(plugin, manifest)
+    cleared = await async_client.patch(endpoint, json={"config": {}})
+    assert cleared.status_code == 200
+    assert cleared.json()["plugin_spec"]["config"] == {"message": "default"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", [None, {"message": "new config"}, {}])
+async def test_patch_plugin_spec_updates_plugin_source(
+    async_client, tmp_path, agent_profiles_api, config
 ):
     plugin_v1 = write_plugin(tmp_path / "v1")
     plugin_v2 = write_plugin(tmp_path / "v2")
@@ -485,6 +539,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin_v1)},
+            "config": {"message": "original"},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
         headers=agent_profiles_api.caller_auth,
@@ -493,7 +548,10 @@ async def test_patch_plugin_spec_updates_plugin_source(
 
     response = await async_client.patch(
         f"/api/automation/v1/{created.json()['id']}",
-        json={"plugin": {"source": str(plugin_v2), "ref": "main"}},
+        json={
+            "plugin": {"source": str(plugin_v2), "ref": "main"},
+            **({"config": config} if config is not None else {}),
+        },
         headers=agent_profiles_api.caller_auth,
     )
 
@@ -501,7 +559,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
     data = response.json()
     assert data["plugin_spec"] == {
         "plugin": {"source": str(plugin_v2), "ref": "main"},
-        "config": {},
+        "config": config if config is not None else {"message": "original"},
     }
     assert data["tarball_path"] == "plugin-spec://runtime"
     assert data["setup_script_path"] == "setup.sh"
@@ -513,8 +571,9 @@ async def test_patch_plugin_spec_updates_plugin_source(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["plugin", "config"])
 async def test_patch_plugin_spec_rejects_runtime_overrides(
-    async_client, tmp_path, agent_profiles_api
+    async_client, tmp_path, agent_profiles_api, change
 ):
     plugin = write_plugin(tmp_path)
     created = await async_client.post(
@@ -530,7 +589,10 @@ async def test_patch_plugin_spec_rejects_runtime_overrides(
 
     response = await async_client.patch(
         f"/api/automation/v1/{created.json()['id']}",
-        json={"plugin": {"source": str(plugin)}, "model": "default"},
+        json={
+            change: {"source": str(plugin)} if change == "plugin" else {},
+            "model": "default",
+        },
     )
 
     assert response.status_code == 422
@@ -538,8 +600,9 @@ async def test_patch_plugin_spec_rejects_runtime_overrides(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["plugin", "config"])
 async def test_patch_plugin_source_rejects_non_plugin_spec_automation(
-    async_client, tmp_path
+    async_client, tmp_path, change
 ):
     plugin = write_plugin(tmp_path)
     created = await async_client.post(
@@ -555,14 +618,15 @@ async def test_patch_plugin_source_rejects_non_plugin_spec_automation(
 
     response = await async_client.patch(
         f"/api/automation/v1/{created.json()['id']}",
-        json={"plugin": {"source": str(plugin)}},
+        json={change: {"source": str(plugin)} if change == "plugin" else {}},
     )
 
     assert response.status_code == 422
-    assert "Only plugin-spec automations can update plugin source" in response.text
+    assert "Only plugin-spec automations can update" in response.text
 
 
-def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
+@pytest.mark.parametrize("config", [None, {"message": "updated"}, {}])
+async def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path, config):
     plugin_v1 = write_plugin(tmp_path / "v1")
     plugin_v2 = write_plugin(tmp_path / "v2")
     manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
@@ -570,19 +634,23 @@ def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
     _write_plugin_automation(plugin_v2, manifest)
     profile_id = uuid.uuid4()
     automation = Automation(
-        plugin_spec={"plugin": {"source": str(plugin_v1)}, "config": {}},
+        plugin_spec={
+            "plugin": {"source": str(plugin_v1)},
+            "config": {"message": "old"},
+        },
         model=None,
         agent_profile_id=profile_id,
     )
 
-    fields = _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+    fields = await _resolve_plugin_spec_update_fields_reusing_existing_profiles(
         plugin=AutomationPluginSource(source=str(plugin_v2)),
         automation=automation,
+        plugin_config=config,
     )
 
     assert fields["plugin_spec"] == {
         "plugin": {"source": str(plugin_v2)},
-        "config": {},
+        "config": config if config is not None else {"message": "old"},
     }
     assert fields["agent_profile_id"] == profile_id
     assert fields["model"] is None
@@ -592,7 +660,9 @@ def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
     )
 
 
-def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_path):
+async def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(
+    tmp_path,
+):
     plugin_v1 = write_plugin(tmp_path / "v1")
     plugin_v2 = write_plugin(tmp_path / "v2")
     manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
@@ -605,7 +675,7 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+        await _resolve_plugin_spec_update_fields_reusing_existing_profiles(
             plugin=AutomationPluginSource(source=str(plugin_v2)),
             automation=automation,
         )
@@ -1047,3 +1117,259 @@ async def test_change_to_self_keeps_plugin_spec(
 
     assert response.status_code == 200
     assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA
+
+
+CHOSEN_PROFILE_ID = "0a1b2c3d-0000-4000-8000-000000000002"
+
+
+def _serve_two_profiles(agent_profiles_api) -> None:
+    import httpx
+
+    agent_profiles_api.response = httpx.Response(
+        200,
+        json={
+            "profiles": [
+                {"id": agent_profiles_api.profile_id, "name": "agent-default"},
+                {"id": CHOSEN_PROFILE_ID, "name": "with-sub-agents"},
+            ]
+        },
+    )
+
+
+def write_prompt_plugin(root: Path, *, default_name: str | None = None) -> Path:
+    plugin = write_conversation_plugin(root)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["entrypoint"]["arguments"] = "{{ config.prompt }}"
+    manifest["runtime"]["agent_profile"] = {"required": True}
+    if default_name:
+        manifest["runtime"]["agent_profile"]["default_name"] = default_name
+    manifest["config_schema"] = {
+        "type": "object",
+        "properties": {"prompt": {"type": "string", "minLength": 1}},
+    }
+    _write_plugin_automation(plugin, manifest)
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_uses_the_chosen_agent_profile(
+    async_client, tmp_path, agent_profiles_api
+):
+    _serve_two_profiles(agent_profiles_api)
+    plugin = write_conversation_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "agent_profile_id": CHOSEN_PROFILE_ID,
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["agent_profile_id"] == CHOSEN_PROFILE_ID
+    assert response.json()["model"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_without_default_name_needs_a_chosen_profile(
+    async_client, tmp_path, agent_profiles_api
+):
+    _serve_two_profiles(agent_profiles_api)
+    plugin = write_prompt_plugin(tmp_path)
+    body = {
+        "name": "Prompt",
+        "plugin": {"source": str(plugin)},
+        "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        "config": {"prompt": "Summarize open issues"},
+    }
+
+    missing = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json=body,
+        headers=agent_profiles_api.caller_auth,
+    )
+    chosen = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={**body, "agent_profile_id": CHOSEN_PROFILE_ID},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert missing.status_code == 422
+    assert "requires an agent profile selection" in missing.text
+    assert chosen.status_code == 201
+    assert chosen.json()["agent_profile_id"] == CHOSEN_PROFILE_ID
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_rejects_an_unknown_chosen_profile(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_conversation_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "agent_profile_id": CHOSEN_PROFILE_ID,
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert f"Agent profile `{CHOSEN_PROFILE_ID}` not found" in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_rejects_a_profile_for_a_profileless_plugin(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["runtime"] = {}
+    _write_plugin_automation(plugin, manifest)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "agent_profile_id": agent_profiles_api.profile_id,
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "does not run on an agent profile" in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_rejects_arguments_missing_their_config(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_prompt_plugin(tmp_path, default_name="agent-default")
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Prompt",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "Template references missing config value: config.prompt" in response.text
+
+
+@pytest.mark.parametrize("default_name", ["agent-default", None])
+@pytest.mark.asyncio
+async def test_patch_plugin_source_keeps_the_chosen_agent_profile(
+    async_client, tmp_path, agent_profiles_api, default_name
+):
+    _serve_two_profiles(agent_profiles_api)
+    plugin_v1 = write_prompt_plugin(tmp_path / "v1", default_name=default_name)
+    plugin_v2 = write_prompt_plugin(tmp_path / "v2", default_name=default_name)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Prompt",
+            "plugin": {"source": str(plugin_v1)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "config": {"prompt": "Summarize open issues"},
+            "agent_profile_id": CHOSEN_PROFILE_ID,
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.status_code == 201
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{created.json()['id']}",
+        json={"plugin": {"source": str(plugin_v2)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"] == {"source": str(plugin_v2)}
+    assert response.json()["agent_profile_id"] == CHOSEN_PROFILE_ID
+
+
+@pytest.mark.asyncio
+async def test_patch_plugin_source_drops_the_profile_for_a_profileless_plugin(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin_v1 = write_plugin(tmp_path / "v1")
+    plugin_v2 = write_plugin(tmp_path / "v2")
+    manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
+    manifest["runtime"] = {}
+    _write_plugin_automation(plugin_v2, manifest)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin_v1)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.json()["agent_profile_id"] == agent_profiles_api.profile_id
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{created.json()['id']}",
+        json={"plugin": {"source": str(plugin_v2)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["agent_profile_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_returns_manifest_and_suggested_trigger(
+    async_client, tmp_path
+):
+    plugin = write_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["suggested_trigger"] = {
+        "type": "cron",
+        "schedule": "0 9 * * *",
+        "timezone": "UTC",
+    }
+    _write_plugin_automation(plugin, manifest)
+
+    response = await async_client.get(
+        "/api/automation/v1/plugin-spec/preflight",
+        params={"source": str(plugin)},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["manifest"]["name"] == "hello-world-automation"
+    assert data["manifest"]["description"] == "test plugin"
+    assert data["manifest"]["config_schema"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"message": {"type": "string"}},
+    }
+    assert data["suggested_trigger"] == {
+        "type": "cron",
+        "schedule": "0 9 * * *",
+        "timezone": "UTC",
+    }
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_422_on_invalid_source(async_client, tmp_path):
+    response = await async_client.get(
+        "/api/automation/v1/plugin-spec/preflight",
+        params={"source": "github:does/not-exist-no-such-branch-xyz"},
+    )
+
+    assert response.status_code == 422

@@ -27,10 +27,14 @@ from openhands.sdk.profiles import (
 
 logger = logging.getLogger(__name__)
 
-# The profile ids an organization was last seen to have. A setup form validates
-# the same selection over and over, and only a hit is trusted: an id that is
-# not here is always looked up, so a profile created a moment ago is found.
-_known_profiles: TTLCache[uuid.UUID, frozenset[str]] = TTLCache(maxsize=1024, ttl=60)
+# The profile ids a member of an organization was last seen to have, with each
+# one's scope. A setup form validates the same selection over and over, and
+# only a hit is trusted: an id that is not here is always looked up, so a
+# profile created a moment ago is found. Personal profiles make the list
+# per member, not per organization.
+_known_profiles: TTLCache[tuple[uuid.UUID, uuid.UUID], dict[str, str | None]] = (
+    TTLCache(maxsize=1024, ttl=60)
+)
 
 
 def validate_model_profile_for_user(
@@ -371,7 +375,11 @@ async def validate_agent_profile_allowlists(
 
 
 async def ensure_agent_profile_exists(
-    agent_profile_id: uuid.UUID | None, request: Request, user: AuthenticatedUser
+    agent_profile_id: uuid.UUID | None,
+    request: Request,
+    user: AuthenticatedUser,
+    *,
+    runs_as_user_id: uuid.UUID | None = None,
 ) -> None:
     """Check a profile the caller selected against their organization.
 
@@ -380,6 +388,9 @@ async def ensure_agent_profile_exists(
     OpenHands app server, which starts a conversation with default settings
     rather than fail on an id it does not know, so an unknown id is refused
     here. A profile deleted after this check still falls back at run time.
+
+    A personal profile is the caller's alone, so an automation that runs as
+    another identity (``runs_as_user_id``) can only use an organization one.
 
     A miss asks the app server, so a caller that has a database transaction
     open holds its connection for that long.
@@ -391,8 +402,32 @@ async def ensure_agent_profile_exists(
     settings = get_config().service
     if settings.is_local_mode:
         return
-    if str(agent_profile_id) in _known_profiles.get(user.org_id, ()):
-        return
+    cache_key = (user.org_id, user.user_id)
+    known = _known_profiles.get(cache_key)
+    if known is None or str(agent_profile_id) not in known:
+        known = await _member_agent_profiles(request, user)
+        _known_profiles[cache_key] = known
+    if str(agent_profile_id) not in known:
+        raise HTTPException(422, f"Agent profile `{agent_profile_id}` not found")
+    if (
+        known[str(agent_profile_id)] == "personal"
+        and runs_as_user_id is not None
+        and runs_as_user_id != user.user_id
+    ):
+        raise HTTPException(
+            422,
+            f"Agent profile `{agent_profile_id}` is personal. An automation "
+            "that runs as another identity can only use an organization profile.",
+        )
+
+
+async def _member_agent_profiles(
+    request: Request, user: AuthenticatedUser
+) -> dict[str, str | None]:
+    """The caller's agent profile ids in the organization, with their scope."""
+    from openhands.automation.config import get_config
+
+    settings = get_config().service
 
     # The organization the automation is stored under, not whichever one the
     # caller's session happens to resolve to by now.
@@ -415,18 +450,20 @@ async def ensure_agent_profile_exists(
     try:
         if resp.status_code != status.HTTP_200_OK:
             raise ValueError(f"status {resp.status_code}")
-        known = frozenset(
-            str(profile.id) for profile in _agent_profiles_from_response(resp)
-        )
+        profiles = _agent_profiles_from_response(resp)
+        # An app server from before personal profiles reports no scope.
+        scopes = {
+            str(item.get("id")): item.get("scope")
+            for item in resp.json()["profiles"]
+            if isinstance(item, dict)
+        }
     except (ValueError, KeyError, TypeError, ValidationError) as exc:
         logger.warning("Agent profile lookup failed: %s", exc)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             "Unexpected response from OpenHands API for agent profiles",
         ) from exc
-    _known_profiles[user.org_id] = known
-    if str(agent_profile_id) not in known:
-        raise HTTPException(422, f"Agent profile `{agent_profile_id}` not found")
+    return {str(profile.id): scopes.get(str(profile.id)) for profile in profiles}
 
 
 def clear_agent_profile_cache() -> None:

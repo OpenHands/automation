@@ -40,13 +40,13 @@ non-trivial PR easy to review.
 ## The `.pr/` workflow
 
 Use the temporary **`.pr/`** directory for PR-only artifacts. Before relying on automatic
-cleanup, verify that the target repository has an enabled
-`.github/workflows/pr-artifacts.yml` workflow that opens or updates a cleanup PR to remove
-`.pr/` after merge to `main`.
+cleanup, verify that the target repository's `.github/workflows/release.yml` calls the
+`OpenHands/release-actions` release-please workflow with `cleanup-pr-artifacts: true`, so
+its release PR deletes `.pr/` from `main`.
 
-- Same-repository or fork PR with verified cleanup workflow: leave `.pr/` for review;
-  the workflow opens or updates a cleanup PR after merge to `main`.
-- Repository without a verified cleanup workflow: remove `.pr/` manually before merge.
+- Same-repository or fork PR with verified release cleanup: leave `.pr/` for review;
+  the next release PR removes it from `main` after the PR merges.
+- Repository without verified release cleanup: remove `.pr/` manually before merge.
 
 The design doc is a temporary review aid and must not remain on `main` after cleanup.
 Keep the essential design summary in the PR description: intent, important before/after
@@ -156,9 +156,9 @@ and code references. Use commit-pinned document links so cleanup does not break 
 5. **Self-contained & offline.** One HTML file, inline CSS/SVG, no external scripts or
    assets, opens by double-click, and survives being copied to another machine.
 6. **`.pr/` only, and temporary.** The doc is a review aid, not project docs. Keep it in
-   `.pr/` for review. With a verified repository cleanup workflow, leave it in place until
-   the PR merges to `main`; the workflow opens or updates a cleanup PR. Without a verified
-   cleanup workflow, remove it manually before merge. Do not move design HTML into `docs/`
+   `.pr/` for review. With verified release cleanup, leave it in place until the PR merges
+   to `main`; the next release PR removes it. Without verified release cleanup, remove it
+   manually before merge. Do not move design HTML into `docs/`
    or leave it on `main` after cleanup.
 
 ## Anti-patterns

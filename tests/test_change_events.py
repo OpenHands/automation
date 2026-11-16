@@ -70,8 +70,7 @@ async def _events(session_factory, automation_id):
 
 
 async def _last(session_factory, automation_id) -> AutomationChangeEvent:
-    """The one event after the create. SQLite stores whole seconds, so rows of
-    one test share created_at; select by action instead of by order."""
+    """The one event after the create."""
     (event,) = [
         e for e in await _events(session_factory, automation_id) if e.action != "create"
     ]
@@ -217,3 +216,28 @@ async def test_flush_without_actor_records_system_outside_strict_mode(
     event = await _last(session_factory, automation_id)
     assert (event.actor_kind, event.actor_user_id) == ("system", None)
     assert "without an audit actor" in caplog.text
+
+
+async def test_same_second_changes_list_newest_first_on_sqlite(session_factory, strict):
+    # Issue #739: SQLite stored CURRENT_TIMESTAMP in whole seconds, so these
+    # rows tied on created_at and the uuid4 tie-break shuffled them.
+    automation_id = await _create(session_factory)
+    columns = ["name", "description", "entrypoint", "timeout"]
+    values = ["Renamed", "Described", "uv run other.py", 60]
+    for column, value in zip(columns, values, strict=True):
+        await _update(session_factory, automation_id, **{column: value})
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(AutomationChangeEvent)
+            .where(AutomationChangeEvent.automation_id == automation_id)
+            # The order GET /v1/{id}/changes uses.
+            .order_by(
+                AutomationChangeEvent.created_at.desc(),
+                AutomationChangeEvent.id.desc(),
+            )
+        )
+        events = result.scalars().all()
+
+    assert [e.changed_fields for e in events[:4]] == [[c] for c in reversed(columns)]
+    assert events[4].action == "create"

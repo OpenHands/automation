@@ -1,0 +1,106 @@
+{
+  "phase": "base",
+  "probe": "tags",
+  "id": "6ed41903-9f5e-41e5-84a8-11f026c2c488",
+  "url": "http://localhost:28081/conversations/6ed41903-9f5e-41e5-84a8-11f026c2c488",
+  "status": "finished",
+  "tool_events": [
+    {
+      "id": "e415ff12-bf69-40a0-ade7-dd1fb17a8d67",
+      "timestamp": "2026-11-11T13:53:47.645930",
+      "kind": "ActionEvent",
+      "tool_name": "terminal",
+      "action": {
+        "command": "python /mnt/statusquo_block_storage/workspace/project/6bebde3df0e74c2ea8a10322ae83b94c/qa/probe_tags.py --url http://localhost:28081 --key-file /tmp/oss-pr-base-1111/private/api-key.txt --output /mnt/statusquo_block_storage/workspace/project/6bebde3df0e74c2ea8a10322ae83b94c/evidence/base-tags.json",
+        "is_input": false,
+        "timeout": 60.0,
+        "reset": false,
+        "kind": "TerminalAction"
+      }
+    },
+    {
+      "id": "f0a8a4e1-2b78-4852-9fbd-efb242ba8605",
+      "timestamp": "2026-11-11T13:53:48.461372",
+      "kind": "ObservationEvent",
+      "tool_name": "terminal",
+      "observation": {
+        "content": [
+          {
+            "cache_prompt": false,
+            "type": "text",
+            "text": ""
+          }
+        ],
+        "is_error": false,
+        "command": "python /mnt/statusquo_block_storage/workspace/project/6bebde3df0e74c2ea8a10322ae83b94c/qa/probe_tags.py --url http://localhost:28081 --key-file /tmp/oss-pr-base-1111/private/api-key.txt --output /mnt/statusquo_block_storage/workspace/project/6bebde3df0e74c2ea8a10322ae83b94c/evidence/base-tags.json",
+        "exit_code": 0,
+        "timeout": false,
+        "metadata": {
+          "exit_code": 0,
+          "pid": -1,
+          "username": "gneubig",
+          "hostname": "agent-server",
+          "working_dir": "/tmp/oss-pr-base-1111/tags-workspace",
+          "py_interpreter_path": "/home/gneubig/.cache/uv/archive-v0/u7mLjg8CutxvaCCD/bin/python",
+          "prefix": "[Previous command outputs are truncated. Showing the last 1 lines of the output below.]\n",
+          "suffix": "\n[The command completed with exit code 0.]"
+        },
+        "kind": "TerminalObservation"
+      }
+    },
+    {
+      "id": "11c6063b-0bdb-4db2-97d0-693072dae8ec",
+      "timestamp": "2026-11-11T13:53:51.596710",
+      "kind": "ActionEvent",
+      "tool_name": "terminal",
+      "action": {
+        "command": "cat /mnt/statusquo_block_storage/workspace/project/6bebde3df0e74c2ea8a10322ae83b94c/evidence/base-tags.json",
+        "is_input": false,
+        "reset": false,
+        "kind": "TerminalAction"
+      }
+    },
+    {
+      "id": "b5a6a54b-a8f2-47fc-8966-75ed8b9c305a",
+      "timestamp": "2026-11-11T13:53:51.874529",
+      "kind": "ObservationEvent",
+      "tool_name": "terminal",
+      "observation": {
+        "content": [
+          {
+            "cache_prompt": false,
+            "type": "text",
+            "text": "[\n  {\n    \"case\": \"omitted\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\"\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": true,\n      \"errors\": [],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"populated\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\",\n        \"tags\": [\n          \"example-tag\"\n        ]\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"empty\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\",\n        \"tags\": []\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"normalized\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\",\n        \"tags\": [\n          \" Example Tag \",\n          \"example-tag\"\n        ]\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"invalid_slug\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\",\n        \"tags\": [\n          \"Bad Tag!\"\n        ]\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"too_many\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\",\n        \"tags\": [\n          \"tag-0\",\n          \"tag-1\",\n          \"tag-2\",\n          \"tag-3\",\n          \"tag-4\",\n          \"tag-5\",\n          \"tag-6\",\n          \"tag-7\",\n          \"tag-8\",\n          \"tag-9\",\n          \"tag-10\"\n        ]\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"too_long\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\",\n        \"tags\": [\n          \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n        ]\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"unknown_field\",\n    \"method\": \"POST\",\n    \"path\": \"/v1/validate\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"tags-live-probe\",\n        \"trigger\": {\n          \"type\": \"cron\",\n          \"schedule\": \"*/10 * * * *\",\n          \"timezone\": \"UTC\"\n        },\n        \"entrypoint\": \"python run.py\",\n        \"tarball_path\": \"oh-internal://uploads/example\",\n        \"unexpected\": \"value\"\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"unexpected\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"/v1/preset/prompt_tags\",\n    \"request\": {\n      \"endpoint\": \"/v1/preset/prompt\",\n      \"draft\": {\n        \"name\": \"preset-probe\",\n        \"tags\": []\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"/v1/preset/plugin_tags\",\n    \"request\": {\n      \"endpoint\": \"/v1/preset/plugin\",\n      \"draft\": {\n        \"name\": \"preset-probe\",\n        \"tags\": []\n      }\n    },\n    \"http_status\": 200,\n    \"response\": {\n      \"valid\": false,\n      \"errors\": [\n        {\n          \"field\": \"tags\",\n          \"code\": \"extra_forbidden\",\n          \"message\": \"Extra inputs are not permitted\"\n        }\n      ],\n      \"sampleEventMatched\": null\n    }\n  },\n  {\n    \"case\": \"saved_draft\",\n    \"request\": {\n      \"endpoint\": \"/v1\",\n      \"draft\": {\n        \"name\": \"saved-tag-probe\",\n        \"tags\": [\n          \" Example Tag \",\n          \"example-tag\"\n        ]\n      }\n    },\n    \"http_status\": 422,\n    \"response\": {\n      \"detail\": {\n        \"message\": \"Draft body does not match endpoint schema\",\n        \"errors\": [\n          {\n            \"field\": \"tags\",\n            \"code\": \"extra_forbidden\",\n            \"message\": \"Extra inputs are not permitted\"\n          }\n        ]\n      }\n    }\n  }\n]"
+          }
+        ],
+        "is_error": false,
+        "command": "cat /mnt/statusquo_block_storage/workspace/project/6bebde3df0e74c2ea8a10322ae83b94c/evidence/base-tags.json",
+        "exit_code": 0,
+        "timeout": false,
+        "metadata": {
+          "exit_code": 0,
+          "pid": -1,
+          "username": "gneubig",
+          "hostname": "agent-server",
+          "working_dir": "/tmp/oss-pr-base-1111/tags-workspace",
+          "py_interpreter_path": "/home/gneubig/.cache/uv/archive-v0/u7mLjg8CutxvaCCD/bin/python",
+          "prefix": "",
+          "suffix": "\n[The command completed with exit code 0.]"
+        },
+        "full_output_save_dir": "/tmp/oss-pr-base-1111/private/agent-canvas/dev_conversations/6ed419039f5e41e584a811f026c2c488/observations",
+        "kind": "TerminalObservation"
+      }
+    },
+    {
+      "kind": "MessageEvent",
+      "content": [
+        {
+          "cache_prompt": false,
+          "type": "text",
+          "text": "## BASE Revision QA Results\n\n**Probe Results Table:**\n\n| Test Case | Result | Error Code | Notes |\n|-----------|--------|------------|-------|\n| **omitted** | \u2713 valid: true | - | No tags field accepted |\n| **populated** | \u2717 valid: false | extra_forbidden | tags field rejected |\n| **empty** | \u2717 valid: false | extra_forbidden | tags: [] rejected |\n| **normalized** | \u2717 valid: false | extra_forbidden | tags with spaces rejected |\n| **invalid_slug** | \u2717 valid: false | extra_forbidden | Bad slug rejected |\n| **too_many** (11) | \u2717 valid: false | extra_forbidden | tags field rejected |\n| **too_long** (51 chars) | \u2717 valid: false | extra_forbidden | tags field rejected |\n| **unknown_field** | \u2717 valid: false | extra_forbidden | Unknown field rejected \u2713 |\n| **preset/prompt** | \u2717 valid: false | extra_forbidden | Preset tags rejected \u2713 |\n| **preset/plugin** | \u2717 valid: false | extra_forbidden | Preset tags rejected \u2713 |\n| **saved_draft** | \u2717 HTTP 422 | extra_forbidden | Draft save rejected |\n\n**Actual Observed Result:** \n- All `tags` field submissions are rejected with `\"extra_forbidden\"` error\n- Unknown fields correctly rejected with `\"extra_forbidden\"` \u2713\n- Preset endpoints correctly reject tags \u2713\n- Only omitted tags case passes validation\n- Evidence saved to: `base-tags.json`"
+        }
+      ]
+    }
+  ],
+  "child_terminal_events": []
+}
