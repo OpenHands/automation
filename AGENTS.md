@@ -292,15 +292,31 @@ NULL`). Zero factories is a valid state; there is no default factory.
 - `id` is never reused. Other services keep it as a plain reference with no
   foreign key, because their data lives in other databases.
 - Read routes need `view_automations`; creating, renaming and deleting a
-  factory, and setting or clearing `factory_id`, need `manage_automations`.
-  The creator exception of `_assert_can_manage` does not apply to `factory_id`.
-  `authorize_factory_change` is the one check: `POST /v1`, `/v1/plugin-spec`,
-  `/v1/preset/prompt`, `/v1/preset/plugin` and `PATCH /v1/{id}` all use it (403
-  without the permission, 404 for an unknown or other-org factory). Drafts store
+  factory, and *changing* an automation's factory, need `manage_automations`.
+  `authorize_factory_change` is the one check (403 without the permission, 404
+  for an unknown or other-org factory): `POST /v1`, `/v1/plugin-spec`,
+  `/v1/preset/prompt` and `/v1/preset/plugin` run it when `factory_id` is set,
+  `PATCH /v1/{id}` only when the value differs from the stored one (resending
+  it or `null` on an automation with no factory is not a change), and the draft
+  validators report it as a `factory_id_403`/`factory_id_404` error. Drafts store
   `factory_id`, but their hidden test-run automation never gets it.
+- Membership gives an automation access to its factory's data, so the creator
+  exception of `_assert_can_manage` stops at the factory: any `PATCH` of an
+  automation that is in a factory needs `manage_automations`.
+- Re-enabling an installed template (`template` on a create endpoint) returns
+  the existing automation unchanged; if the request names a `factory_id` the
+  automation is not in, it is `409` rather than silently ignored. Move it with
+  `PATCH`.
 - Deleting a factory returns `409` while a live automation belongs to it.
   Otherwise one transaction detaches its soft-deleted automations (through the
-  ORM, so the change audit records it) and removes the row.
+  ORM, so the change audit records it) and removes the row with a single
+  conditional `DELETE ... WHERE NOT EXISTS (live member)`.
+- Assigning takes `lock_factory_for_assignment` right before the write, not
+  before the slow lookups: `FOR KEY SHARE` on PostgreSQL (conflicts with the
+  delete's `FOR UPDATE`, not with a rename), a no-op write on SQLite to take its
+  write lock. The delete-versus-assign race is tested with per-request sessions
+  (`race_client` in `tests/test_factories.py`); the shared-session `async_client`
+  cannot show it.
 - Git sync neither writes nor reads `factory_id`: a factory's id is
   local to an install.
 

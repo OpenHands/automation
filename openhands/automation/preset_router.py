@@ -38,7 +38,11 @@ from openhands.automation.auth import (
 from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
-from openhands.automation.factory_router import authorize_factory_change
+from openhands.automation.factory_router import (
+    authorize_factory_change,
+    lock_factory_for_assignment,
+    reject_factory_conflict,
+)
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
@@ -658,6 +662,7 @@ async def create_automation_from_prompt(
             session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
+            reject_factory_conflict(existing, body.factory_id)
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
@@ -727,6 +732,8 @@ async def create_automation_from_prompt(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
+        if body.factory_id is not None:
+            await lock_factory_for_assignment(session, user.org_id, body.factory_id)
         automation = Automation(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
@@ -756,12 +763,11 @@ async def create_automation_from_prompt(
         await session.flush()
         await session.refresh(automation)
         await mark_git_sync_dirty(session, automation)
+    except HTTPException:
+        _delete_storage_object_best_effort(file_store, storage_path)
+        raise
     except Exception as e:
-        # Clean up orphaned upload on automation creation failure
-        try:
-            file_store.delete(storage_path)
-        except Exception:
-            logger.exception("Failed to clean up orphaned upload at %s", storage_path)
+        _delete_storage_object_best_effort(file_store, storage_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create automation: {e!s}",
@@ -1189,6 +1195,7 @@ async def create_automation_from_plugin(
             session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
+            reject_factory_conflict(existing, body.factory_id)
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
@@ -1288,6 +1295,8 @@ async def create_automation_from_plugin(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
+        if body.factory_id is not None:
+            await lock_factory_for_assignment(session, user.org_id, body.factory_id)
         automation = Automation(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
@@ -1317,12 +1326,11 @@ async def create_automation_from_plugin(
         await session.flush()
         await session.refresh(automation)
         await mark_git_sync_dirty(session, automation)
+    except HTTPException:
+        _delete_storage_object_best_effort(file_store, storage_path)
+        raise
     except Exception as e:
-        # Clean up orphaned upload on automation creation failure
-        try:
-            file_store.delete(storage_path)
-        except Exception:
-            logger.exception("Failed to clean up orphaned upload at %s", storage_path)
+        _delete_storage_object_best_effort(file_store, storage_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create automation: {e!s}",

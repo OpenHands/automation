@@ -32,6 +32,7 @@ from openhands.automation.capabilities_router import (
     _cron_errors,
     _event_type_errors,
     _schema_errors,
+    factory_id_errors,
 )
 from openhands.automation.db import get_session
 from openhands.automation.draft_schemas import (
@@ -302,6 +303,8 @@ async def _validate_draft_body(
                 message=str(e.detail),
             )
         )
+
+    errors.extend(await factory_id_errors(draft.factory_id, user, session))
 
     if isinstance(draft, CreatePluginAutomationRequest):
         try:

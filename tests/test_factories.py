@@ -5,19 +5,30 @@ API tests run on both PostgreSQL and SQLite: the count of live automations, the
 delete transaction and the foreign key's SET NULL are SQL behavior.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 import yaml
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from openhands.automation.app import app
-from openhands.automation.auth import _get_local_user
-from openhands.automation.db import set_sqlite_mode, using_sqlite
+from openhands.automation.auth import (
+    _get_local_user,
+    authenticate_request,
+    create_http_client,
+)
+from openhands.automation.db import _create_sqlite_engine, set_sqlite_mode, using_sqlite
+from openhands.automation.factory_router import lock_factory_for_assignment
 from openhands.automation.git_sync.loop import (
     _create_automation_from_git,
     _Owner,
@@ -347,6 +358,78 @@ async def test_creator_without_manage_automations_cannot_change_the_factory(
     assert (mine.factory_id, in_factory.factory_id) == (None, factory.id)
 
 
+async def test_member_can_clear_no_factory_on_their_own_automation(
+    readonly_client,
+):
+    created = await readonly_client.post(BASE, json=_raw_body("Mine", factory_id=None))
+    assert created.status_code == 201, created.text
+
+    cleared = await readonly_client.patch(
+        f"{BASE}/{created.json()['id']}", json={"factory_id": None}
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["factory_id"] is None
+
+
+async def test_resending_the_stored_factory_is_not_a_change(async_client):
+    factory = await _create_factory(async_client, "First")
+    automation = await _create_automation(async_client, "Member")
+    url = f"{BASE}/{automation['id']}"
+    await async_client.patch(url, json={"factory_id": factory["id"]})
+    before = (await async_client.get(f"{url}/changes")).json()
+
+    resent = await async_client.patch(
+        url, json={"factory_id": factory["id"], "name": "Renamed"}
+    )
+
+    assert resent.status_code == 200, resent.text
+    assert resent.json()["factory_id"] == factory["id"]
+    after = (await async_client.get(f"{url}/changes")).json()
+    assert [
+        "factory_id" in change["changed_fields"] for change in after["changes"]
+    ].count(True) == [
+        "factory_id" in change["changed_fields"] for change in before["changes"]
+    ].count(True)
+
+
+async def test_member_cannot_edit_an_automation_in_a_factory(
+    readonly_client, async_session
+):
+    factory = Factory(org_id=TEST_ORG_ID, name="First")
+    async_session.add(factory)
+    await async_session.flush()
+    grouped = _automation_row("Grouped", user_id=TEST_USER_ID, factory_id=factory.id)
+    async_session.add(grouped)
+    await async_session.commit()
+
+    for edit in (
+        {"name": "Renamed"},
+        {"entrypoint": "python evil.py"},
+        {"tarball_path": "https://example.com/other.tar.gz"},
+        {"factory_id": str(factory.id)},
+    ):
+        response = await readonly_client.patch(f"{BASE}/{grouped.id}", json=edit)
+        assert response.status_code == 403, (edit, response.text)
+
+    await async_session.refresh(grouped)
+    assert (grouped.name, grouped.entrypoint) == ("Grouped", "python main.py")
+
+
+async def test_admin_can_edit_an_automation_in_a_factory(async_client):
+    factory = await _create_factory(async_client, "First")
+    automation = await _create_automation(
+        async_client, "Grouped", factory_id=factory["id"]
+    )
+
+    response = await async_client.patch(
+        f"{BASE}/{automation['id']}", json={"name": "Renamed"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "Renamed"
+
+
 async def test_each_factory_change_appears_in_the_change_audit(
     async_client, async_session
 ):
@@ -453,6 +536,92 @@ async def test_delete_succeeds_once_the_automations_are_gone_from_the_factory(
     assert row is not None
     await async_session.refresh(row)
     assert (row.deleted_at is not None, row.factory_id) == (True, None)
+
+
+@pytest.fixture(params=["postgresql", "sqlite"])
+async def race_client(request, tmp_path: Path, mock_authenticated_user):
+    """A client whose requests each get their own session, as in production.
+
+    The shared ``async_client`` session serializes requests, so it cannot show a
+    race. SQLite uses the production engine settings (foreign keys, WAL, busy
+    timeout).
+    """
+    previous_sqlite_mode = using_sqlite()
+    if request.param == "sqlite":
+        set_sqlite_mode(True)
+        engine = _create_sqlite_engine(f"sqlite+aiosqlite:///{tmp_path}/race.db").engine
+    else:
+        container = request.getfixturevalue("postgres_container")
+        engine = create_async_engine(
+            container.get_connection_url().replace(
+                "postgresql+psycopg2://", "postgresql+asyncpg://"
+            )
+        )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    app.state.engine = engine
+    app.state.session_factory = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
+    app.state.http_client = create_http_client()
+    app.dependency_overrides[authenticate_request] = lambda: mock_authenticated_user
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            yield client
+    finally:
+        await app.state.http_client.aclose()
+        app.dependency_overrides.pop(authenticate_request, None)
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
+        set_sqlite_mode(previous_sqlite_mode)
+
+
+async def test_delete_racing_an_assignment_never_orphans_a_live_automation(
+    race_client,
+):
+    outcomes = set()
+    for round_number in range(20):
+        factory = await _create_factory(race_client, f"Race {round_number}")
+        automation = await _create_automation(race_client, f"Member {round_number}")
+
+        deleted, assigned = await asyncio.gather(
+            race_client.delete(f"{FACTORIES}/{factory['id']}"),
+            race_client.patch(
+                f"{BASE}/{automation['id']}", json={"factory_id": factory["id"]}
+            ),
+        )
+
+        outcome = (deleted.status_code, assigned.status_code)
+        outcomes.add(outcome)
+        assert outcome in {(204, 404), (409, 200)}, (deleted.text, assigned.text)
+        member = (await race_client.get(f"{BASE}/{automation['id']}")).json()
+        assert member["factory_id"] == (factory["id"] if outcome[0] == 409 else None)
+
+
+async def test_an_assignment_in_flight_blocks_delete_but_not_rename(race_client):
+    if using_sqlite():
+        pytest.skip("PostgreSQL row locks")
+    factory = await _create_factory(race_client, "First")
+    url = f"{FACTORIES}/{factory['id']}"
+
+    async with app.state.session_factory() as assigning:
+        await lock_factory_for_assignment(
+            assigning, TEST_ORG_ID, uuid.UUID(factory["id"])
+        )
+        renamed = await asyncio.wait_for(
+            race_client.patch(url, json={"name": "Renamed"}), timeout=5
+        )
+        delete = asyncio.create_task(race_client.delete(url))
+        finished, _ = await asyncio.wait({delete}, timeout=1)
+        blocked = not finished
+        await assigning.rollback()
+
+    assert renamed.status_code == 200, renamed.text
+    assert blocked
+    assert (await delete).status_code == 204
 
 
 async def test_deleted_factory_detach_is_audited(async_client, async_session):
@@ -582,6 +751,140 @@ async def test_member_can_still_create_without_a_factory(readonly_client, endpoi
 
     assert response.status_code == 201, response.text
     assert response.json()["factory_id"] is None
+
+
+TEMPLATE = {"id": "tmpl-1", "version": "1"}
+
+
+@pytest.mark.parametrize("endpoint", CREATE_ENDPOINTS)
+@pytest.mark.parametrize("extra", ["omitted", "same"])
+async def test_template_reenable_returns_the_existing_automation_when_factory_matches(
+    async_client, endpoint, extra
+):
+    factory = await _create_factory(async_client, "First")
+    existing = await _create_automation(
+        async_client, "Installed", template=TEMPLATE, factory_id=factory["id"]
+    )
+    url, build = CREATE_ENDPOINTS[endpoint]
+    body = {"template": TEMPLATE}
+    if extra == "same":
+        body["factory_id"] = factory["id"]
+
+    response = await async_client.post(url, json=build(body))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == existing["id"]
+    assert response.json()["factory_id"] == factory["id"]
+
+
+@pytest.mark.parametrize("endpoint", CREATE_ENDPOINTS)
+@pytest.mark.parametrize("installed_in", ["another factory", "no factory"])
+async def test_template_reenable_asking_for_a_different_factory_is_409(
+    async_client, endpoint, installed_in
+):
+    first = await _create_factory(async_client, "First")
+    second = await _create_factory(async_client, "Second")
+    installed_extra = (
+        {"factory_id": first["id"]} if installed_in == "another factory" else {}
+    )
+    existing = await _create_automation(
+        async_client, "Installed", template=TEMPLATE, **installed_extra
+    )
+    url, build = CREATE_ENDPOINTS[endpoint]
+
+    response = await async_client.post(
+        url, json=build({"template": TEMPLATE, "factory_id": second["id"]})
+    )
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert existing["id"] in detail
+    assert (str(first["id"]) in detail) == (installed_in == "another factory")
+    unchanged = (await async_client.get(f"{BASE}/{existing['id']}")).json()
+    assert unchanged["factory_id"] == installed_extra.get("factory_id")
+    assert (await async_client.get(f"{FACTORIES}/{second['id']}")).json()[
+        "automation_count"
+    ] == 0
+
+
+# --- Draft validation ---
+
+
+async def _validate(client: AsyncClient, factory_id) -> dict:
+    response = await client.post(
+        f"{BASE}/validate",
+        json={"endpoint": "/v1", "draft": _raw_body("Draft", factory_id=factory_id)},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _factory_error_codes(result: dict) -> list[str]:
+    return [e["code"] for e in result["errors"] if e["field"] == "factory_id"]
+
+
+async def test_validate_accepts_a_usable_factory_and_no_factory(async_client):
+    factory = await _create_factory(async_client, "First")
+
+    assert _factory_error_codes(await _validate(async_client, factory["id"])) == []
+    assert _factory_error_codes(await _validate(async_client, None)) == []
+
+
+async def test_validate_reports_an_unknown_or_other_org_factory(
+    async_client, async_session
+):
+    foreign = Factory(org_id=OTHER_ORG_ID, name="Theirs")
+    async_session.add(foreign)
+    await async_session.commit()
+
+    unknown = await _validate(async_client, str(uuid.uuid4()))
+    other_org = await _validate(async_client, str(foreign.id))
+
+    for result in (unknown, other_org):
+        assert result["valid"] is False
+        assert _factory_error_codes(result) == ["factory_id_404"]
+
+
+async def test_validate_reports_a_member_setting_a_factory(
+    readonly_client, async_session
+):
+    factory = Factory(org_id=TEST_ORG_ID, name="First")
+    async_session.add(factory)
+    await async_session.commit()
+
+    result = await _validate(readonly_client, str(factory.id))
+
+    assert result["valid"] is False
+    assert _factory_error_codes(result) == ["factory_id_403"]
+
+
+async def test_draft_with_an_unusable_factory_is_not_dispatchable(async_client):
+    created = await async_client.post(
+        f"{BASE}/drafts",
+        json={
+            "endpoint": "/v1",
+            "draft": _raw_body("Draft", factory_id=str(uuid.uuid4())),
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["dispatchable"] is False
+    assert [e["code"] for e in created.json()["validation_errors"]] == [
+        "factory_id_404"
+    ]
+
+
+async def test_draft_becomes_dispatchable_when_its_factory_exists(async_client):
+    factory = await _create_factory(async_client, "First")
+
+    created = await async_client.post(
+        f"{BASE}/drafts",
+        json={"endpoint": "/v1", "draft": _raw_body("Draft", factory_id=factory["id"])},
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["dispatchable"] is True
+    assert created.json()["validation_errors"] is None
 
 
 async def test_draft_keeps_factory_id_but_its_test_run_has_none(
