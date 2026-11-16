@@ -8,6 +8,7 @@ sandbox. Sending the turn is stubbed; `test_conversation_turn.py` covers it.
 import asyncio
 import json
 import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -42,6 +43,7 @@ from openhands.automation.subjects import (
     conversation_id_for,
 )
 from openhands.automation.utils.conversation_turn import compose_turn
+from openhands.automation.utils.run import expire_aged_deferred_runs
 from openhands.automation.utils.time import utcnow
 
 
@@ -803,6 +805,61 @@ async def test_an_unreachable_conversation_degrades_to_a_run(
     assert dead_run.subject_released_at is not None
     owners = await subject_runs(async_session)
     assert [str(run.id) for run in owners] == second.run_ids
+
+
+@pytest.mark.asyncio
+async def test_an_expired_deferred_run_releases_its_subject(
+    org_id, async_session_factory, mock_authenticated_user, delivered_turns
+):
+    """An event after a deferred run expires must start a fresh run.
+
+    A deferred run has no ``started_at`` (the requeue clears it), so if the
+    sweep left its subject held, the next thread message would be folded into
+    the SKIPPED run's payload and never dispatched. Expiring releases the
+    subject in the same statement, so the event creates a new run instead.
+    """
+    subject_key = f"{TEAM}/C123/1755000000.000100"
+    async with async_session_factory() as setup:
+        automation = make_automation(
+            org_id, mock_authenticated_user.user_id, continuing_trigger()
+        )
+        setup.add(automation)
+        await setup.commit()
+        first = await _mention(setup, org_id, slack_envelope(), "Ev1")
+
+        # The run was accepted, then deferred behind a transient limit:
+        # PENDING with deferred_until set and started_at cleared, aged past max.
+        run = await setup.get(AutomationRun, uuid.UUID(first.run_ids[0]))
+        assert run is not None
+        run.started_at = None
+        run.status = AutomationRunStatus.PENDING
+        run.deferred_until = utcnow() - timedelta(seconds=1)
+        run.created_at = utcnow() - timedelta(hours=7)
+        await setup.commit()
+
+    skipped = await expire_aged_deferred_runs(
+        async_session_factory,
+        max_age_seconds=6 * 3600,
+        status_detail={"kind": "defer_expired"},
+    )
+    assert skipped == 1
+
+    # A fresh session, so no identity-map copy masks the committed release.
+    async with async_session_factory() as session:
+        expired = await session.get(AutomationRun, uuid.UUID(first.run_ids[0]))
+        assert expired is not None
+        assert expired.status == AutomationRunStatus.SKIPPED
+        assert expired.subject_released_at is not None
+        assert expired.subject_key == subject_key
+
+        reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
+        second = await _mention(session, org_id, reply, "Ev2")
+
+        # A fresh run owns the subject; nothing was folded into the dead run.
+        assert len(second.run_ids) == 1
+        assert second.run_ids != first.run_ids
+        owners = await subject_runs(session)
+        assert [str(r.id) for r in owners] == second.run_ids
 
 
 @pytest.mark.asyncio
