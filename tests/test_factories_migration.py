@@ -63,7 +63,7 @@ def test_existing_rows_survive_the_upgrade_with_no_factory(tmp_path):
     inspector = inspect(engine)
     indexes = {index["name"] for index in inspector.get_indexes("automations")}
     foreign_keys = inspector.get_foreign_keys("automations")
-    factory_count = len(inspector.get_columns("factories"))
+    factory_columns = {c["name"] for c in inspector.get_columns("factories")}
     engine.dispose()
 
     assert automation.factory_id is None
@@ -73,7 +73,7 @@ def test_existing_rows_survive_the_upgrade_with_no_factory(tmp_path):
         (fk["referred_table"], fk.get("options", {}).get("ondelete"))
         for fk in foreign_keys
     ] == [("factories", "SET NULL")]
-    assert factory_count == 6
+    assert factory_columns == {"id", "org_id", "name", "created_at", "updated_at"}
 
 
 def test_the_upgrade_adds_one_head_and_downgrades(tmp_path):

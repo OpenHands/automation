@@ -20,7 +20,6 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.factories import normalize_factory_slug
 from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
@@ -585,6 +584,13 @@ class CreateAutomationRequest(BaseModel):
         ),
     )
     tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory to create the automation in. Requires manage_automations "
+            "(members get 403); an unknown or other-org factory returns 404."
+        ),
+    )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -1246,14 +1252,6 @@ class FactoryCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=255)
-    slug: str | None = Field(
-        default=None,
-        description=(
-            "Identifier in URLs: lowercase letters, numbers and single hyphens, "
-            "unique within the org and immutable. Derived from the name when "
-            "omitted."
-        ),
-    )
 
     @field_validator("name")
     @classmethod
@@ -1263,14 +1261,9 @@ class FactoryCreate(BaseModel):
             raise ValueError("name must not be blank")
         return stripped
 
-    @field_validator("slug")
-    @classmethod
-    def validate_slug(cls, value: str | None) -> str | None:
-        return None if value is None else normalize_factory_slug(value)
-
 
 class FactoryUpdate(BaseModel):
-    """Request to rename a factory. The slug cannot change."""
+    """Request to rename a factory."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1288,7 +1281,6 @@ class FactoryUpdate(BaseModel):
 class FactoryResponse(BaseModel):
     id: uuid.UUID
     name: str
-    slug: str
     automation_count: int = Field(
         ..., description="Live (not soft-deleted) automations in this factory"
     )

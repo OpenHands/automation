@@ -1,4 +1,4 @@
-"""Factories: slug rules, the factory API, assignment through PATCH, the list
+"""Factories: the factory API, assignment through PATCH, the list
 filter, deletion, the change audit, and the Git Sync boundary.
 
 API tests run on both PostgreSQL and SQLite: the count of live automations, the
@@ -18,11 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from openhands.automation.app import app
 from openhands.automation.auth import _get_local_user
 from openhands.automation.db import set_sqlite_mode, using_sqlite
-from openhands.automation.factories import (
-    MAX_FACTORY_SLUG_LENGTH,
-    normalize_factory_slug,
-    slugify_factory_name,
-)
 from openhands.automation.git_sync.loop import (
     _create_automation_from_git,
     _Owner,
@@ -120,47 +115,6 @@ def _automation_row(name: str, **overrides) -> Automation:
     return Automation(**values)
 
 
-# --- Slug rules ---
-
-
-@pytest.mark.parametrize(
-    ("name", "slug"),
-    [
-        ("Software Factory", "software-factory"),
-        ("  Release   Train!! ", "release-train"),
-        ("QA_v2 / nightly", "qa-v2-nightly"),
-        ("Zürich", "z-rich"),
-    ],
-)
-def test_slugify_derives_a_url_safe_slug(name, slug):
-    assert slugify_factory_name(name) == slug
-
-
-def test_slugify_truncates_without_a_trailing_hyphen():
-    slug = slugify_factory_name("a" * 62 + " b")
-    assert len(slug) <= MAX_FACTORY_SLUG_LENGTH
-    assert not slug.endswith("-")
-
-
-@pytest.mark.parametrize("name", ["!!!", "日本語"])
-def test_slugify_rejects_names_with_nothing_to_derive_from(name):
-    with pytest.raises(ValueError, match="provide a slug"):
-        slugify_factory_name(name)
-
-
-def test_normalize_slug_lowercases_and_trims():
-    assert normalize_factory_slug("  My-Slug ") == "my-slug"
-
-
-@pytest.mark.parametrize(
-    "slug",
-    ["", "under_score", "-lead", "trail-", "dou--ble", "has space", "x" * 64],
-)
-def test_normalize_slug_rejects_non_slugs(slug):
-    with pytest.raises(ValueError):
-        normalize_factory_slug(slug)
-
-
 # --- Create ---
 
 
@@ -171,27 +125,21 @@ async def test_fresh_install_has_no_factories(async_client):
     assert response.json() == {"factories": [], "total": 0}
 
 
-async def test_create_derives_the_slug_from_the_name(async_client):
+async def test_create_returns_the_factory(async_client):
     data = await _create_factory(async_client, "Software Factory")
 
     assert data["name"] == "Software Factory"
-    assert data["slug"] == "software-factory"
     assert data["automation_count"] == 0
     assert uuid.UUID(data["id"])
     assert {"created_at", "updated_at"} <= data.keys()
+    assert "slug" not in data
     assert "description" not in data
-
-
-async def test_create_accepts_an_explicit_slug(async_client):
-    data = await _create_factory(async_client, "Software Factory", slug="SF-1")
-    assert data["slug"] == "sf-1"
 
 
 @pytest.mark.parametrize(
     "body",
     [
-        {"name": "x", "slug": "not_a_slug"},
-        {"name": "!!!"},
+        {"name": "x", "slug": "a-slug"},
         {"name": "   "},
         {"name": "x", "description": "no such attribute"},
         {},
@@ -202,89 +150,69 @@ async def test_create_rejects_invalid_input(async_client, body):
     assert response.status_code == 422, response.text
 
 
-async def test_create_conflicts_on_a_duplicate_slug_in_the_org(async_client):
-    await _create_factory(async_client, "Software Factory")
+async def test_factory_names_need_not_be_unique(async_client):
+    first = await _create_factory(async_client, "Software Factory")
+    second = await _create_factory(async_client, "software factory")
 
-    same_name = await async_client.post(FACTORIES, json={"name": "software factory"})
-    same_slug = await async_client.post(
-        FACTORIES, json={"name": "Other", "slug": "software-factory"}
-    )
-
-    assert same_name.status_code == 409, same_name.text
-    assert same_slug.status_code == 409, same_slug.text
-    listed = await async_client.get(FACTORIES)
-    assert listed.json()["total"] == 1
-
-
-async def test_two_orgs_can_use_the_same_slug(async_client, async_session):
-    async_session.add(Factory(org_id=OTHER_ORG_ID, name="Theirs", slug="shared"))
-    await async_session.commit()
-
-    data = await _create_factory(async_client, "Ours", slug="shared")
-
-    assert data["slug"] == "shared"
+    assert first["id"] != second["id"]
+    assert (await async_client.get(FACTORIES)).json()["total"] == 2
 
 
 # --- Read, rename ---
 
 
-async def test_get_returns_the_factory_by_slug(async_client):
+async def test_get_returns_the_factory_by_id(async_client):
     created = await _create_factory(async_client, "Software Factory")
 
-    response = await async_client.get(f"{FACTORIES}/software-factory")
+    response = await async_client.get(f"{FACTORIES}/{created['id']}")
 
     assert response.status_code == 200, response.text
     assert response.json() == created
 
 
 async def test_get_unknown_factory_is_404(async_client):
-    response = await async_client.get(f"{FACTORIES}/nope")
+    response = await async_client.get(f"{FACTORIES}/{uuid.uuid4()}")
     assert response.status_code == 404, response.text
 
 
-async def test_other_orgs_factory_is_invisible(async_client, async_session):
-    async_session.add(Factory(org_id=OTHER_ORG_ID, name="Theirs", slug="theirs"))
-    await async_session.commit()
+async def test_non_uuid_factory_id_is_422(async_client):
+    response = await async_client.get(f"{FACTORIES}/software-factory")
+    assert response.status_code == 422, response.text
 
-    assert (await async_client.get(f"{FACTORIES}/theirs")).status_code == 404
-    assert (
-        await async_client.patch(f"{FACTORIES}/theirs", json={"name": "Mine"})
-    ).status_code == 404
-    assert (await async_client.delete(f"{FACTORIES}/theirs")).status_code == 404
+
+async def test_other_orgs_factory_is_invisible(async_client, async_session):
+    theirs = Factory(org_id=OTHER_ORG_ID, name="Theirs")
+    async_session.add(theirs)
+    await async_session.commit()
+    url = f"{FACTORIES}/{theirs.id}"
+
+    assert (await async_client.get(url)).status_code == 404
+    assert (await async_client.patch(url, json={"name": "Mine"})).status_code == 404
+    assert (await async_client.delete(url)).status_code == 404
     assert (await async_client.get(FACTORIES)).json()["total"] == 0
 
 
-async def test_rename_changes_the_name_and_not_the_slug(async_client):
+async def test_rename_changes_the_name(async_client):
     created = await _create_factory(async_client, "Software Factory")
 
     response = await async_client.patch(
-        f"{FACTORIES}/software-factory", json={"name": "Release Train"}
+        f"{FACTORIES}/{created['id']}", json={"name": "Release Train"}
     )
 
     assert response.status_code == 200, response.text
     data = response.json()
-    assert (data["name"], data["slug"], data["id"]) == (
-        "Release Train",
-        "software-factory",
-        created["id"],
-    )
+    assert (data["name"], data["id"]) == ("Release Train", created["id"])
     assert data["updated_at"] >= created["updated_at"]
-    assert (await async_client.get(f"{FACTORIES}/release-train")).status_code == 404
 
 
-async def test_rename_cannot_change_the_slug(async_client):
-    await _create_factory(async_client, "Software Factory")
+async def test_rename_rejects_a_slug(async_client):
+    created = await _create_factory(async_client, "Software Factory")
+    url = f"{FACTORIES}/{created['id']}"
 
-    response = await async_client.patch(
-        f"{FACTORIES}/software-factory", json={"name": "New", "slug": "new"}
-    )
+    response = await async_client.patch(url, json={"name": "New", "slug": "new"})
 
     assert response.status_code == 422, response.text
-    kept = await async_client.get(f"{FACTORIES}/software-factory")
-    assert (kept.json()["name"], kept.json()["slug"]) == (
-        "Software Factory",
-        "software-factory",
-    )
+    assert (await async_client.get(url)).json()["name"] == "Software Factory"
 
 
 async def test_list_pages_over_factories(async_client):
@@ -315,7 +243,7 @@ async def test_automation_count_includes_only_live_automations(
     )
     await async_session.commit()
 
-    one = await async_client.get(f"{FACTORIES}/software-factory")
+    one = await async_client.get(f"{FACTORIES}/{factory_id}")
     listed = await async_client.get(FACTORIES)
 
     assert one.json()["automation_count"] == 2
@@ -378,7 +306,7 @@ async def test_assign_to_an_unknown_factory_is_404(async_client):
 
 
 async def test_assign_to_another_orgs_factory_is_404(async_client, async_session):
-    foreign = Factory(org_id=OTHER_ORG_ID, name="Theirs", slug="theirs")
+    foreign = Factory(org_id=OTHER_ORG_ID, name="Theirs")
     async_session.add(foreign)
     await async_session.commit()
     automation = await _create_automation(async_client, "Member")
@@ -395,7 +323,7 @@ async def test_assign_to_another_orgs_factory_is_404(async_client, async_session
 async def test_creator_without_manage_automations_cannot_change_the_factory(
     readonly_client, async_session
 ):
-    factory = Factory(org_id=TEST_ORG_ID, name="First", slug="first")
+    factory = Factory(org_id=TEST_ORG_ID, name="First")
     async_session.add(factory)
     await async_session.flush()
     mine = _automation_row("Mine", user_id=TEST_USER_ID)
@@ -494,11 +422,11 @@ async def test_delete_with_live_automations_is_409_and_states_the_count(
             f"{BASE}/{created['id']}", json={"factory_id": factory["id"]}
         )
 
-    response = await async_client.delete(f"{FACTORIES}/first")
+    response = await async_client.delete(f"{FACTORIES}/{factory['id']}")
 
     assert response.status_code == 409, response.text
     assert "2 live automations" in response.json()["detail"]
-    assert (await async_client.get(f"{FACTORIES}/first")).status_code == 200
+    assert (await async_client.get(f"{FACTORIES}/{factory['id']}")).status_code == 200
 
 
 async def test_delete_succeeds_once_the_automations_are_gone_from_the_factory(
@@ -514,10 +442,10 @@ async def test_delete_succeeds_once_the_automations_are_gone_from_the_factory(
     await async_client.patch(f"{BASE}/{kept['id']}", json={"factory_id": None})
     assert (await async_client.delete(f"{BASE}/{removed['id']}")).status_code == 204
 
-    response = await async_client.delete(f"{FACTORIES}/first")
+    response = await async_client.delete(f"{FACTORIES}/{factory['id']}")
 
     assert response.status_code == 204, response.text
-    assert (await async_client.get(f"{FACTORIES}/first")).status_code == 404
+    assert (await async_client.get(f"{FACTORIES}/{factory['id']}")).status_code == 404
     assert (await async_client.get(FACTORIES)).json()["total"] == 0
     row = await async_session.scalar(
         select(Automation).where(Automation.id == uuid.UUID(removed["id"]))
@@ -534,7 +462,7 @@ async def test_deleted_factory_detach_is_audited(async_client, async_session):
         f"{BASE}/{automation['id']}", json={"factory_id": factory["id"]}
     )
     await async_client.delete(f"{BASE}/{automation['id']}")
-    await async_client.delete(f"{FACTORIES}/first")
+    await async_client.delete(f"{FACTORIES}/{factory['id']}")
 
     changes = await async_session.scalars(
         select(AutomationChangeEvent)
@@ -546,25 +474,157 @@ async def test_deleted_factory_detach_is_audited(async_client, async_session):
 
 async def test_factory_id_is_not_reused_after_delete(async_client):
     first = await _create_factory(async_client, "First")
-    await async_client.delete(f"{FACTORIES}/first")
+    await async_client.delete(f"{FACTORIES}/{first['id']}")
 
     again = await _create_factory(async_client, "First")
 
     assert again["id"] != first["id"]
 
 
+# --- Creating an automation in a factory ---
+
+CRON = {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"}
+CREATE_ENDPOINTS = {
+    "raw": (BASE, lambda extra: _raw_body("In factory", **extra)),
+    "prompt": (
+        f"{BASE}/preset/prompt",
+        lambda extra: {
+            "name": "In factory",
+            "prompt": "Say hi",
+            "trigger": CRON,
+            **extra,
+        },
+    ),
+    "plugin": (
+        f"{BASE}/preset/plugin",
+        lambda extra: {
+            "name": "In factory",
+            "prompt": "Say hi",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "trigger": CRON,
+            **extra,
+        },
+    ),
+    "plugin-spec": (
+        f"{BASE}/plugin-spec",
+        lambda extra: {
+            "name": "In factory",
+            "plugin": {"source": "github:owner/plugin"},
+            "trigger": CRON,
+            **extra,
+        },
+    ),
+}
+# plugin-spec needs a fetchable manifest to succeed; the factory checks run first.
+CREATABLE = ["raw", "prompt", "plugin"]
+
+
+@pytest.mark.parametrize("endpoint", CREATABLE)
+async def test_create_endpoint_assigns_the_factory(async_client, endpoint):
+    factory = await _create_factory(async_client, "First")
+    url, build = CREATE_ENDPOINTS[endpoint]
+
+    response = await async_client.post(url, json=build({"factory_id": factory["id"]}))
+
+    assert response.status_code == 201, response.text
+    assert response.json()["factory_id"] == factory["id"]
+    fetched = await async_client.get(FACTORIES + f"/{factory['id']}")
+    assert fetched.json()["automation_count"] == 1
+
+
+@pytest.mark.parametrize("endpoint", CREATE_ENDPOINTS)
+async def test_create_endpoint_unknown_factory_is_404(async_client, endpoint):
+    url, build = CREATE_ENDPOINTS[endpoint]
+
+    response = await async_client.post(
+        url, json=build({"factory_id": str(uuid.uuid4())})
+    )
+
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.parametrize("endpoint", CREATE_ENDPOINTS)
+async def test_create_endpoint_other_orgs_factory_is_404(
+    async_client, async_session, endpoint
+):
+    foreign = Factory(org_id=OTHER_ORG_ID, name="Theirs")
+    async_session.add(foreign)
+    await async_session.commit()
+    url, build = CREATE_ENDPOINTS[endpoint]
+
+    response = await async_client.post(url, json=build({"factory_id": str(foreign.id)}))
+
+    assert response.status_code == 404, response.text
+    assert (await async_client.get(BASE)).json()["total"] == 0
+
+
+@pytest.mark.parametrize("endpoint", CREATE_ENDPOINTS)
+async def test_create_endpoint_member_cannot_set_a_factory(
+    readonly_client, async_session, endpoint
+):
+    factory = Factory(org_id=TEST_ORG_ID, name="First")
+    async_session.add(factory)
+    await async_session.commit()
+    url, build = CREATE_ENDPOINTS[endpoint]
+
+    response = await readonly_client.post(
+        url, json=build({"factory_id": str(factory.id)})
+    )
+
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize("endpoint", CREATABLE)
+async def test_member_can_still_create_without_a_factory(readonly_client, endpoint):
+    url, build = CREATE_ENDPOINTS[endpoint]
+
+    response = await readonly_client.post(url, json=build({}))
+
+    assert response.status_code == 201, response.text
+    assert response.json()["factory_id"] is None
+
+
+async def test_draft_keeps_factory_id_but_its_test_run_has_none(
+    async_client, async_session
+):
+    factory = await _create_factory(async_client, "First")
+    created = await async_client.post(
+        f"{BASE}/drafts",
+        json={
+            "endpoint": "/v1",
+            "draft": _raw_body("Draft", factory_id=factory["id"]),
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["draft"]["factory_id"] == factory["id"]
+
+    dispatched = await async_client.post(
+        f"{BASE}/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert dispatched.status_code == 201, dispatched.text
+    hidden = await async_session.get(
+        Automation, uuid.UUID(dispatched.json()["automation_id"])
+    )
+    assert hidden is not None and hidden.factory_id is None
+    deleted = await async_client.delete(f"{FACTORIES}/{factory['id']}")
+    assert deleted.status_code == 204, deleted.text
+
+
 # --- Authorization ---
 
 
 async def test_member_can_read_but_not_write_factories(readonly_client, async_session):
-    async_session.add(Factory(org_id=TEST_ORG_ID, name="First", slug="first"))
+    factory = Factory(org_id=TEST_ORG_ID, name="First")
+    async_session.add(factory)
     await async_session.commit()
+    url = f"{FACTORIES}/{factory.id}"
 
     assert (await readonly_client.get(FACTORIES)).status_code == 200
-    assert (await readonly_client.get(f"{FACTORIES}/first")).status_code == 200
+    assert (await readonly_client.get(url)).status_code == 200
     create = await readonly_client.post(FACTORIES, json={"name": "New"})
-    rename = await readonly_client.patch(f"{FACTORIES}/first", json={"name": "New"})
-    delete = await readonly_client.delete(f"{FACTORIES}/first")
+    rename = await readonly_client.patch(url, json={"name": "New"})
+    delete = await readonly_client.delete(url)
     assert (create.status_code, rename.status_code, delete.status_code) == (
         403,
         403,
@@ -573,7 +633,7 @@ async def test_member_can_read_but_not_write_factories(readonly_client, async_se
 
 
 async def test_member_can_list_a_factorys_automations(readonly_client, async_session):
-    factory = Factory(org_id=TEST_ORG_ID, name="First", slug="first")
+    factory = Factory(org_id=TEST_ORG_ID, name="First")
     async_session.add(factory)
     await async_session.flush()
     async_session.add(_automation_row("Grouped", factory_id=factory.id))
@@ -604,7 +664,7 @@ def test_git_sync_export_does_not_write_the_factory():
 async def test_git_sync_update_leaves_the_factory_unchanged(
     async_session: AsyncSession,
 ):
-    factory = Factory(org_id=TEST_ORG_ID, name="First", slug="first")
+    factory = Factory(org_id=TEST_ORG_ID, name="First")
     async_session.add(factory)
     await async_session.flush()
     files = serialize_automation(_automation_row("Synced", id=uuid.uuid4()), None)

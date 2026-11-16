@@ -69,6 +69,8 @@ _STATIC_FEATURES = (
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",
+    # Factories can be created, and automations created in or moved into one.
+    "factories",
     "mcpTools",
     "presetPlugin",
     "presetPrompt",

@@ -105,6 +105,13 @@ class _BaseDraftBody(BaseModel):
     )
     agent_profile_id: uuid.UUID | None = None
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory to create the automation in. Requires manage_automations "
+            "(members get 403); an unknown or other-org factory returns 404."
+        ),
+    )
     description: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(
         default=None,

@@ -225,9 +225,7 @@ async def _make_run(
     ``factory_id`` the automation belongs to a factory of that id."""
     async with async_session_factory() as session:
         if factory_id is not None:
-            session.add(
-                Factory(id=factory_id, org_id=ORG_ID, name="Factory", slug="factory")
-            )
+            session.add(Factory(id=factory_id, org_id=ORG_ID, name="Factory"))
             await session.flush()
         if isinstance(tarball, bytes):
             upload_id = uuid.uuid4()

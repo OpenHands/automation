@@ -31,8 +31,8 @@ def service_key(monkeypatch):
     clear_config_cache()
 
 
-async def _factory(session: AsyncSession, org_id: uuid.UUID, slug: str) -> Factory:
-    factory = Factory(org_id=org_id, name=slug, slug=slug)
+async def _factory(session: AsyncSession, org_id: uuid.UUID, name: str) -> Factory:
+    factory = Factory(org_id=org_id, name=name)
     session.add(factory)
     await session.commit()
     return factory
@@ -198,7 +198,7 @@ async def _delete_empty_factory(
     client: AsyncClient, session: AsyncSession
 ) -> tuple[Factory, httpx.Response]:
     factory = await _factory(session, ORG_ID, "doomed")
-    return factory, await client.delete(f"{BASE}/factories/doomed")
+    return factory, await client.delete(f"{BASE}/factories/{factory.id}")
 
 
 async def test_delete_notifies_after_the_delete_commits(
@@ -227,7 +227,7 @@ async def test_an_enterprise_error_does_not_undo_the_delete(
     factory, response = await _delete_empty_factory(async_client, async_session)
 
     assert response.status_code == 204, response.text
-    assert (await async_client.get(f"{BASE}/factories/doomed")).status_code == 404
+    assert (await async_client.get(f"{BASE}/factories/{factory.id}")).status_code == 404
     assert f"returned HTTP {status}" in caplog.text
     assert str(factory.id) in caplog.text
 
@@ -241,7 +241,7 @@ async def test_an_unreachable_enterprise_does_not_undo_the_delete(
     factory, response = await _delete_empty_factory(async_client, async_session)
 
     assert response.status_code == 204, response.text
-    assert (await async_client.get(f"{BASE}/factories/doomed")).status_code == 404
+    assert (await async_client.get(f"{BASE}/factories/{factory.id}")).status_code == 404
     assert f"Deleted-factory notification for {factory.id} failed" in caplog.text
 
 
@@ -286,7 +286,7 @@ async def test_a_refused_delete_sends_nothing(async_client, async_session, enter
     )
     await async_session.commit()
 
-    response = await async_client.delete(f"{BASE}/factories/busy")
+    response = await async_client.delete(f"{BASE}/factories/{factory.id}")
 
     assert response.status_code == 409, response.text
     assert enterprise.seen == []

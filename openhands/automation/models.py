@@ -80,7 +80,6 @@ class Factory(Base):
 
     Other services keep a factory's ``id`` as a plain reference with no foreign
     key, because their data lives in other databases, so an id is never reused.
-    The slug is immutable; a rename changes only ``name``.
     """
 
     __tablename__ = "factories"
@@ -88,7 +87,6 @@ class Factory(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(63), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -102,8 +100,6 @@ class Factory(Base):
         onupdate=utcnow,
         nullable=False,
     )
-
-    __table_args__ = (Index("ix_factories_org_slug", "org_id", "slug", unique=True),)
 
 
 class Automation(Base):
