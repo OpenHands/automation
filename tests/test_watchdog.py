@@ -472,6 +472,7 @@ class TestVerifyAndMarkRunTelemetry:
                         .scalars()
                         .first()
                     )
+                    assert run is not None
                     result = await _verify_and_mark_run(session, run, mock_settings)
                     await session.commit()
 
