@@ -195,7 +195,7 @@ class TestGetCapabilities:
             "build.*",
             "issue.*",
             "merge_request.*",
-            "note",
+            "note.*",
             "pipeline.*",
         ]
         assert by_source["github"] == body["eventTypes"]
@@ -467,7 +467,7 @@ class TestValidateDraft:
                 id="bitbucket-dc-github-key",
             ),
             pytest.param("gitlab", "merge_request.open", [], id="gitlab-mr"),
-            pytest.param("gitlab", "note", [], id="gitlab-note"),
+            pytest.param("gitlab", "note.create", [], id="gitlab-note"),
             pytest.param(
                 "gitlab",
                 "push",

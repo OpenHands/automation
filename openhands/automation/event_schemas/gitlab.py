@@ -4,7 +4,7 @@ The OpenHands server forwards events from the GitLab webhooks it installs on
 groups and projects. Every GitLab payload names its kind in the top-level
 ``object_kind`` field. The event key adds the action GitLab reports for that
 kind, so triggers read like GitHub's: ``merge_request.open``, ``issue.close``,
-``pipeline.failed``.
+``pipeline.failed``, ``note.create``.
 
 Only ``object_kind`` is required. GitLab payload shapes differ by kind (push
 events, for example, carry flat ``user_*`` fields instead of a ``user``
@@ -21,13 +21,13 @@ from openhands.automation.event_schemas import WebhookEvent
 
 
 # The kinds the OpenHands server's GitLab webhooks subscribe to, each with the
-# payload path holding its action, or None when the kind has no action.
-# GitLab sends job events with object_kind "build".
-GITLAB_EVENT_ACTIONS: dict[str, str | None] = {
+# payload path holding its action. GitLab sends job events with object_kind
+# "build".
+GITLAB_EVENT_ACTIONS: dict[str, str] = {
     "build": "build_status",
     "issue": "object_attributes.action",
     "merge_request": "object_attributes.action",
-    "note": None,
+    "note": "object_attributes.action",
     "pipeline": "object_attributes.status",
 }
 
@@ -73,7 +73,7 @@ def parse_gitlab_event(payload: dict[str, Any]) -> GitLabEvent:
         raise ValueError(f"Unsupported gitlab event kind: {object_kind!r}")
 
     action_path = GITLAB_EVENT_ACTIONS[object_kind]
-    action = _lookup(payload, action_path) if action_path else None
+    action = _lookup(payload, action_path)
     return GitLabEvent(
         object_kind=object_kind,
         action=action if isinstance(action, str) and action else None,
@@ -83,10 +83,7 @@ def parse_gitlab_event(payload: dict[str, Any]) -> GitLabEvent:
 
 def get_supported_event_patterns() -> list[str]:
     """The ``on`` patterns a setup UI can offer for GitLab."""
-    return [
-        f"{kind}.*" if action_path else kind
-        for kind, action_path in sorted(GITLAB_EVENT_ACTIONS.items())
-    ]
+    return [f"{kind}.*" for kind in sorted(GITLAB_EVENT_ACTIONS)]
 
 
 def get_event_detection_rules() -> list[dict[str, str]]:

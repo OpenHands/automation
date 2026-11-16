@@ -115,8 +115,18 @@ class TestParseGitLabEvent:
             ),
             ({"object_kind": "build", "build_status": "success"}, "build.success"),
             (
-                {"object_kind": "note", "object_attributes": {"id": 1}},
-                "note",
+                {
+                    "object_kind": "note",
+                    "object_attributes": {"id": 1, "action": "create"},
+                },
+                "note.create",
+            ),
+            (
+                {
+                    "object_kind": "note",
+                    "object_attributes": {"id": 1, "action": "update"},
+                },
+                "note.update",
             ),
         ],
     )
@@ -224,6 +234,45 @@ async def test_forwarded_event_with_another_action_does_not_match(
 
     assert response.status_code == 200
     assert response.json()["matched"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_edited_comment_does_not_run_a_comment_created_automation(
+    async_client: AsyncClient,
+    async_session,
+    org_id: uuid.UUID,
+    mock_authenticated_user,
+):
+    """GitLab sends note events on edit too; only the create action may match."""
+    await add_automation(
+        async_session,
+        mock_authenticated_user,
+        org_id,
+        on="note.create",
+        filter="icontains(object_attributes.note, '@openhands')",
+    )
+    payload = {
+        "object_kind": "note",
+        "object_attributes": {
+            "id": 1,
+            "note": "@openhands please review",
+            "action": "update",
+        },
+    }
+    body = json.dumps(forwarded(payload, org_id)).encode()
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/gitlab",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": sign(body, SHARED_SECRET),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matched"] == 0
+    assert await run_count(async_session) == 0
 
 
 class TestLegacyCustomGitLabWebhook:
