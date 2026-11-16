@@ -83,14 +83,14 @@ async def get_org_member(
 
 
 # ``{org_id}`` and ``{factory_id}`` are filled in by ``notify_factory_deleted``.
-FACTORY_WORKLOGS_PATH = "/api/service/orgs/{org_id}/factories/{factory_id}/worklogs"
+FACTORY_DELETED_PATH = "/api/service/orgs/{org_id}/factories/{factory_id}/deleted"
 
 
 async def notify_factory_deleted(
     client: httpx.AsyncClient, org_id: uuid.UUID, factory_id: uuid.UUID
 ) -> None:
-    """Tell the OpenHands server a factory was deleted, so it can purge its
-    worklogs for it.
+    """Tell the OpenHands server a factory was deleted, so it can remove what it
+    keeps for that factory.
 
     Called after the delete commits. It never raises: a missed notification
     must not undo or block the delete, and Enterprise's maintenance task repairs
@@ -106,23 +106,23 @@ async def notify_factory_deleted(
         )
         return
 
-    url = config.openhands_api_base_url.rstrip("/") + FACTORY_WORKLOGS_PATH.format(
+    url = config.openhands_api_base_url.rstrip("/") + FACTORY_DELETED_PATH.format(
         org_id=org_id, factory_id=factory_id
     )
     try:
-        response = await client.delete(
+        response = await client.post(
             url, headers={"X-Service-API-Key": config.service_key}
         )
     except httpx.HTTPError as exc:
         logger.warning(
-            "Worklog purge for deleted factory %s failed: %s",
+            "Deleted-factory notification for %s failed: %s",
             factory_id,
             type(exc).__name__,
         )
         return
     if response.status_code != 204:
         logger.warning(
-            "Worklog purge for deleted factory %s returned HTTP %s",
+            "Deleted-factory notification for %s returned HTTP %s",
             factory_id,
             response.status_code,
         )

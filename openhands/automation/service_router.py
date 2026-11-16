@@ -37,9 +37,8 @@ async def lookup_factories(
     """The requested factory ids that exist in ``org_id``.
 
     An id that does not exist, or belongs to another org, is absent from the
-    answer. For services that store a factory id. The OpenHands server uses it
-    to confirm a factory exists before it creates the factory's default worklog,
-    and to remove the worklogs of factories that are gone.
+    answer. It is for services that store a factory id, so they can confirm a
+    factory exists and find the ids of factories that are gone.
     """
     rows = await session.execute(
         select(Factory.id, Factory.org_id).where(

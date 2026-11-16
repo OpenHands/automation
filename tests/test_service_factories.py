@@ -1,5 +1,5 @@
 """Enterprise's service-key routes into factories: the lookup it uses to confirm
-a factory exists, and the worklog purge this service sends after a delete."""
+a factory exists, and the notification this service sends after a delete."""
 
 import logging
 import uuid
@@ -155,8 +155,8 @@ async def test_lookup_is_503_when_no_service_key_is_configured(
 # --- Delete notification ---
 
 
-class EnterpriseWorklogApi:
-    """Enterprise's worklog purge route. ``status`` is what it answers; ``error``
+class EnterpriseFactoryApi:
+    """Enterprise's deleted-factory route. ``status`` is what it answers; ``error``
     makes it unreachable. ``seen`` records each request with whether the factory
     row was already gone from the database when it arrived."""
 
@@ -179,13 +179,13 @@ class EnterpriseWorklogApi:
 @pytest.fixture
 async def enterprise(
     async_client, async_session_factory, monkeypatch
-) -> AsyncGenerator[EnterpriseWorklogApi, None]:
-    """Cloud mode with a service key, and Enterprise serving the purge route."""
+) -> AsyncGenerator[EnterpriseFactoryApi, None]:
+    """Cloud mode with a service key, and Enterprise serving the deleted route."""
     monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
     monkeypatch.setenv("AUTOMATION_SERVICE_KEY", SERVICE_KEY)
     monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", ENTERPRISE_URL)
     clear_config_cache()
-    api = EnterpriseWorklogApi(async_session_factory)
+    api = EnterpriseFactoryApi(async_session_factory)
     await app.state.http_client.aclose()
     app.state.http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(api.respond)
@@ -201,7 +201,7 @@ async def _delete_empty_factory(
     return factory, await client.delete(f"{BASE}/factories/doomed")
 
 
-async def test_delete_sends_the_purge_after_the_delete_commits(
+async def test_delete_notifies_after_the_delete_commits(
     async_client, async_session, enterprise
 ):
     factory, response = await _delete_empty_factory(async_client, async_session)
@@ -209,12 +209,12 @@ async def test_delete_sends_the_purge_after_the_delete_commits(
     assert response.status_code == 204, response.text
     assert len(enterprise.seen) == 1
     request, committed = enterprise.seen[0]
-    assert request.method == "DELETE"
+    assert request.method == "POST"
     assert str(request.url) == (
-        f"{ENTERPRISE_URL}/api/service/orgs/{ORG_ID}/factories/{factory.id}/worklogs"
+        f"{ENTERPRISE_URL}/api/service/orgs/{ORG_ID}/factories/{factory.id}/deleted"
     )
     assert request.headers["X-Service-API-Key"] == SERVICE_KEY
-    assert committed, "the purge was sent before the delete committed"
+    assert committed, "the notification was sent before the delete committed"
 
 
 @pytest.mark.parametrize("status", [404, 500, 503])
@@ -242,7 +242,7 @@ async def test_an_unreachable_enterprise_does_not_undo_the_delete(
 
     assert response.status_code == 204, response.text
     assert (await async_client.get(f"{BASE}/factories/doomed")).status_code == 404
-    assert f"Worklog purge for deleted factory {factory.id} failed" in caplog.text
+    assert f"Deleted-factory notification for {factory.id} failed" in caplog.text
 
 
 async def test_nothing_is_sent_in_local_mode(

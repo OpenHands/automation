@@ -80,6 +80,7 @@ from openhands.automation.utils.app_server_repos import (
     RepositorySplit,
     split_repositories,
 )
+from openhands.automation.utils.factory_token import create_factory_token
 from openhands.automation.utils.finish_plugin import (
     finish_plugin_dir,
     finish_plugin_files,
@@ -115,7 +116,6 @@ from openhands.automation.utils.timeout import resolve_automation_timeout_second
 from openhands.automation.utils.unhealthy import (
     maybe_disable_unhealthy_automation_after_run,
 )
-from openhands.automation.utils.worklog import create_worklog_token
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -1143,7 +1143,7 @@ async def _execute_run(
     # mode has no OpenHands server to verify the token, and without the service
     # key there is nothing to sign it with. The run starts either way.
     if automation.factory_id and settings.service_key and not settings.is_local_mode:
-        env_vars["AUTOMATION_WORKLOG_TOKEN"] = create_worklog_token(
+        env_vars["AUTOMATION_FACTORY_TOKEN"] = create_factory_token(
             settings.service_key,
             org_id=automation.org_id,
             factory_id=automation.factory_id,

@@ -40,11 +40,11 @@ Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 - Git sync neither writes nor reads `factory_id`.
 - Enterprise reads factories through `GET /v1/service/factories`, with
   `X-Service-API-Key: <AUTOMATION_SERVICE_KEY>` (its `AUTOMATIONS_SERVICE_KEY`),
-  to confirm a factory exists. After a delete this service calls Enterprise's
-  worklog purge route; local mode has no Enterprise server, so nothing is sent
-  and a recipe cannot observe it (the unit tests do).
+  to confirm a factory exists. After a delete this service tells Enterprise
+  with `POST .../factories/{id}/deleted`; local mode has no Enterprise server,
+  so nothing is sent and a recipe cannot observe it (the unit tests do).
 - A run of an automation that belongs to a factory gets
-  `AUTOMATION_WORKLOG_TOKEN` in cloud mode when the service key is set; local
+  `AUTOMATION_FACTORY_TOKEN` in cloud mode when the service key is set; local
   mode never does.
 
 ## Driving it with control-automation

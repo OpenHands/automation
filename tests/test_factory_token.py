@@ -1,4 +1,4 @@
-"""The worklog run token: key derivation, the shared test vector, and what a
+"""The factory run token: key derivation, the shared test vector, and what a
 dispatched run gets.
 
 The vector below is the contract with OpenHands/enterprise#1297, whose tests
@@ -20,19 +20,19 @@ from sqlalchemy import select
 from openhands.automation.config import Settings
 from openhands.automation.execution import build_tarball
 from openhands.automation.models import AutomationRun
-from openhands.automation.utils.worklog import (
+from openhands.automation.utils.factory_token import (
     MAX_AUTOMATION_NAME_LENGTH,
-    create_worklog_token,
-    derive_worklog_signing_key,
+    create_factory_token,
+    derive_factory_token_signing_key,
     hkdf_sha256,
 )
 from tests.test_cloud_run_env import SCRIPT_FILES, _dispatch
 
 
-VECTOR_SERVICE_KEY = "worklog-contract-service-key"
+VECTOR_SERVICE_KEY = "factory-contract-service-key"
 VECTOR_ISSUED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 VECTOR_CLAIMS = {
-    "aud": "worklog",
+    "aud": "factory",
     "org_id": "11111111-1111-4111-8111-111111111111",
     "factory_id": "22222222-2222-4222-8222-222222222222",
     "automation_id": "33333333-3333-4333-8333-333333333333",
@@ -43,13 +43,13 @@ VECTOR_CLAIMS = {
 }
 VECTOR_TOKEN = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJhdWQiOiJ3b3JrbG9nIiwib3JnX2lkIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTEx"
-    "MTExMTExIiwiZmFjdG9yeV9pZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIy"
-    "MiIsImF1dG9tYXRpb25faWQiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMi"
-    "LCJhdXRvbWF0aW9uX25hbWUiOiJSZWxlYXNlIG9yY2hlc3RyYXRvciIsInJ1bl9pZCI6IjQ0NDQ0"
-    "NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjox"
-    "NzY3MzEyMDAwfQ."
-    "uf3R42EbWDlV0HrrVke_eJzQvW8vBFvCORKeBxFfua8"
+    "eyJhdWQiOiJmYWN0b3J5Iiwib3JnX2lkIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMT"
+    "ExMTExMTExIiwiZmFjdG9yeV9pZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIy"
+    "MjIyMiIsImF1dG9tYXRpb25faWQiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMz"
+    "MzMzMiLCJhdXRvbWF0aW9uX25hbWUiOiJSZWxlYXNlIG9yY2hlc3RyYXRvciIsInJ1bl9pZCI6"
+    "IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImlhdCI6MTc2NzIyNTYwMC"
+    "wiZXhwIjoxNzY3MzEyMDAwfQ."
+    "Ax8BlBo8ApNIxJ7tjrF0O9XEd6f88h-4mPKjxYP535U"
 )
 FACTORY_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 
@@ -64,7 +64,7 @@ def _token(**overrides) -> str:
         issued_at=VECTOR_ISSUED_AT,
     )
     values.update(overrides)
-    return create_worklog_token(VECTOR_SERVICE_KEY, **values)
+    return create_factory_token(VECTOR_SERVICE_KEY, **values)
 
 
 # --- Key derivation and the contract vector ---
@@ -80,7 +80,7 @@ def test_hkdf_matches_rfc_5869_test_case_3():
 
 
 def test_signing_key_is_derived_not_the_service_key():
-    key = derive_worklog_signing_key(VECTOR_SERVICE_KEY)
+    key = derive_factory_token_signing_key(VECTOR_SERVICE_KEY)
 
     assert len(key) == 32
     assert key != VECTOR_SERVICE_KEY.encode()
@@ -93,9 +93,9 @@ def test_the_vector_token_is_what_this_service_mints():
 def test_the_vector_token_verifies_with_the_derived_key():
     claims = jwt.decode(
         VECTOR_TOKEN,
-        derive_worklog_signing_key(VECTOR_SERVICE_KEY),
+        derive_factory_token_signing_key(VECTOR_SERVICE_KEY),
         algorithms=["HS256"],
-        audience="worklog",
+        audience="factory",
         options={"verify_exp": False},
     )
 
@@ -132,7 +132,7 @@ def test_automation_name_is_truncated_to_256_characters():
 
 
 def test_a_different_service_key_gives_a_token_that_does_not_verify():
-    other = create_worklog_token(
+    other = create_factory_token(
         "another-key",
         org_id=uuid.uuid4(),
         factory_id=FACTORY_ID,
@@ -144,9 +144,9 @@ def test_a_different_service_key_gives_a_token_that_does_not_verify():
     with pytest.raises(jwt.InvalidSignatureError):
         jwt.decode(
             other,
-            derive_worklog_signing_key(VECTOR_SERVICE_KEY),
+            derive_factory_token_signing_key(VECTOR_SERVICE_KEY),
             algorithms=["HS256"],
-            audience="worklog",
+            audience="factory",
         )
 
 
@@ -183,10 +183,10 @@ async def test_a_factory_run_gets_a_token_naming_its_factory(
     )
 
     claims = jwt.decode(
-        env["AUTOMATION_WORKLOG_TOKEN"],
-        derive_worklog_signing_key("test-service-key"),
+        env["AUTOMATION_FACTORY_TOKEN"],
+        derive_factory_token_signing_key("test-service-key"),
         algorithms=["HS256"],
-        audience="worklog",
+        audience="factory",
     )
     assert set(claims) == set(VECTOR_CLAIMS)
     assert claims["factory_id"] == str(FACTORY_ID)
@@ -206,7 +206,7 @@ async def test_a_run_without_a_factory_gets_no_token_and_starts(
         build_tarball(SCRIPT_FILES),
     )
 
-    assert "AUTOMATION_WORKLOG_TOKEN" not in env
+    assert "AUTOMATION_FACTORY_TOKEN" not in env
     assert env["AUTOMATION_RUN_ID"]
 
 
@@ -221,7 +221,7 @@ async def test_a_run_without_a_service_key_gets_no_token_and_starts(
         factory_id=FACTORY_ID,
     )
 
-    assert "AUTOMATION_WORKLOG_TOKEN" not in env
+    assert "AUTOMATION_FACTORY_TOKEN" not in env
     assert env["AUTOMATION_RUN_ID"]
 
 
@@ -237,7 +237,7 @@ async def test_a_local_mode_run_gets_no_token_and_starts(
         factory_id=FACTORY_ID,
     )
 
-    assert "AUTOMATION_WORKLOG_TOKEN" not in env
+    assert "AUTOMATION_FACTORY_TOKEN" not in env
     assert env["AUTOMATION_RUN_ID"]
 
 
@@ -256,7 +256,7 @@ async def test_the_token_is_not_stored_or_logged(
         run_out=runs,
     )
 
-    token = env["AUTOMATION_WORKLOG_TOKEN"]
+    token = env["AUTOMATION_FACTORY_TOKEN"]
     assert token not in caplog.text
     assert token not in env["AUTOMATION_EVENT_PAYLOAD"]
     async with async_session_factory() as session:

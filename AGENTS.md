@@ -227,7 +227,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
-| `AUTOMATION_WORKLOG_TOKEN` | Dispatcher, cloud mode only, when the automation belongs to a factory and the service key is set | Run token for the factory's Enterprise-hosted worklogs (see Factories). Absent in local mode, for an automation with no factory, and without a service key; the run starts anyway |
+| `AUTOMATION_FACTORY_TOKEN` | Dispatcher, cloud mode only, when the automation belongs to a factory and the service key is set | Run token naming the run's factory, for services that hold the service key (see Factory references from other services). Absent in local mode, for an automation with no factory, and without a service key; the run starts anyway |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
@@ -309,28 +309,29 @@ Other services keep a factory's id as a plain reference with no foreign key,
 because their data lives in other databases. This service supplies the three
 things such a holder needs. The first consumer is worklogs (append-only logs
 scoped to a factory), which the OpenHands server stores and serves
-(OpenHands/enterprise#1297).
+(OpenHands/enterprise#1297); nothing here is specific to them.
 
-- **Run token** (`utils/worklog.py`): the dispatcher injects
-  `AUTOMATION_WORKLOG_TOKEN` next to `AUTOMATION_KV_TOKEN`. It is an HS256 JWT
+- **Run token** (`utils/factory_token.py`): the dispatcher injects
+  `AUTOMATION_FACTORY_TOKEN` next to `AUTOMATION_KV_TOKEN`. It is an HS256 JWT
   signed with a key derived from `AUTOMATION_SERVICE_KEY` by HKDF-SHA256 (zero
-  salt, 32 bytes, info `openhands-worklog-run-token-v1`); the raw service key
-  never signs. Claims: `aud` `worklog`, `org_id`, `factory_id`,
+  salt, 32 bytes, info `openhands-factory-run-token-v1`); the raw service key
+  never signs. Claims: `aud` `factory`, `org_id`, `factory_id`,
   `automation_id`, `automation_name` (at most 256 characters), `run_id`, `iat`,
   `exp` (24 hours). The token is never stored, logged or put in
   `AUTOMATION_EVENT_PAYLOAD`. A run keeps the factory named in its token until
-  it expires, even if its automation is moved to another factory mid-run. Runs
-  call `$OPENHANDS_CLOUD_API_URL/api/service/worklog/...` with it as a Bearer
-  token. Only a service that holds the service key can verify it. The tests
-  in `tests/test_worklog_token.py` commit the contract test vector that
+  it expires, even if its automation is moved to another factory mid-run. A run
+  sends it as a Bearer token to a route of a service that accepts it, which
+  decides what the factory may do (Enterprise's worklog routes are the first).
+  Only a service that holds the service key can verify it. The tests in
+  `tests/test_factory_token.py` commit the contract test vector that
   Enterprise's tests also commit; if the two differ, the enterprise issue is
   authoritative.
 - **Factory lookup**: `GET /v1/service/factories?org_id=&id=...` (up to 100
   ids), authenticated with `X-Service-API-Key` like `usage_router`. It tells a
   service that stores a factory id whether the factory exists.
 - **Delete notification**: so a service can remove its data for a deleted
-  factory. After a factory delete commits, `DELETE
-  {openhands_api_base_url}/api/service/orgs/{org_id}/factories/{factory_id}/worklogs`
+  factory. After a factory delete commits, `POST
+  {openhands_api_base_url}/api/service/orgs/{org_id}/factories/{factory_id}/deleted`
   (`notify_factory_deleted`). Worklogs are the only consumer today. Any answer
   but 204, or a connection failure, is a warning; it never blocks the delete.
   Skipped in local mode. Enterprise's maintenance task repairs a missed
