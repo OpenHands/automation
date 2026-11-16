@@ -1,4 +1,6 @@
-"""Service-to-service routes for the OpenHands Enterprise server.
+"""Service-to-service routes for services that store a factory id.
+
+The OpenHands server is the first caller.
 
 Callers authenticate with the service key in ``X-Service-API-Key``, exactly like
 ``usage_router``: this service's ``AUTOMATION_SERVICE_KEY`` is the value
@@ -35,9 +37,9 @@ async def lookup_factories(
     """The requested factory ids that exist in ``org_id``.
 
     An id that does not exist, or belongs to another org, is absent from the
-    answer. Enterprise confirms a factory exists before it creates the
-    factory's default worklog, and uses this to remove the worklogs of factories
-    that are gone.
+    answer. For services that store a factory id. The OpenHands server uses it
+    to confirm a factory exists before it creates the factory's default worklog,
+    and to remove the worklogs of factories that are gone.
     """
     rows = await session.execute(
         select(Factory.id, Factory.org_id).where(

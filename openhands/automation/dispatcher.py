@@ -1139,10 +1139,9 @@ async def _execute_run(
             run_id=run.id,
         )
 
-    # Enterprise-hosted worklogs: a run of a factory's automation may write to
-    # the factory's worklogs. Local mode has no Enterprise server to accept the
-    # token, and without the service key there is nothing to sign it with. The
-    # run starts either way.
+    # A run of a factory's automation gets a token naming its factory. Local
+    # mode has no OpenHands server to verify the token, and without the service
+    # key there is nothing to sign it with. The run starts either way.
     if automation.factory_id and settings.service_key and not settings.is_local_mode:
         env_vars["AUTOMATION_WORKLOG_TOKEN"] = create_worklog_token(
             settings.service_key,

@@ -1,11 +1,11 @@
-"""Run token for OpenHands Enterprise worklogs.
+"""Run token that identifies the factory a run belongs to.
 
-Worklogs are stored and served by the Enterprise server. This service is the
-only component that knows which factory an automation belongs to, so it mints
-the credential a run uses to reach its factory's worklogs
-(``AUTOMATION_WORKLOG_TOKEN``). Enterprise verifies the signature, ``aud`` and
-``exp`` only. The contract is shared with OpenHands/enterprise#1297 and a fixed
-test vector pins it in both repositories.
+This service is the only component that knows which factory an automation
+belongs to, so it mints the credential (``AUTOMATION_WORKLOG_TOKEN``). The
+first consumer is worklogs, which the OpenHands server stores and serves; it
+verifies the signature, ``aud`` and ``exp`` only. Only a holder of the service
+key can verify the token. The contract is shared with OpenHands/enterprise#1297
+and a fixed test vector pins it in both repositories.
 
 The token is a credential: never store it or log it.
 """

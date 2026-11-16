@@ -89,11 +89,12 @@ FACTORY_WORKLOGS_PATH = "/api/service/orgs/{org_id}/factories/{factory_id}/workl
 async def notify_factory_deleted(
     client: httpx.AsyncClient, org_id: uuid.UUID, factory_id: uuid.UUID
 ) -> None:
-    """Tell Enterprise to purge a deleted factory's worklogs.
+    """Tell the OpenHands server a factory was deleted, so it can purge its
+    worklogs for it.
 
     Called after the delete commits. It never raises: a missed notification
     must not undo or block the delete, and Enterprise's maintenance task repairs
-    one. Skipped in local mode, which has no Enterprise server.
+    one. Skipped in local mode, which has no OpenHands server.
     """
     config = get_config().service
     if config.is_local_mode:

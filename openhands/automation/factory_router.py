@@ -195,8 +195,9 @@ async def delete_factory(
     """Delete a factory that no live automation belongs to.
 
     Soft-deleted automations that still reference it are detached in the same
-    transaction. After it commits, Enterprise is told to purge the factory's
-    worklogs; that notification never blocks or undoes the delete.
+    transaction. After it commits, the OpenHands server is told so it can
+    purge its worklogs for the factory; that notification never blocks or undoes
+    the delete.
     """
     factory = await _get_org_factory(session, user.org_id, slug=slug, lock="update")
     live = await _count_live(session, factory.id)

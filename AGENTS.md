@@ -303,11 +303,13 @@ NULL`). Zero factories is a valid state; there is no default factory.
 - Git sync neither writes nor reads `factory_id`: a factory's id and slug are
   local to an install.
 
-### Enterprise-hosted worklogs
+### Factory references from other services
 
-Worklogs (append-only logs scoped to a factory) are an OpenHands Enterprise
-feature, stored and served by the Enterprise server (OpenHands/enterprise#1297).
-This service supplies three things:
+Other services keep a factory's id as a plain reference with no foreign key,
+because their data lives in other databases. This service supplies the three
+things such a holder needs. The first consumer is worklogs (append-only logs
+scoped to a factory), which the OpenHands server stores and serves
+(OpenHands/enterprise#1297).
 
 - **Run token** (`utils/worklog.py`): the dispatcher injects
   `AUTOMATION_WORKLOG_TOKEN` next to `AUTOMATION_KV_TOKEN`. It is an HS256 JWT
@@ -319,16 +321,20 @@ This service supplies three things:
   `AUTOMATION_EVENT_PAYLOAD`. A run keeps the factory named in its token until
   it expires, even if its automation is moved to another factory mid-run. Runs
   call `$OPENHANDS_CLOUD_API_URL/api/service/worklog/...` with it as a Bearer
-  token. `tests/test_worklog_token.py` commits the contract test vector that
+  token. Only a service that holds the service key can verify it. The tests
+  in `tests/test_worklog_token.py` commit the contract test vector that
   Enterprise's tests also commit; if the two differ, the enterprise issue is
   authoritative.
 - **Factory lookup**: `GET /v1/service/factories?org_id=&id=...` (up to 100
-  ids), authenticated with `X-Service-API-Key` like `usage_router`.
-- **Delete notification**: after a factory delete commits, `DELETE
+  ids), authenticated with `X-Service-API-Key` like `usage_router`. It tells a
+  service that stores a factory id whether the factory exists.
+- **Delete notification**: so a service can remove its data for a deleted
+  factory. After a factory delete commits, `DELETE
   {openhands_api_base_url}/api/service/orgs/{org_id}/factories/{factory_id}/worklogs`
-  (`notify_factory_deleted`). Any answer but 204, or a connection failure, is a
-  warning; it never blocks the delete. Skipped in local mode. Enterprise's
-  maintenance task repairs a missed notification, so there is no retry queue.
+  (`notify_factory_deleted`). Worklogs are the only consumer today. Any answer
+  but 204, or a connection failure, is a warning; it never blocks the delete.
+  Skipped in local mode. Enterprise's maintenance task repairs a missed
+  notification, so there is no retry queue.
 
 ## Preset-Based Automation Creation
 
