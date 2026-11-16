@@ -1013,6 +1013,8 @@ async def test_completing_a_subject_owning_run_keeps_its_sandbox(
 
     assert response.status_code == 200
     mock_cleanup.assert_not_awaited()
+    await async_session.refresh(run)
+    assert run.sandbox_cleanup_due_at is None
 
 
 @pytest.mark.asyncio
@@ -1036,10 +1038,12 @@ async def test_completing_an_ordinary_run_still_cleans_up(
     async_session.add(run)
     await async_session.commit()
 
-    response, mock_cleanup = await _complete(async_client, run.id)
+    response, _ = await _complete(async_client, run.id)
 
     assert response.status_code == 200
-    mock_cleanup.assert_awaited_once()
+    # Booked for the watchdog's deletion once buffered events have flushed.
+    await async_session.refresh(run)
+    assert run.sandbox_cleanup_due_at is not None
 
 
 # ---------------------------------------------------------------------------

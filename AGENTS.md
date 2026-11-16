@@ -237,7 +237,7 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 - **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses `authenticate_request`. Cloud runs use the per-user `OPENHANDS_API_KEY`; local runs use `AUTOMATION_CALLBACK_API_KEY` when configured (the service's local API key, not the agent-server session key). The authenticated user must own the run's parent automation.
 - **Optimistic locking**: Both callback endpoint and watchdog use `UPDATE ... WHERE status = 'RUNNING'` and check `CursorResult.rowcount` to handle races. Returns 409 on conflict.
-- **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`); when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused instead and the watchdog deletes it once `automation_runs.sandbox_cleanup_due_at` passes. On dispatch failure, the dispatcher deletes the sandbox immediately.
+- **Sandbox cleanup**: On callback (unless `keep_alive=True`), the sandbox keeps running for `AUTOMATION_SANDBOX_EVENT_FLUSH_GRACE_SECONDS` (default 35) so its agent server can post the conversation's last buffered events to the app server (it flushes a partial batch only after 30 s idle). The watchdog then deletes it once `automation_runs.sandbox_cleanup_due_at` passes; when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused after the grace period and deleted after the delay. With both at 0 it is deleted at once. On dispatch failure, the dispatcher deletes the sandbox immediately.
 
 ## Database
 
