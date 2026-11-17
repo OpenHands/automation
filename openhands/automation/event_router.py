@@ -35,6 +35,11 @@ Authentication Model:
       body-derived ID inherits verification of the raw body
     - Teams verifies the body but does not check timestamp freshness. Its
       replay protection lasts only while the event deduplication row is retained
+
+Handshakes:
+    - A `slack_v0` webhook answers Slack's Events API URL verification: the
+      signed `{"type": "url_verification", "challenge": ...}` delivery is
+      acknowledged with the raw challenge string
 """
 
 import json
@@ -51,6 +56,7 @@ from fastapi import (
 )
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import PlainTextResponse
 
 from openhands.automation.acknowledgements import (
     TEAMS_ACKNOWLEDGEMENT,
@@ -73,6 +79,7 @@ from openhands.automation.ingest import (
 )
 from openhands.automation.observability import span
 from openhands.automation.providers import (
+    SLACK_VERIFIER,
     WebhookVerifier,
     get_header,
     get_verifier,
@@ -207,6 +214,9 @@ async def receive_event(
     The payload signature is verified using:
     - AUTOMATION_WEBHOOK_SECRET for github (builtin, header: X-Hub-Signature-256)
     - Per-org webhook_secret for custom sources (header configured per webhook)
+
+    A slack_v0 webhook answers Slack's signed URL verification challenge before
+    any event processing.
     """
     # 1. Read raw body for signature verification
     body = await request.body()
@@ -286,6 +296,21 @@ async def receive_event(
     if teams and (not isinstance(payload, dict) or payload.get("type") != "message"):
         _log_rejection(source, org_id, "unrecognized_activity")
         raise HTTPException(400, "Unrecognized Teams message activity")
+
+    # Slack Events API URL verification: the first delivery to a newly
+    # registered URL is a signed challenge that must be answered with the raw
+    # challenge string. It carries no event, so it is answered before delivery
+    # ID and admission policies only real events can satisfy.
+    if (
+        config.signature_scheme == SLACK_VERIFIER
+        and isinstance(payload, dict)
+        and payload.get("type") == "url_verification"
+    ):
+        challenge = payload.get("challenge")
+        if not isinstance(challenge, str) or not challenge:
+            _log_rejection(source, org_id, "invalid_url_verification")
+            raise HTTPException(400, "Invalid URL verification challenge")
+        return PlainTextResponse(challenge)
 
     # Extract IDs only from authenticated bytes, never silently dropping an
     # invalid body ID and accepting without deduplication.

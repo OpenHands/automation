@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import time
 import uuid
 
 import jmespath
@@ -1238,3 +1239,147 @@ async def test_redelivered_custom_event_creates_runs_once(
     events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
     assert len(events) == 1
     assert events[0].provider_event_id == "72d3162e-cc78-11e3-81ab-4c9367dc0958"
+
+
+def _slack_headers(body: bytes, secret: str = "s3cret-value") -> dict[str, str]:
+    """Sign a body the way Slack's Events API does."""
+    now = str(int(time.time()))
+    signed = b"v0:" + now.encode() + b":" + body
+    digest = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return {
+        "X-Slack-Signature": f"v0={digest}",
+        "X-Slack-Request-Timestamp": now,
+        "Content-Type": "application/json",
+    }
+
+
+async def _add_slack_webhook(async_session, org_id: uuid.UUID, source: str) -> None:
+    """A Slack Events API webhook: v0 signing and a body-derived delivery id."""
+    async_session.add(
+        CustomWebhook(
+            org_id=org_id,
+            name=source,
+            source=source,
+            webhook_secret="s3cret-value",
+            event_key_expr="type",
+            signature_header="X-Slack-Signature",
+            signature_scheme="slack_v0",
+            # Real events dedupe on the event ts; a URL verification carries none.
+            event_id_expr="event.ts",
+        )
+    )
+    await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_slack_url_verification_challenge_is_echoed(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+    mock_authenticated_user,
+):
+    """A signed URL verification is answered with its challenge, verbatim.
+
+    Slack's first delivery to a new webhook URL must be answered with the raw
+    challenge string, before any event parsing or body-ID extraction (the
+    verification payload has no event.ts).
+    """
+    await _add_slack_webhook(async_session, org_id, "slack")
+
+    body = json.dumps(
+        {"type": "url_verification", "challenge": "3eZbrw1a6mfsZjFAdZuk"}
+    ).encode()
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/slack",
+        content=body,
+        headers=_slack_headers(body),
+    )
+
+    assert response.status_code == 200
+    assert response.text == "3eZbrw1a6mfsZjFAdZuk"
+    assert response.headers["content-type"].startswith("text/plain")
+
+    events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_slack_url_verification_rejects_a_missing_challenge(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+):
+    """A verification without a challenge is a bad request, not a run."""
+    await _add_slack_webhook(async_session, org_id, "slack")
+
+    body = json.dumps({"type": "url_verification"}).encode()
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/slack",
+        content=body,
+        headers=_slack_headers(body),
+    )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_slack_url_verification_requires_a_valid_signature(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+):
+    """The challenge is echoed only to a delivery Slack signed."""
+    await _add_slack_webhook(async_session, org_id, "slack")
+
+    body = json.dumps(
+        {"type": "url_verification", "challenge": "3eZbrw1a6mfsZjFAdZuk"}
+    ).encode()
+    headers = _slack_headers(body)
+    headers["X-Slack-Signature"] = "v0=" + "0" * 64
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/slack",
+        content=body,
+        headers=headers,
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_slack_events_still_route_after_verification(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+    mock_authenticated_user,
+):
+    """A signed event on the same webhook still parses, dedupes and routes."""
+    await _add_slack_webhook(async_session, org_id, "slack")
+    async_session.add(
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="On slack mentions",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={"type": "event", "source": "slack", "on": "app_mention"},
+        )
+    )
+    await async_session.commit()
+
+    body = json.dumps(
+        {
+            "type": "app_mention",
+            "event": {"type": "app_mention", "ts": "1725864000.000100"},
+        }
+    ).encode()
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/slack",
+        content=body,
+        headers=_slack_headers(body),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matched"] == 1
+    events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
+    assert [event.provider_event_id for event in events] == ["1725864000.000100"]
