@@ -158,6 +158,78 @@ class TestObservabilityAssociationValidation:
             )
 
 
+class TestImpactMetricValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "Impact validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_valid_metric_definition(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {
+                **base_payload,
+                "impact_metrics": [
+                    {
+                        "key": "code_reviews.created",
+                        "label": "Code reviews created",
+                        "expression": "metrics.code_reviews_created || `0`",
+                        "value_type": "number",
+                        "unit": "reviews",
+                        "default_aggregation": "sum",
+                    }
+                ],
+            }
+        )
+
+        assert request.impact_metrics is not None
+        assert request.impact_metrics[0].key == "code_reviews.created"
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_duplicate_metric_keys(self, request_cls, base_payload):
+        metric = {
+            "key": "reviews",
+            "label": "Reviews",
+            "expression": "metrics.reviews",
+            "value_type": "number",
+        }
+
+        with pytest.raises(ValidationError, match="impact metric keys must be unique"):
+            request_cls.model_validate(
+                {**base_payload, "impact_metrics": [metric, {**metric}]}
+            )
+
+    def test_rejects_invalid_metric_expression(self):
+        with pytest.raises(ValidationError, match="Invalid JMESPath expression"):
+            CreateAutomationRequest.model_validate(
+                {
+                    **self._CREATE_PAYLOAD,
+                    "impact_metrics": [
+                        {
+                            "key": "reviews",
+                            "label": "Reviews",
+                            "expression": "unknown_func(metrics.reviews)",
+                            "value_type": "number",
+                        }
+                    ],
+                }
+            )
+
+
 class TestAutomationDescriptionValidation:
     _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
         "name": "Description validation",

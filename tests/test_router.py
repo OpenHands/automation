@@ -21,6 +21,7 @@ from openhands.automation.models import (
     AutomationGitSyncState,
     AutomationRun,
     AutomationRunAsKind,
+    AutomationRunImpactValue,
     AutomationRunStatus,
     AutomationState,
     AutomationVisibility,
@@ -4323,6 +4324,145 @@ class TestCompleteRun:
         assert run.run_metadata["finish_tool_response"]["status"] == "success"
 
         assert run.status == AutomationRunStatus.COMPLETED
+
+    async def test_complete_run_extracts_impact_metrics(
+        self, async_client, async_session, monkeypatch
+    ):
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Impact Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            impact_metrics=[
+                {
+                    "key": "code_reviews_created",
+                    "label": "Code reviews created",
+                    "expression": "metrics.code_reviews_created || `0`",
+                    "value_type": "number",
+                    "unit": "reviews",
+                    "default_aggregation": "sum",
+                },
+                {
+                    "key": "bad_string_metric",
+                    "label": "Bad string metric",
+                    "expression": "metrics.code_reviews_created",
+                    "value_type": "string",
+                    "default_aggregation": "count",
+                },
+            ],
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        async def fake_fetch_latest_finish_tool_response_for_run(
+            callback_run, conversation_id
+        ):
+            assert callback_run.id == run.id
+            assert conversation_id == "conv-impact-123"
+            return {"metrics": {"code_reviews_created": 3}}
+
+        monkeypatch.setattr(
+            "openhands.automation.router.fetch_latest_finish_tool_response_for_run",
+            fake_fetch_latest_finish_tool_response_for_run,
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED", "conversation_id": "conv-impact-123"},
+        )
+
+        assert response.status_code == 200
+        result = await async_session.execute(
+            select(AutomationRunImpactValue).where(
+                AutomationRunImpactValue.run_id == run.id
+            )
+        )
+        values_by_key = {value.metric_key: value for value in result.scalars()}
+        assert values_by_key["code_reviews_created"].value_json == 3
+        assert values_by_key["code_reviews_created"].numeric_value == 3
+        assert values_by_key["code_reviews_created"].extraction_error is None
+        assert values_by_key["bad_string_metric"].value_json == 3
+        assert values_by_key["bad_string_metric"].text_value is None
+        assert values_by_key["bad_string_metric"].extraction_error == (
+            "extracted value is not a string"
+        )
+
+        list_response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/impact/values",
+            params={"metric_key": "code_reviews_created"},
+        )
+        assert list_response.status_code == 200
+        assert list_response.json()["total"] == 1
+        assert list_response.json()["values"][0]["value"] == 3
+
+        aggregate_response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/impact/aggregate",
+            params={"metric_key": "code_reviews_created", "operation": "sum"},
+        )
+        assert aggregate_response.status_code == 200
+        assert aggregate_response.json()["value"] == 3
+        assert aggregate_response.json()["count"] == 1
+
+        conflict = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED", "conversation_id": "conv-impact-123"},
+        )
+        assert conflict.status_code == 409
+        count = await async_session.scalar(
+            select(func.count())
+            .select_from(AutomationRunImpactValue)
+            .where(AutomationRunImpactValue.run_id == run.id)
+        )
+        assert count == 2
+
+    async def test_impact_values_are_org_scoped(self, async_client, async_session):
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=OTHER_ORG_ID,
+            name="Other Org Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.flush()
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.COMPLETED,
+            completed_at=utcnow(),
+        )
+        async_session.add(run)
+        await async_session.flush()
+        async_session.add(
+            AutomationRunImpactValue(
+                org_id=OTHER_ORG_ID,
+                automation_id=automation.id,
+                run_id=run.id,
+                metric_key="issues_triaged",
+                metric_label="Issues triaged",
+                expression="metrics.issues_triaged",
+                value_type="number",
+                value_json=1,
+                numeric_value=1,
+                run_completed_at=run.completed_at,
+            )
+        )
+        await async_session.commit()
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/impact/values"
+        )
+
+        assert response.status_code == 404
 
     async def test_complete_run_saves_conversation_id_for_failed_runs(
         self, async_client, async_session
