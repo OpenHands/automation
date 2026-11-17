@@ -269,20 +269,21 @@ async def accept_event(
         org_id,
     )
     pending_telemetry: list[tuple[str, dict[str, Any]]] = []
-    pending_telemetry.append(
-        (
-            "automation_event_matched",
-            {
-                "properties": {
-                    "event_source": source,
-                    "event_key": event.event_key,
-                    "org_id": str(org_id),
-                    "candidate_count": len(automations),
-                    "matched_count": len(matched),
-                }
-            },
+    if matched:
+        pending_telemetry.append(
+            (
+                "automation_event_matched",
+                {
+                    "properties": {
+                        "event_source": source,
+                        "event_key": event.event_key,
+                        "org_id": str(org_id),
+                        "candidate_count": len(automations),
+                        "matched_count": len(matched),
+                    }
+                },
+            )
         )
-    )
 
     event_parent_span_context = current_span_context()
 
