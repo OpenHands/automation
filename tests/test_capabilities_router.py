@@ -176,6 +176,7 @@ class TestGetCapabilities:
             "azure_devops",
             "bitbucket_data_center",
             "github",
+            "gitlab",
             "jira_dc",
         ]
         assert body["eventTypes"] == [
@@ -192,8 +193,16 @@ class TestGetCapabilities:
             "azure_devops",
             "bitbucket_data_center",
             "github",
+            "gitlab",
             "jira_dc",
         }
+        assert by_source["gitlab"] == [
+            "build.*",
+            "issue.*",
+            "merge_request.*",
+            "note.*",
+            "pipeline.*",
+        ]
         assert by_source["github"] == body["eventTypes"]
         assert by_source["azure_devops"] == [
             "git.pullrequest.created",
@@ -471,6 +480,14 @@ class TestValidateDraft:
                 [("trigger.on", "event_type_not_delivered")],
                 id="bitbucket-dc-github-key",
             ),
+            pytest.param("gitlab", "merge_request.open", [], id="gitlab-mr"),
+            pytest.param("gitlab", "note.create", [], id="gitlab-note"),
+            pytest.param(
+                "gitlab",
+                "push",
+                [("trigger.on", "event_type_not_delivered")],
+                id="gitlab-unsubscribed",
+            ),
             # Azure DevOps keys are dotted, so the whole pattern is compared.
             pytest.param(
                 "azure_devops", "git.pullrequest.created", [], id="azure-devops-pr"
@@ -508,6 +525,38 @@ class TestValidateDraft:
         body = response.json()
         assert addressed_errors(body) == expected_errors
         assert body["valid"] == (expected_errors == [])
+
+    async def test_an_orgs_own_gitlab_webhook_keeps_its_event_keys(
+        self, async_client, async_session, configured_deployment
+    ):
+        """A custom webhook registered as `gitlab` before it was built in."""
+        async_session.add(
+            CustomWebhook(
+                org_id=TEST_ORG_ID,
+                name="GitLab",
+                source="gitlab",
+                webhook_secret="gitlab-secret",
+                event_key_expr="object_kind",
+            )
+        )
+        await async_session.commit()
+        draft = with_trigger(EVENT_DRAFT, source="gitlab", on="merge_request")
+        draft["trigger"].pop("filter")
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                draft,
+                sampleEvent={
+                    "object_kind": "merge_request",
+                    "object_attributes": {"action": "open"},
+                },
+            ),
+        )
+
+        body = response.json()
+        assert addressed_errors(body) == []
+        assert body["sampleEventMatched"] is True
 
     async def test_event_trigger_for_an_undeliverable_source_is_rejected(
         self, async_client, monkeypatch

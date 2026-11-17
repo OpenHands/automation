@@ -261,6 +261,7 @@ class TestReservedSources:
             "azure_devops",
             "bitbucket_data_center",
             "github",
+            "gitlab",
             "jira_dc",
         }
 

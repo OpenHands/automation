@@ -37,6 +37,7 @@ logger = logging.getLogger("automation.utils.webhook")
 # `is_builtin_source` and `verify_signature` now live in `providers`; re-exported
 # here for callers that predate the registry.
 __all__ = [
+    "builtin_webhook_config",
     "create_automation_run",
     "get_event_automations",
     "get_requested_event_types",
@@ -65,27 +66,47 @@ async def get_webhook_config(
     Returns:
         WebhookConfig with secret and parsing settings, or None if not found.
     """
-    settings = get_settings()
-
-    # Check builtin sources first
     provider = get_provider(source)
-    if provider is not None:
-        secret = (
-            provider.secret_from_settings(settings)
-            if provider.secret_from_settings
-            else None
-        )
-        if secret:
-            return WebhookConfig(
-                secret=secret,
-                is_builtin=True,
-                signature_header=provider.signature_header,
-                signature_scheme=provider.verifier,
-                event_id_header=provider.event_id_header,
-            )
-        return None
+    if provider is not None and provider.custom_webhook_precedence:
+        # An org that registered a custom webhook under this name before it
+        # was built in keeps receiving through it.
+        custom = await _get_custom_webhook_config(source, org_id, session)
+        if custom is not None:
+            return custom.model_copy(update={"shadows_builtin": True})
 
-    # Custom webhook - look up in database
+    if provider is not None:
+        return builtin_webhook_config(source)
+
+    return await _get_custom_webhook_config(source, org_id, session)
+
+
+def builtin_webhook_config(source: str) -> WebhookConfig | None:
+    """The config for a built-in source, or None without a configured secret."""
+    provider = get_provider(source)
+    if provider is None:
+        return None
+    settings = get_settings()
+    secret = (
+        provider.secret_from_settings(settings)
+        if provider.secret_from_settings
+        else None
+    )
+    if not secret:
+        return None
+    return WebhookConfig(
+        secret=secret,
+        is_builtin=True,
+        signature_header=provider.signature_header,
+        signature_scheme=provider.verifier,
+        event_id_header=provider.event_id_header,
+    )
+
+
+async def _get_custom_webhook_config(
+    source: str,
+    org_id: uuid.UUID,
+    session: AsyncSession,
+) -> WebhookConfig | None:
     result = await session.execute(
         select(CustomWebhook).where(
             CustomWebhook.org_id == org_id,
