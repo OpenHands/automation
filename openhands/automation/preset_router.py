@@ -39,6 +39,10 @@ from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
+from openhands.automation.impact_metrics import (
+    ImpactMetricDefinition,
+    validate_impact_metrics,
+)
 from openhands.automation.models import (
     Automation,
     AutomationRunAsKind,
@@ -226,6 +230,10 @@ class CreatePromptAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+        default=None,
+        description="Declarative per-run impact metric extraction rules.",
+    )
     timeout: int | None = Field(
         default=None,
         description=build_automation_timeout_description(include_default=True),
@@ -273,6 +281,13 @@ class CreatePromptAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("impact_metrics")
+    @classmethod
+    def validate_impact_metric_definitions(
+        cls, v: list[ImpactMetricDefinition] | None
+    ) -> list[ImpactMetricDefinition] | None:
+        return validate_impact_metrics(v)
 
     @field_validator("timeout")
     @classmethod
@@ -733,6 +748,9 @@ async def create_automation_from_prompt(
             agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
+            impact_metrics=[metric.model_dump() for metric in body.impact_metrics]
+            if body.impact_metrics is not None
+            else None,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
@@ -882,6 +900,10 @@ class CreatePluginAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+        default=None,
+        description="Declarative per-run impact metric extraction rules.",
+    )
     timeout: int | None = Field(
         default=None,
         description=build_automation_timeout_description(include_default=True),
@@ -929,6 +951,13 @@ class CreatePluginAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("impact_metrics")
+    @classmethod
+    def validate_impact_metric_definitions(
+        cls, v: list[ImpactMetricDefinition] | None
+    ) -> list[ImpactMetricDefinition] | None:
+        return validate_impact_metrics(v)
 
     @field_validator("timeout")
     @classmethod
@@ -1286,6 +1315,9 @@ async def create_automation_from_plugin(
             agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
+            impact_metrics=[metric.model_dump() for metric in body.impact_metrics]
+            if body.impact_metrics is not None
+            else None,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),

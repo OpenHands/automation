@@ -21,6 +21,11 @@ from pydantic.alias_generators import to_camel
 
 from openhands.automation.acknowledgements import DEFAULT_ACKNOWLEDGEMENT
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.impact_metrics import (
+    ImpactAggregation,
+    ImpactMetricDefinition,
+    validate_impact_metrics,
+)
 from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
@@ -584,6 +589,10 @@ class CreateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+        default=None,
+        description="Declarative per-run impact metric extraction rules.",
+    )
     tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
@@ -673,6 +682,13 @@ class CreateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("impact_metrics")
+    @classmethod
+    def validate_impact_metric_definitions(
+        cls, v: list[ImpactMetricDefinition] | None
+    ) -> list[ImpactMetricDefinition] | None:
+        return validate_impact_metrics(v)
 
     @field_validator("tags")
     @classmethod
@@ -779,6 +795,10 @@ class UpdateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+        default=None,
+        description="Declarative per-run impact metric extraction rules.",
+    )
     tags: list[str] | None = Field(
         default=None,
         description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
@@ -848,6 +868,13 @@ class UpdateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("impact_metrics")
+    @classmethod
+    def validate_impact_metric_definitions(
+        cls, v: list[ImpactMetricDefinition] | None
+    ) -> list[ImpactMetricDefinition] | None:
+        return validate_impact_metrics(v)
 
     @field_validator("tags")
     @classmethod
@@ -1275,6 +1302,7 @@ class AutomationResponse(BaseModel):
     plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
+    impact_metrics: list[ImpactMetricDefinition] | None = None
     tags: list[str] = Field(default_factory=list)
     tarball_path: str
     setup_script_path: str | None
@@ -1461,6 +1489,44 @@ class AutomationRunListResponse(BaseModel):
     # Lifetime run counts by status, unaffected by pagination. Sparse: only
     # statuses with at least one run appear, so a missing key means zero.
     status_counts: dict[RunStatus, int] = Field(default_factory=dict)
+
+
+class ImpactValueResponse(BaseModel):
+    run_id: uuid.UUID
+    metric_key: str
+    metric_label: str
+    expression: str
+    value_type: str
+    value: Any = Field(validation_alias="value_json")
+    numeric_value: float | None = None
+    text_value: str | None = None
+    boolean_value: bool | None = None
+    run_completed_at: UtcDatetime
+    extraction_error: str | None = None
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class ImpactValuesResponse(BaseModel):
+    values: list[ImpactValueResponse]
+    total: int
+
+
+class ImpactAggregateBucket(BaseModel):
+    bucket: str
+    value: float | int | None
+    count: int
+
+
+class ImpactAggregateResponse(BaseModel):
+    metric_key: str
+    operation: ImpactAggregation
+    value: float | int | None = None
+    count: int | None = None
+    since: UtcDatetime | None = None
+    until: UtcDatetime | None = None
+    group_by: str | None = None
+    buckets: list[ImpactAggregateBucket] | None = None
 
 
 class ChangeRunAsRequest(BaseModel):

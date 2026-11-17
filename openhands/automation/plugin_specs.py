@@ -31,6 +31,10 @@ from pydantic import (
     model_validator,
 )
 
+from openhands.automation.impact_metrics import (
+    ImpactMetricDefinition,
+    validate_impact_metrics,
+)
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
@@ -430,6 +434,7 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         ),
     )
     observability_associations: dict[str, str] | None = None
+    impact_metrics: list[ImpactMetricDefinition] | None = None
     timeout: int | None = None
     keep_alive: bool | None = None
     template: TemplateProvenance | None = None
@@ -452,6 +457,13 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         cls, value: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(value)
+
+    @field_validator("impact_metrics")
+    @classmethod
+    def validate_impact_metric_definitions(
+        cls, value: list[ImpactMetricDefinition] | None
+    ) -> list[ImpactMetricDefinition] | None:
+        return validate_impact_metrics(value)
 
     @field_validator("timeout")
     @classmethod

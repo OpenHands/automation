@@ -65,6 +65,10 @@ from openhands.automation.git_sync.serializer import (
     is_generated_path,
     serialize_automation,
 )
+from openhands.automation.impact_metrics import (
+    ImpactMetricDefinition,
+    validate_impact_metrics,
+)
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncOrgConfig,
@@ -534,6 +538,21 @@ async def _validate_and_resolve_fields(
     observability_associations = validate_observability_associations(
         fields.get("observability_associations")
     )
+    raw_impact_metrics = fields.get("impact_metrics")
+    impact_metrics = None
+    if raw_impact_metrics is not None:
+        if not isinstance(raw_impact_metrics, list):
+            raise ValueError("automation.yaml 'impact_metrics' must be a list")
+        impact_metrics = [
+            metric.model_dump()
+            for metric in validate_impact_metrics(
+                [
+                    ImpactMetricDefinition.model_validate(metric)
+                    for metric in raw_impact_metrics
+                ]
+            )
+            or []
+        ]
     # Export omits an empty list, so a missing key means no tags.
     raw_tags = fields.get("tags") or []
     if not isinstance(raw_tags, list):
@@ -614,6 +633,7 @@ async def _validate_and_resolve_fields(
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
         "observability_associations": observability_associations,
+        "impact_metrics": impact_metrics,
         "tags": tags,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
