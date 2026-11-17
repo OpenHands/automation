@@ -288,6 +288,98 @@ async def test_execute_run_safe_resumes_triggering_event_trace():
     assert mock_span.call_args.kwargs["parent_span_context"] == parent_context
 
 
+class _FakeTelemetryResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeTelemetryClient:
+    """Stand-in for the external PostHog HTTP transport only."""
+
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url: str, json: dict) -> _FakeTelemetryResponse:
+        self.posts.append((url, json))
+        return _FakeTelemetryResponse()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_safe_emits_categorized_failure_telemetry(
+    async_session_factory, mock_settings, mock_client, monkeypatch
+):
+    """A last-resort dispatcher failure still emits a terminal failed event."""
+    from openhands.automation import telemetry
+    from openhands.automation.config import clear_config_cache
+
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+    clear_config_cache()
+    fake_client = _FakeTelemetryClient()
+    monkeypatch.setattr(telemetry, "_telemetry_http_client", fake_client)
+    try:
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Dispatcher Telemetry Automation",
+                trigger={"type": "cron", "schedule": "* * * * *"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=60,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        with patch(
+            "openhands.automation.dispatcher._execute_run",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom token=sekrit"),
+        ):
+            await _execute_run_safe(
+                run, mock_settings, async_session_factory, mock_client
+            )
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+
+        assert len(fake_client.posts) == 1
+        _, payload = fake_client.posts[0]
+        assert payload["event"] == "automation_run_failed"
+        assert payload["distinct_id"] == str(TEST_USER_ID)
+        properties = payload["properties"]
+        assert properties["failure_kind"] == "dispatch_error"
+        assert properties["failure_stage"] == "dispatch"
+        assert properties["trigger_source"] == "dispatcher"
+        assert properties["run_status"] == "FAILED"
+        assert "sekrit" not in str(properties)
+    finally:
+        clear_config_cache()
+
+
 class TestIsHttpUrl:
     """Tests for is_http_url helper function."""
 

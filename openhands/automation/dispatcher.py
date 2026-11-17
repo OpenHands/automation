@@ -942,6 +942,10 @@ async def _execute_run(
             error,
             status_detail=status_detail,
         )
+        # mark_run_terminal updates a re-fetched row; sync this object so
+        # telemetry reports the persisted status instead of RUNNING.
+        run.status = AutomationRunStatus.FAILED
+        run.error_detail = error
         automation_disabled = disable
         if disable:
             automation_disabled = await disable_automation(
@@ -1786,6 +1790,18 @@ async def _execute_run_safe(
                 source="automation_service",
                 operation="execute_run_task",
             ),
+        )
+        run.status = AutomationRunStatus.FAILED
+        run.error_detail = "Internal error"
+        await capture_automation_event(
+            "automation_run_failed",
+            automation=run.automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "failure_kind": "dispatch_error",
+            },
         )
 
 
