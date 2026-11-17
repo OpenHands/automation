@@ -13,7 +13,8 @@ from typing import Any
 
 from fastapi import Request
 from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import inspect
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.conversations import (
@@ -22,7 +23,7 @@ from openhands.automation.conversations import (
     resolve_subject_key,
     resolve_turn_text,
 )
-from openhands.automation.models import Automation, IntegrationEvent
+from openhands.automation.models import Automation, AutomationRun, IntegrationEvent
 from openhands.automation.observability import (
     add_event,
     automation_attributes,
@@ -71,6 +72,45 @@ class AcceptResult:
     # Conversations continued instead of starting a run. A matched automation
     # contributes to exactly one of these two lists.
     conversation_ids: list[str] = field(default_factory=list)
+    # Deadline-bound transports own delivery after their response is sent.
+    # Never emitted for a transaction that failed to commit.
+    telemetry: list[tuple[str, dict[str, Any]]] = field(
+        default_factory=list, repr=False, compare=False
+    )
+
+    async def capture_telemetry(
+        self,
+        *,
+        request: Request | None = None,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
+        pending = list(self.telemetry)
+        self.telemetry.clear()
+        for event, kwargs in pending:
+            await capture_automation_event(
+                event, request=request, session_factory=session_factory, **kwargs
+            )
+
+
+def _telemetry_snapshot(
+    model: Automation | AutomationRun,
+) -> Automation | AutomationRun:
+    """Keep capture-time values usable after commit and session closure.
+
+    Copy only loaded columns to a transient model. Telemetry must not retain
+    live ORM state, trigger lazy reads, or observe a later run-state change.
+    """
+    return type(model)(
+        **{
+            column.key: model.__dict__[column.key]
+            for column in inspect(type(model)).column_attrs
+            if column.key in model.__dict__
+        }
+    )
+
+
+class ContinuationNotAllowed(ValueError):
+    """A deadline-bound delivery cannot safely use this routing snapshot."""
 
 
 async def accept_event(
@@ -80,12 +120,16 @@ async def accept_event(
     *,
     request: Request | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    allow_conversation_continuation: bool = True,
+    defer_telemetry: bool = False,
 ) -> AcceptResult:
     """Route an already-authenticated event to the org's matching automations.
 
     Records the event and creates the runs in one transaction, deduplicating on
     `event.provider_event_id` when the transport supplies one. Commits before
-    returning.
+    returning. Product telemetry runs only after commit. A transport selecting
+    `defer_telemetry` must call the result's `capture_telemetry` after sending
+    its response; otherwise capture completes here, after releasing DB locks.
 
     A matched automation whose trigger sets `destination` to
     `continue_conversation` first tries to deliver the event as another turn on
@@ -105,27 +149,51 @@ async def accept_event(
     source = event.source
     webhook_payload = event.payload
 
-    record = IntegrationEvent(
-        org_id=org_id,
-        source=source,
-        provider_event_id=event.provider_event_id,
-        event_key=event.event_key,
-        payload=webhook_payload,
+    # Fetch once and route from this same snapshot. In deadline-bound mode,
+    # reject the whole delivery before even persisting an event. Checking in
+    # the HTTP layer alone would race a concurrent automation configuration
+    # change between the check and this function's routing query.
+    automations = None
+    if not allow_conversation_continuation:
+        automations = await get_event_automations(org_id, source, session)
+        if any(
+            trigger.destination == CONTINUE_CONVERSATION for _, trigger in automations
+        ):
+            raise ContinuationNotAllowed(
+                "Deadline-bound sources cannot continue conversations"
+            )
+
+    # Use a targeted conflict clause rather than a SAVEPOINT. With SQLite's
+    # legacy transaction control a first SAVEPOINT can commit its INSERT on
+    # release, leaving an event behind if the outer run transaction fails.
+    # ON CONFLICT keeps event + runs in the same transaction on both backends,
+    # and only the delivery-ID uniqueness constraint is treated as a duplicate.
+    insert = (
+        sqlite.insert
+        if session.get_bind().dialect.name == "sqlite"
+        else postgresql.insert
     )
-    # Insert before doing any routing work, so a redelivery costs one failed
-    # INSERT rather than a match pass. The savepoint is what keeps the
-    # violation recoverable: without it the failure would poison the
-    # transaction the caller still has to commit.
-    try:
-        async with session.begin_nested():
-            session.add(record)
-            await session.flush()
-    except IntegrityError:
-        if event.provider_event_id is None:
-            # The dedupe index is partial: with no id there is nothing on this
-            # row that can conflict, so whatever failed is not a redelivery.
-            # Reading it as one would drop a genuine event without a trace.
-            raise
+    statement = (
+        insert(IntegrationEvent)
+        .values(
+            org_id=org_id,
+            source=source,
+            provider_event_id=event.provider_event_id,
+            event_key=event.event_key,
+            payload=webhook_payload,
+        )
+        .on_conflict_do_nothing(
+            index_elements=[
+                IntegrationEvent.org_id,
+                IntegrationEvent.source,
+                IntegrationEvent.provider_event_id,
+            ],
+            index_where=IntegrationEvent.provider_event_id.is_not(None),
+        )
+        .returning(IntegrationEvent)
+    )
+    record = (await session.scalars(statement)).one_or_none()
+    if record is None:
         logger.info(
             "Dropping duplicate %s event %s for org=%s",
             source,
@@ -143,7 +211,8 @@ async def accept_event(
         )
         return AcceptResult(matched=0, run_ids=[], duplicate=True)
 
-    automations = await get_event_automations(org_id, source, session)
+    if automations is None:
+        automations = await get_event_automations(org_id, source, session)
     matched: list[tuple[Automation, EventTrigger]] = []
     for automation, trigger in automations:
         matched_trigger = False
@@ -199,17 +268,20 @@ async def accept_event(
         len(automations),
         org_id,
     )
-    await capture_automation_event(
-        "automation_event_matched",
-        request=request,
-        session_factory=session_factory,
-        properties={
-            "event_source": source,
-            "event_key": event.event_key,
-            "org_id": str(org_id),
-            "candidate_count": len(automations),
-            "matched_count": len(matched),
-        },
+    pending_telemetry: list[tuple[str, dict[str, Any]]] = []
+    pending_telemetry.append(
+        (
+            "automation_event_matched",
+            {
+                "properties": {
+                    "event_source": source,
+                    "event_key": event.event_key,
+                    "org_id": str(org_id),
+                    "candidate_count": len(automations),
+                    "matched_count": len(matched),
+                }
+            },
+        )
     )
 
     event_parent_span_context = current_span_context()
@@ -260,19 +332,21 @@ async def accept_event(
                         },
                     ),
                 )
-                await capture_automation_event(
-                    "automation_conversation_continued",
-                    request=request,
-                    session_factory=session_factory,
-                    automation=automation,
-                    properties={
-                        "event_source": source,
-                        "event_key": event.event_key,
-                        "org_id": str(org_id),
-                        # Folded into a run that had not started, rather than
-                        # posted to a live agent server.
-                        "coalesced": outcome.coalesced,
-                    },
+                pending_telemetry.append(
+                    (
+                        "automation_conversation_continued",
+                        {
+                            "automation": _telemetry_snapshot(automation),
+                            "properties": {
+                                "event_source": source,
+                                "event_key": event.event_key,
+                                "org_id": str(org_id),
+                                # Folded into a run that had not started, rather than
+                                # posted to a live agent server.
+                                "coalesced": outcome.coalesced,
+                            },
+                        },
+                    )
                 )
                 continue
 
@@ -312,19 +386,25 @@ async def accept_event(
             "event_source": source,
             "event_key": event.event_key,
         }
-        await capture_automation_event(
-            "automation_run_created",
-            request=request,
-            session_factory=session_factory,
-            automation=automation,
-            run=run,
-            properties=run_properties,
+        pending_telemetry.append(
+            (
+                "automation_run_created",
+                {
+                    "automation": _telemetry_snapshot(automation),
+                    "run": _telemetry_snapshot(run),
+                    "properties": run_properties,
+                },
+            )
         )
 
     await session.commit()
 
-    return AcceptResult(
+    result = AcceptResult(
         matched=len(matched),
         run_ids=run_ids,
         conversation_ids=conversation_ids,
+        telemetry=pending_telemetry,
     )
+    if not defer_telemetry:
+        await result.capture_telemetry(request=request, session_factory=session_factory)
+    return result

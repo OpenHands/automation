@@ -52,6 +52,7 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_combination,
     validate_model_profile_for_user,
 )
+from openhands.automation.webhook_policy import trigger_webhook_validation_errors
 from openhands.workspace import GitProvider
 
 
@@ -232,6 +233,11 @@ async def validate_draft(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
+        errors.extend(
+            await trigger_webhook_validation_errors(
+                user.org_id, trigger.model_dump(), session
+            )
+        )
         delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
         if delivery is None:
             errors.append(
