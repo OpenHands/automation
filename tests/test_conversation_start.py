@@ -46,6 +46,9 @@ from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
 )
+from openhands.automation.presets.plugin_spec.prompt_builder import (
+    outcome_context_section as plugin_spec_outcome_context_section,
+)
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.finish_plugin import (
@@ -1679,6 +1682,49 @@ class TestRunnersAttachToTheStartedConversation:
         assert "never" not in text
         assert section([]) is None
         assert section([skills[1]]) is None
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_outcome_api_rides_in_the_task_message(self, preset_name):
+        section = _load_preset_function(
+            preset_name,
+            "_outcome_context_section",
+            {"os": __import__("os")},
+        )
+        env = {
+            "AUTOMATION_OUTCOME_URL": "http://automation/v1/outcomes",
+            "AUTOMATION_OUTCOME_TOKEN": "token",
+        }
+
+        assert section({}) is None
+        assert (
+            section({"AUTOMATION_OUTCOME_URL": env["AUTOMATION_OUTCOME_URL"]}) is None
+        )
+        text = section(env)
+        assert text is not None
+        assert "Outcome Reporting API" in text
+        assert "$AUTOMATION_OUTCOME_URL" in text
+        assert "$AUTOMATION_OUTCOME_TOKEN" in text
+        assert '"payload"' in text
+
+    def test_plugin_spec_outcome_api_rides_in_the_task_message(self):
+        env = {
+            "AUTOMATION_OUTCOME_URL": "http://automation/v1/outcomes",
+            "AUTOMATION_OUTCOME_TOKEN": "token",
+        }
+
+        assert plugin_spec_outcome_context_section({}) is None
+        assert (
+            plugin_spec_outcome_context_section(
+                {"AUTOMATION_OUTCOME_TOKEN": env["AUTOMATION_OUTCOME_TOKEN"]}
+            )
+            is None
+        )
+        text = plugin_spec_outcome_context_section(env)
+        assert text is not None
+        assert "Outcome Reporting API" in text
+        assert "$AUTOMATION_OUTCOME_URL" in text
+        assert "$AUTOMATION_OUTCOME_TOKEN" in text
+        assert '"payload"' in text
 
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     def test_reads_the_list_only_when_attaching(self, preset_name):
