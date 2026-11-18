@@ -861,24 +861,41 @@ async def _defer_or_skip_blocked_run(
         logger.warning(
             "Run deferred past max age; marking SKIPPED: %s", detail, extra=log_ctx
         )
-        skip_kind = RunStatusDetailKind.DEFER_EXPIRED
-        skip_extra = {"blocked_by": kind.value}
-    else:
-        logger.warning(
-            "Run skipped — transient limit (deferral disabled): %s",
-            detail,
-            extra=log_ctx,
+        await _skip_blocked_run(
+            run,
+            automation,
+            session_factory,
+            kind=RunStatusDetailKind.DEFER_EXPIRED,
+            detail=detail,
+            extra={"blocked_by": kind.value},
         )
-        skip_kind = kind
-        skip_extra = None
+        return
+    logger.warning(
+        "Run skipped — transient limit (deferral disabled): %s",
+        detail,
+        extra=log_ctx,
+    )
+    await _skip_blocked_run(run, automation, session_factory, kind=kind, detail=detail)
+
+
+async def _skip_blocked_run(
+    run: AutomationRun,
+    automation: Automation,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    kind: RunStatusDetailKind,
+    detail: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Mark a run blocked by a sandbox limit terminal SKIPPED."""
     status_detail = make_run_status_detail(
         phase=RunStatusPhase.DISPATCH,
-        kind=skip_kind,
+        kind=kind,
         detail=detail,
         transient=False,
         source="sandbox_api",
         operation="get_execution_context",
-        extra=skip_extra,
+        extra=extra,
     )
     await mark_run_terminal(
         session_factory,
@@ -893,7 +910,7 @@ async def _defer_or_skip_blocked_run(
         session_factory=session_factory,
         properties={
             "trigger_source": "dispatcher",
-            "skip_reason": skip_kind.value,
+            "skip_reason": kind.value,
         },
     )
 
@@ -1135,13 +1152,14 @@ async def _execute_run(
             exc,
             extra=_log_ctx(),
         )
-        await _defer_or_skip_blocked_run(
+        # Not deferred: the quota resets only at UTC midnight, so deferred runs
+        # would all start together at the reset.
+        await _skip_blocked_run(
             run,
             automation,
             session_factory,
             kind=RunStatusDetailKind.DAILY_SANDBOX_LIMIT,
             detail=str(exc),
-            log_ctx=_log_ctx(),
         )
         return
     except SandboxProvisioningError as exc:
