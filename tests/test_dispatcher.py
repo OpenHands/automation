@@ -35,6 +35,7 @@ from openhands.automation.dispatcher import (
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
     DailySandboxLimitReachedError,
+    LicenseLimitReachedError,
     SandboxProvisioningError,
 )
 from openhands.automation.models import (
@@ -1745,24 +1746,17 @@ class TestExecuteRunConcurrencyLimit:
             )
         return run, run_id, automation_id
 
-    @pytest.mark.parametrize(
-        ("error_type", "kind"),
-        [
-            (ConcurrencyLimitReachedError, "concurrency_limit"),
-            (DailySandboxLimitReachedError, "daily_sandbox_limit"),
-        ],
-    )
-    async def test_quota_limit_defers_run_and_keeps_enabled(
-        self, async_session_factory, mock_settings, mock_client, error_type, kind
+    async def test_concurrency_limit_defers_run_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client
     ):
-        """A quota-blocked run is returned to PENDING with a retry deadline,
-        not dropped, and its automation is left enabled."""
+        """A concurrency-blocked run is returned to PENDING with a retry
+        deadline, not dropped, and its automation is left enabled."""
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
         backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(
-            side_effect=error_type("Sandbox quota reached.")
+            side_effect=ConcurrencyLimitReachedError("Sandbox quota reached.")
         )
         backend.release_context = AsyncMock()
 
@@ -1793,7 +1787,7 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.timeout_at is None
             assert updated.status_detail is not None
             assert updated.status_detail["phase"] == "dispatch"
-            assert updated.status_detail["kind"] == kind
+            assert updated.status_detail["kind"] == "concurrency_limit"
             assert updated.status_detail["transient"] is True
             assert updated.status_detail["detail"] == "Sandbox quota reached."
             assert updated.status_detail["source"] == "sandbox_api"
@@ -1817,8 +1811,121 @@ class TestExecuteRunConcurrencyLimit:
         assert call_args is not None
         args, kwargs = call_args
         assert args[0] == "automation_run_deferred"
-        assert kwargs["properties"]["defer_reason"] == kind
+        assert kwargs["properties"]["defer_reason"] == "concurrency_limit"
         assert kwargs["properties"]["deferral_attempts"] == 1
+
+        # No execution context was acquired, so there is nothing to release.
+        backend.release_context.assert_not_called()
+
+    async def test_daily_sandbox_limit_skips_run_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A daily-quota-blocked run is SKIPPED at once, not deferred, and its
+        automation is left enabled."""
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(
+            side_effect=DailySandboxLimitReachedError("Daily sandbox limit reached.")
+        )
+        backend.release_context = AsyncMock()
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.deferred_until is None
+            assert not updated.deferral_count
+            assert updated.completed_at is not None
+            assert updated.status_detail["kind"] == "daily_sandbox_limit"
+            assert updated.status_detail["transient"] is False
+            assert "blocked_by" not in updated.status_detail
+            assert updated.error_detail is None
+
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+        capture_event.assert_awaited_once()
+        call_args = capture_event.await_args
+        assert call_args is not None
+        args, kwargs = call_args
+        assert args[0] == "automation_run_skipped"
+        assert kwargs["properties"]["skip_reason"] == "daily_sandbox_limit"
+        backend.release_context.assert_not_called()
+
+    async def test_license_limit_marks_skipped_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A run the install's license does not allow is skipped at once, not
+        deferred: it stays refused until the install has a license."""
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        message = "Only the first Super Admin can start conversations."
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(
+            side_effect=LicenseLimitReachedError(message)
+        )
+        backend.release_context = AsyncMock()
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = (
+                (
+                    await session.execute(
+                        select(AutomationRun).where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.deferred_until is None
+            assert updated.completed_at is not None
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "license_limit"
+            assert updated.status_detail["transient"] is False
+            assert updated.status_detail["detail"] == message
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.error_detail is None  # SKIPPED is not a failure
+
+            auto = (
+                (
+                    await session.execute(
+                        select(Automation).where(Automation.id == automation_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert auto.enabled is True  # a limit, not a fault in the job: not disabled
+
+        capture_event.assert_awaited_once_with(
+            "automation_run_skipped",
+            automation=run.automation,
+            run=run,
+            session_factory=async_session_factory,
+            properties={"trigger_source": "dispatcher", "skip_reason": "license_limit"},
+        )
 
         # No execution context was acquired, so there is nothing to release.
         backend.release_context.assert_not_called()
@@ -2280,7 +2387,7 @@ class TestExecuteRunDeferralExpiry:
             backend = MagicMock()
             backend.is_local_mode = False
             backend.get_execution_context = AsyncMock(
-                side_effect=DailySandboxLimitReachedError("quota")
+                side_effect=ConcurrencyLimitReachedError("limit")
             )
             backend.release_context = AsyncMock()
 
@@ -2301,14 +2408,14 @@ class TestExecuteRunDeferralExpiry:
                 updated = await session.get(AutomationRun, run_id)
                 assert updated.status == AutomationRunStatus.SKIPPED
                 assert updated.deferred_until is None
-                assert updated.status_detail["kind"] == "daily_sandbox_limit"
+                assert updated.status_detail["kind"] == "concurrency_limit"
                 assert "blocked_by" not in updated.status_detail
 
             call_args = capture_event.await_args
             assert call_args is not None
             args, kwargs = call_args
             assert args[0] == "automation_run_skipped"
-            assert kwargs["properties"]["skip_reason"] == "daily_sandbox_limit"
+            assert kwargs["properties"]["skip_reason"] == "concurrency_limit"
         finally:
             clear_config_cache()
 
@@ -2843,8 +2950,15 @@ class TestRequeueDeferredRun:
                         .first()
                     )
                 before = utcnow()
-                with patch(
-                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                with (
+                    patch(
+                        "openhands.automation.dispatcher.get_backend",
+                        return_value=backend,
+                    ),
+                    patch(
+                        "openhands.automation.dispatcher.random.uniform",
+                        return_value=1.0,
+                    ),
                 ):
                     await _execute_run(
                         run, mock_settings, async_session_factory, mock_client
@@ -2861,6 +2975,47 @@ class TestRequeueDeferredRun:
                     await session.commit()
 
             assert delays[0] < delays[1] < delays[2]
+        finally:
+            clear_config_cache()
+
+    @pytest.mark.parametrize("factor", [0.5, 1.5])
+    async def test_backoff_delay_is_jittered(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch, factor
+    ):
+        """The deferral delay is the backoff scaled by a random factor in
+        [0.5, 1.5], so runs blocked together do not retry together."""
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_DEFER_BACKOFF_BASE_SECONDS", "100")
+        clear_config_cache()
+        try:
+            run, run_id = await self._make_running_run(async_session_factory)
+            backend = MagicMock()
+            backend.is_local_mode = False
+            backend.get_execution_context = AsyncMock(
+                side_effect=ConcurrencyLimitReachedError("limit")
+            )
+            backend.release_context = AsyncMock()
+
+            before = utcnow()
+            with (
+                patch(
+                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                ),
+                patch(
+                    "openhands.automation.dispatcher.random.uniform",
+                    return_value=factor,
+                ) as uniform,
+            ):
+                await _execute_run(
+                    run, mock_settings, async_session_factory, mock_client
+                )
+
+            uniform.assert_called_once_with(0.5, 1.5)
+            async with async_session_factory() as session:
+                updated = await session.get(AutomationRun, run_id)
+            delay = (updated.deferred_until - before).total_seconds()
+            assert 100 * factor - 5 <= delay <= 100 * factor + 5
         finally:
             clear_config_cache()
 

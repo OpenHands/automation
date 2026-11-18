@@ -10,7 +10,7 @@ recipe.
 
 Maintenance baseline: `7cda26ab0f60158a2a6dc74964e9aaf84008e04a` (first pass, 2026-10-12).
 
-The map has **275 sub-features**.
+The map has **282 sub-features**.
 
 ## Baseline preconditions
 
@@ -94,7 +94,8 @@ them honest: [../maintenance.md](../maintenance.md).
 | F16 | [The run's contract with the Agent Server](F16-agent-server-contract.md) | bash command and output, uploads cleanup, conversation tags, model profiles, agent-server failures | Agent Server `/api/...` | baseline; `llm`, `pypi` | 8 |
 | F17 | [Stream sources (Slack Socket Mode)](F17-stream-sources.md) | stream supervisor, config parsing, retries, kill switch, Socket Mode delivery | the stream supervisor (no route) | baseline; a real Slack app for two blocked bullets | 7 |
 | F18 | [Usage totals for the OpenHands server](F18-usage-report.md) | instance-wide automation count behind the service key, unconfigured and wrong-key refusals | `GET /v1/usage` | baseline | 3 |
-| F19 | [Automation outcome values](F19-outcomes.md) | typed outcome submission, parser normalization, raw value listing and aggregation | `/v1/outcomes`, `/v1/{id}/outcomes/values`, `/v1/{id}/outcomes/aggregate` | baseline | 5 |
+| F19 | [Factories](F19-factories.md) | factory create, rename, create or assign an automation, list filter, delete, change audit | `/v1/factories`, `factory_id` on `/v1`, `/v1/{id}` | baseline | 7 |
+| F20 | [Automation outcome values](F20-outcomes.md) | typed outcome submission, parser normalization, raw value listing and aggregation | `/v1/outcomes`, `/v1/{id}/outcomes/values`, `/v1/{id}/outcomes/aggregate` | baseline | 5 |
 
 ## Not mapped
 

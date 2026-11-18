@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 DEFAULT_VERIFIER: Final[str] = "hmac_sha256_hex"
 TEAMS_VERIFIER: Final[str] = "teams_hmac_sha256"
+SLACK_VERIFIER: Final[str] = "slack_v0"
 DEFAULT_BUILTIN_SIGNATURE_HEADER: Final[str] = "X-Hub-Signature-256"
 # The OpenHands server forwards every built-in source's delivery id in GitHub's
 # header name, as it signs every source into GitHub's signature header.
@@ -316,7 +317,7 @@ VERIFIERS.update(
     {
         "hmac_sha256_hex": HmacSha256HexVerifier(),
         "standard_webhooks": StandardWebhooksVerifier(),
-        "slack_v0": SlackV0Verifier(),
+        SLACK_VERIFIER: SlackV0Verifier(),
         TEAMS_VERIFIER: TeamsHmacSha256Verifier(),
     }
 )

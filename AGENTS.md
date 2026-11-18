@@ -56,6 +56,7 @@ automation/
 │       ├── draft_router.py     # Saved setup draft CRUD and test dispatch routes
 │       ├── draft_schemas.py    # Draft body validation and normalization
 │       ├── event_router.py     # Receives webhook events, triggers automations
+│       ├── factory_router.py   # Factory CRUD (named groups of automations)
 │       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
 │       ├── filter_eval.py      # JMESPath-based filter evaluation for event matching
@@ -279,6 +280,48 @@ def upgrade() -> None:
 ```
 
 - **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher — check `using_sqlite()` to skip on SQLite
+
+## Factories
+
+A factory is a named group of automations: `factories` (`id`, `org_id`, `name`,
+timestamps) plus a nullable `automations.factory_id` (`ON DELETE SET
+NULL`). Zero factories is a valid state; there is no default factory.
+
+- Factories are addressed by id (`/v1/factories/{id}`), like automations. Names
+  need not be unique and there is no slug. A rename changes only `name`.
+- `id` is never reused. Other services keep it as a plain reference with no
+  foreign key, because their data lives in other databases.
+- Read routes need `view_automations`; creating, renaming and deleting a
+  factory, and *changing* an automation's factory, need `manage_automations`.
+  `authorize_factory_change` is the one check (403 without the permission, 404
+  for an unknown or other-org factory): `POST /v1`, `/v1/plugin-spec`,
+  `/v1/preset/prompt` and `/v1/preset/plugin` run it when `factory_id` is set,
+  `PATCH /v1/{id}` only when the value differs from the stored one (resending
+  it or `null` on an automation with no factory is not a change), and the draft
+  validators report it as a `factory_id_403`/`factory_id_404` error. Drafts store
+  `factory_id`, but their hidden test-run automation never gets it.
+- Membership gives an automation access to its factory's data, so the creator
+  exception of `_assert_can_manage` stops at the factory: any `PATCH` of an
+  automation that is in a factory needs `manage_automations`. A draft's hidden
+  test-run automation cannot be put in a factory (`PATCH` returns 409).
+- Re-enabling an installed template (`template` on a create endpoint) returns
+  the existing automation unchanged; if the request names a `factory_id` the
+  automation is not in, it is `409` rather than silently ignored. Move it with
+  `PATCH`.
+- Deleting a factory returns `409` while a live automation belongs to it.
+  Otherwise one transaction detaches its soft-deleted automations (through the
+  ORM, so the change audit records it) and removes the row with a single
+  conditional `DELETE ... WHERE NOT EXISTS (live member)`.
+- Assigning takes `lock_factory_for_assignment` right before the write, not
+  before the slow lookups: `FOR KEY SHARE` on PostgreSQL (conflicts with the
+  delete's `FOR UPDATE`, not with a rename), a no-op write on SQLite to take its
+  write lock. The delete-versus-assign race is tested with per-request sessions
+  (`race_client` in `tests/test_factories.py`); the shared-session `async_client`
+  cannot show it.
+- Git sync neither writes nor reads `factory_id`: a factory's id is
+  local to an install. The `PATCH` rule above is enforced at the API only. Git
+  sync, plugin refs and external tarball URLs are trusted as the source of an
+  automation's code, so whoever controls them controls what runs in a factory.
 
 ## Preset-Based Automation Creation
 
