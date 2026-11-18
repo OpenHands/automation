@@ -809,7 +809,8 @@ async def _defer_or_skip_blocked_run(
         # Bound the backoff by the time left before the deadline: a run near
         # max_age must not wait another full backoff and start after its age.
         remaining = max_age - age_seconds
-        delay = min(config.defer_backoff_base_seconds * (2**attempts), remaining)
+        backoff = config.defer_backoff_base_seconds * (2**attempts)
+        delay = min(backoff * random.uniform(0.5, 1.5), remaining)
         deferred_until = now + timedelta(seconds=max(1, delay))
         status_detail = make_run_status_detail(
             phase=RunStatusPhase.DISPATCH,
