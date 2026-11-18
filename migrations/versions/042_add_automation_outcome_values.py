@@ -1,7 +1,7 @@
 """Store automation outcome value facts.
 
-Revision ID: 040
-Revises: 039
+Revision ID: 042
+Revises: 041
 Create Date: 2026-11-17
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "040"
-down_revision: str = "039"
+revision: str = "042"
+down_revision: str = "041"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
