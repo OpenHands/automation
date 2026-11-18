@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import time
 import uuid
 
@@ -1261,14 +1262,39 @@ async def _add_slack_webhook(async_session, org_id: uuid.UUID, source: str) -> N
             name=source,
             source=source,
             webhook_secret="s3cret-value",
-            event_key_expr="type",
+            event_key_expr="event.type",
             signature_header="X-Slack-Signature",
             signature_scheme="slack_v0",
-            # Real events dedupe on the event ts; a URL verification carries none.
-            event_id_expr="event.ts",
+            # Slack's delivery id. event.ts is not one: a mention's message and
+            # app_mention events share it. A URL verification carries neither.
+            event_id_expr="event_id",
         )
     )
     await async_session.commit()
+
+
+def _slack_event(event_id: str, event_type: str) -> dict:
+    """An Events API delivery, as Slack wraps every event."""
+    return {
+        "type": "event_callback",
+        "team_id": "T123ABC456",
+        "event_id": event_id,
+        "event": {
+            "type": event_type,
+            "channel": "C123ABC456",
+            "ts": "1725864000.000100",
+            "text": "<@U0LAN0Z89> hello",
+        },
+    }
+
+
+async def _post_slack(async_client: AsyncClient, org_id: uuid.UUID, payload):
+    body = json.dumps(payload).encode()
+    return await async_client.post(
+        f"/api/automation/v1/events/{org_id}/slack",
+        content=body,
+        headers=_slack_headers(body),
+    )
 
 
 @pytest.mark.asyncio
@@ -1277,49 +1303,56 @@ async def test_slack_url_verification_challenge_is_echoed(
     org_id: uuid.UUID,
     async_session,
     mock_authenticated_user,
+    caplog: pytest.LogCaptureFixture,
 ):
     """A signed URL verification is answered with its challenge, verbatim.
 
     Slack's first delivery to a new webhook URL must be answered with the raw
     challenge string, before any event parsing or body-ID extraction (the
-    verification payload has no event.ts).
+    verification payload has no event_id).
     """
     await _add_slack_webhook(async_session, org_id, "slack")
+    caplog.set_level(logging.INFO, logger="automation.event_router")
 
-    body = json.dumps(
-        {"type": "url_verification", "challenge": "3eZbrw1a6mfsZjFAdZuk"}
-    ).encode()
-    response = await async_client.post(
-        f"/api/automation/v1/events/{org_id}/slack",
-        content=body,
-        headers=_slack_headers(body),
+    response = await _post_slack(
+        async_client,
+        org_id,
+        {"type": "url_verification", "challenge": "3eZbrw1a6mfsZjFAdZuk"},
     )
 
     assert response.status_code == 200
     assert response.text == "3eZbrw1a6mfsZjFAdZuk"
     assert response.headers["content-type"].startswith("text/plain")
+    assert "Answered URL verification for source=slack" in caplog.text
 
     events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
     assert events == []
 
 
 @pytest.mark.asyncio
-async def test_slack_url_verification_rejects_a_missing_challenge(
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "url_verification"},
+        {"type": "url_verification", "challenge": ""},
+        {"type": "url_verification", "challenge": 123},
+    ],
+    ids=["missing", "empty", "not-a-string"],
+)
+async def test_slack_url_verification_rejects_an_invalid_challenge(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     async_session,
+    payload: dict,
 ):
-    """A verification without a challenge is a bad request, not a run."""
+    """A verification without a usable challenge is a bad request, not a run."""
     await _add_slack_webhook(async_session, org_id, "slack")
 
-    body = json.dumps({"type": "url_verification"}).encode()
-    response = await async_client.post(
-        f"/api/automation/v1/events/{org_id}/slack",
-        content=body,
-        headers=_slack_headers(body),
-    )
+    response = await _post_slack(async_client, org_id, payload)
 
     assert response.status_code == 400
+    events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -1346,13 +1379,81 @@ async def test_slack_url_verification_requires_a_valid_signature(
 
 
 @pytest.mark.asyncio
+async def test_slack_url_verification_is_only_read_from_an_object(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+):
+    """A signed non-object body is not a handshake and does not crash it."""
+    await _add_slack_webhook(async_session, org_id, "slack")
+
+    response = await _post_slack(
+        async_client, org_id, [{"type": "url_verification", "challenge": "c"}]
+    )
+
+    assert response.status_code != 500
+    assert response.text != "c"
+
+
+@pytest.mark.asyncio
+async def test_url_verification_is_an_ordinary_event_for_other_schemes(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+    mock_authenticated_user,
+):
+    """Only slack_v0 answers the handshake; other schemes route the payload."""
+    async_session.add(
+        CustomWebhook(
+            org_id=org_id,
+            name="hooks",
+            source="hooks",
+            webhook_secret="s3cret-value",
+            event_key_expr="type",
+            signature_header="X-Signature-256",
+        )
+    )
+    async_session.add(
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="On url_verification",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={"type": "event", "source": "hooks", "on": "url_verification"},
+        )
+    )
+    await async_session.commit()
+
+    body = json.dumps({"type": "url_verification", "challenge": "c"}).encode()
+    digest = hmac.new(b"s3cret-value", body, hashlib.sha256).hexdigest()
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/hooks",
+        content=body,
+        headers={
+            "X-Signature-256": f"sha256={digest}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matched"] == 1
+
+
+@pytest.mark.asyncio
 async def test_slack_events_still_route_after_verification(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     async_session,
     mock_authenticated_user,
 ):
-    """A signed event on the same webhook still parses, dedupes and routes."""
+    """After the handshake, signed events on the webhook parse, dedupe and route.
+
+    A mention arrives twice when the app subscribes to messages too: as a
+    message event and as an app_mention, with the same ts but distinct
+    event_ids. Only a retry of the same event_id is a duplicate.
+    """
     await _add_slack_webhook(async_session, org_id, "slack")
     async_session.add(
         Automation(
@@ -1367,19 +1468,18 @@ async def test_slack_events_still_route_after_verification(
     )
     await async_session.commit()
 
-    body = json.dumps(
-        {
-            "type": "app_mention",
-            "event": {"type": "app_mention", "ts": "1725864000.000100"},
-        }
-    ).encode()
-    response = await async_client.post(
-        f"/api/automation/v1/events/{org_id}/slack",
-        content=body,
-        headers=_slack_headers(body),
+    verification = await _post_slack(
+        async_client, org_id, {"type": "url_verification", "challenge": "c"}
     )
+    message = await _post_slack(async_client, org_id, _slack_event("Ev1", "message"))
+    mention = await _post_slack(
+        async_client, org_id, _slack_event("Ev2", "app_mention")
+    )
+    retry = await _post_slack(async_client, org_id, _slack_event("Ev2", "app_mention"))
 
-    assert response.status_code == 200
-    assert response.json()["matched"] == 1
+    assert verification.text == "c"
+    assert message.json()["matched"] == 0
+    assert mention.json()["matched"] == 1
+    assert retry.json()["matched"] == 0
     events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
-    assert [event.provider_event_id for event in events] == ["1725864000.000100"]
+    assert sorted(event.provider_event_id for event in events) == ["Ev1", "Ev2"]

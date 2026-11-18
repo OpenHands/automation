@@ -310,6 +310,7 @@ async def receive_event(
         if not isinstance(challenge, str) or not challenge:
             _log_rejection(source, org_id, "invalid_url_verification")
             raise HTTPException(400, "Invalid URL verification challenge")
+        logger.info("Answered URL verification for source=%s org=%s", source, org_id)
         return PlainTextResponse(challenge)
 
     # Extract IDs only from authenticated bytes, never silently dropping an
