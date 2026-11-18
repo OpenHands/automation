@@ -516,6 +516,12 @@ RUN_AS_USER_ID_DESCRIPTION = (
 )
 
 
+FACTORY_ID_DESCRIPTION = (
+    "Factory to create the automation in. Requires manage_automations "
+    "(members get 403); an unknown or other-org factory returns 404."
+)
+
+
 CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR = (
     "keep_alive cannot be false when destination is "
     "'continue_conversation': deleting the sandbox would destroy "
@@ -585,6 +591,9 @@ class CreateAutomationRequest(BaseModel):
         ),
     )
     tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
+    factory_id: uuid.UUID | None = Field(
+        default=None, description=FACTORY_ID_DESCRIPTION
+    )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -782,6 +791,15 @@ class UpdateAutomationRequest(BaseModel):
     tags: list[str] | None = Field(
         default=None,
         description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
+    )
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory this automation belongs to. Null removes it from its "
+            "factory; omit to leave it unchanged. Changing it requires "
+            "manage_automations, even for the automation's creator; resending "
+            "the current value is not a change."
+        ),
     )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
@@ -1278,6 +1296,7 @@ class AutomationResponse(BaseModel):
     trigger: dict
     observability_associations: dict[str, str] | None = None
     tags: list[str] = Field(default_factory=list)
+    factory_id: uuid.UUID | None = None
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1303,6 +1322,41 @@ class AutomationResponse(BaseModel):
 
 class AutomationListResponse(BaseModel):
     automations: list[AutomationResponse]
+    total: int
+
+
+class FactoryCreate(BaseModel):
+    """Request to create a factory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+
+class FactoryUpdate(FactoryCreate):
+    """Request to rename a factory."""
+
+
+class FactoryResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    automation_count: int = Field(
+        ..., description="Live (not soft-deleted) automations in this factory"
+    )
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class FactoryListResponse(BaseModel):
+    factories: list[FactoryResponse]
     total: int
 
 

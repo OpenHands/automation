@@ -75,6 +75,33 @@ class AutomationChangeActorKind(StrEnum):
     SYSTEM = "system"
 
 
+class Factory(Base):
+    """A named group of automations.
+
+    Other services keep a factory's ``id`` as a plain reference with no foreign
+    key, because their data lives in other databases, so an id is never reused.
+    """
+
+    __tablename__ = "factories"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -139,6 +166,15 @@ class Automation(Base):
     # Never NULL, so the tag facet query can expand every row.
     tags: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, default=list, server_default=text("'[]'")
+    )
+
+    # The factory this automation belongs to. NULL means none. The database
+    # clears it when the factory row is deleted.
+    factory_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("factories.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     # Path to SDK code tarball (e.g., S3 or GCS URL)

@@ -38,6 +38,11 @@ from openhands.automation.auth import (
 from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
+from openhands.automation.factory_router import (
+    authorize_factory_for_create,
+    lock_factory_for_assignment,
+    reject_factory_conflict,
+)
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
@@ -56,6 +61,7 @@ from openhands.automation.plugin_specs import (
     pin_plugin_refs,
 )
 from openhands.automation.schemas import (
+    FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
     AutomationResponse,
     PublicAutomationState,
@@ -194,6 +200,9 @@ class CreatePromptAutomationRequest(BaseModel):
     )
 
     name: str = Field(..., min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None, description=FACTORY_ID_DESCRIPTION
+    )
     description: str | None = Field(default=None, max_length=2000)
     prompt: str = Field(
         ...,
@@ -641,6 +650,7 @@ async def create_automation_from_prompt(
     6. Report completion status back to the automation service
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
+    await authorize_factory_for_create(session, user, body.factory_id)
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -649,6 +659,7 @@ async def create_automation_from_prompt(
             session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
+            reject_factory_conflict(existing, body.factory_id)
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
@@ -720,6 +731,7 @@ async def create_automation_from_prompt(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
+        await lock_factory_for_assignment(session, user.org_id, body.factory_id)
         automation = Automation(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
@@ -728,6 +740,7 @@ async def create_automation_from_prompt(
             name=body.name,
             description=body.description,
             prompt=body.prompt,
+            factory_id=body.factory_id,
             preset_metadata=preset_metadata,
             model=model,
             agent_profile_id=body.agent_profile_id,
@@ -748,12 +761,11 @@ async def create_automation_from_prompt(
         await session.flush()
         await session.refresh(automation)
         await mark_git_sync_dirty(session, automation)
+    except HTTPException:
+        _delete_storage_object_best_effort(file_store, storage_path)
+        raise
     except Exception as e:
-        # Clean up orphaned upload on automation creation failure
-        try:
-            file_store.delete(storage_path)
-        except Exception:
-            logger.exception("Failed to clean up orphaned upload at %s", storage_path)
+        _delete_storage_object_best_effort(file_store, storage_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create automation: {e!s}",
@@ -829,6 +841,9 @@ class CreatePluginAutomationRequest(BaseModel):
     )
 
     name: str = Field(..., min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None, description=FACTORY_ID_DESCRIPTION
+    )
     description: str | None = Field(default=None, max_length=2000)
     plugins: list[PluginSource] | None = Field(
         default=None,
@@ -1164,6 +1179,7 @@ async def create_automation_from_plugin(
     - With repo_path: subdirectory for monorepos
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
+    await authorize_factory_for_create(session, user, body.factory_id)
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -1172,6 +1188,7 @@ async def create_automation_from_plugin(
             session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
+            reject_factory_conflict(existing, body.factory_id)
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
@@ -1273,6 +1290,7 @@ async def create_automation_from_plugin(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
+        await lock_factory_for_assignment(session, user.org_id, body.factory_id)
         automation = Automation(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
@@ -1281,6 +1299,7 @@ async def create_automation_from_plugin(
             name=body.name,
             description=body.description,
             prompt=body.prompt,
+            factory_id=body.factory_id,
             preset_metadata=preset_metadata,
             model=model,
             agent_profile_id=body.agent_profile_id,
@@ -1301,12 +1320,11 @@ async def create_automation_from_plugin(
         await session.flush()
         await session.refresh(automation)
         await mark_git_sync_dirty(session, automation)
+    except HTTPException:
+        _delete_storage_object_best_effort(file_store, storage_path)
+        raise
     except Exception as e:
-        # Clean up orphaned upload on automation creation failure
-        try:
-            file_store.delete(storage_path)
-        except Exception:
-            logger.exception("Failed to clean up orphaned upload at %s", storage_path)
+        _delete_storage_object_best_effort(file_store, storage_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create automation: {e!s}",

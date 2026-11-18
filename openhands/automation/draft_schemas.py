@@ -21,6 +21,7 @@ from openhands.automation.preset_router import (
     CreatePromptAutomationRequest,
 )
 from openhands.automation.schemas import (
+    FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
     TAGS_DESCRIPTION,
     AutomationState,
@@ -105,6 +106,9 @@ class _BaseDraftBody(BaseModel):
     )
     agent_profile_id: uuid.UUID | None = None
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None, description=FACTORY_ID_DESCRIPTION
+    )
     description: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(
         default=None,
