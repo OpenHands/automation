@@ -7,17 +7,18 @@ from typing import Any
 
 def outcome_context_section(environ=os.environ) -> str | None:
     if not environ.get("AUTOMATION_OUTCOME_URL") or not environ.get(
-        "AUTOMATION_OUTCOME_TOKEN"
+        "AUTOMATION_KV_TOKEN"
     ):
         return None
     return """## Outcome Reporting API
 
 This automation can record structured outcome values for analytics. When you have
 final outcome data to report, use terminal commands with the injected secrets
-`$AUTOMATION_OUTCOME_URL` and `$AUTOMATION_OUTCOME_TOKEN`. POST JSON in this
-shape: `{"payload": {...}}`. The service stores values selected by this
-automation's `outcome_parsers`; if no parsers are configured, it accepts a flat
-JSON object."""
+`$AUTOMATION_OUTCOME_URL` and `$AUTOMATION_KV_TOKEN`. POST JSON in this
+shape: `{"payload": {...}}` with `Authorization: Bearer $AUTOMATION_KV_TOKEN`.
+If `$AUTOMATION_OUTCOME_SCHEMA` is set, use it as the request schema. The
+service stores values selected by this automation's `outcome_parsers`; if no
+parsers are configured, it accepts a flat JSON object."""
 
 
 def build_user_prompt(base_prompt: str, event_context: dict[str, Any] | None) -> str:

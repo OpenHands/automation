@@ -66,6 +66,7 @@ from openhands.automation.observability import (
     inject_trace_context,
     span,
 )
+from openhands.automation.outcome_values import build_outcome_payload_schema
 from openhands.automation.plugin_secrets import PluginSourceSecrets
 from openhands.automation.plugin_specs import (
     PluginSpecError,
@@ -1331,10 +1332,11 @@ async def _execute_run(
             run_id=run.id,
         )
         env_vars["AUTOMATION_KV_TOKEN"] = scoped_token
-        env_vars["AUTOMATION_OUTCOME_TOKEN"] = scoped_token
         env_vars["AUTOMATION_OUTCOME_URL"] = (
             f"{settings.resolved_base_url.rstrip('/')}/v1/outcomes"
         )
+        if schema := build_outcome_payload_schema(automation.outcome_parsers):
+            env_vars["AUTOMATION_OUTCOME_SCHEMA"] = json.dumps(schema)
 
     # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.
     try:

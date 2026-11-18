@@ -61,6 +61,66 @@ def validate_outcome_parsers(
     return parsers
 
 
+def _json_schema_type(value_type: OutcomeValueType) -> str:
+    if value_type == "number":
+        return "number"
+    if value_type == "boolean":
+        return "boolean"
+    if value_type == "string" or value_type == "datetime":
+        return "string"
+    return "object"
+
+
+def build_outcome_payload_schema(
+    parsers: Sequence[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Describe the payload accepted by the outcome submission endpoint."""
+    if not parsers:
+        return None
+
+    properties: dict[str, dict[str, Any]] = {}
+    required: list[str] = []
+    for raw_parser in parsers:
+        parser = OutcomeParserDefinition.model_validate(raw_parser)
+        property_schema: dict[str, Any] = {
+            "type": _json_schema_type(parser.value_type),
+            "description": (
+                f"Extracted from submitted payload using JMESPath: {parser.expression}"
+            ),
+        }
+        if parser.value_type == "datetime":
+            property_schema["format"] = "date-time"
+        elif parser.value_type == "json":
+            property_schema = {
+                "description": property_schema["description"],
+            }
+        properties[parser.key] = property_schema
+        required.append(parser.key)
+
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["payload"],
+        "properties": {
+            "payload": {
+                "type": "object",
+                "description": (
+                    "Submit this object to POST /v1/outcomes. The service evaluates "
+                    "the configured parser expressions against it and stores the "
+                    "normalized outcome keys described below."
+                ),
+                "x-openhands-outcome-values": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": required,
+                    "properties": properties,
+                },
+            }
+        },
+    }
+
+
 def validate_outcome_payload_size(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         encoded = json.dumps(payload, allow_nan=False, ensure_ascii=False).encode()
