@@ -41,6 +41,8 @@ Common env vars:
   AUTOMATION_ORG_ID           - owner org ID for observability context (optional)
   AUTOMATION_TRIGGER_SOURCE   - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD    - JSON with trigger info and event payload (optional)
+  AUTOMATION_OUTCOME_URL      - outcome submission endpoint (optional)
+  AUTOMATION_OUTCOME_TOKEN    - scoped outcome submission token (optional)
   AUTOMATION_AGENT_PROFILE_ID - required selected Agent Profile id
   AUTOMATION_AGENT_PROFILE_NAME - selected Agent Profile name
   AUTOMATION_CONVERSATION_ID  - the conversation to use (optional)
@@ -51,6 +53,8 @@ Common env vars:
 Runtime-injected secrets (via conversation.update_secrets after creation):
   AUTOMATION_SESSION_URL      - direct URL to this conversation in Agent Canvas
                                 (Cloud mode only; built from conversation.id)
+  AUTOMATION_OUTCOME_URL      - outcome submission endpoint when configured
+  AUTOMATION_OUTCOME_TOKEN    - scoped outcome submission token when configured
 """
 
 import inspect
@@ -340,6 +344,15 @@ with workspace_ctx as workspace:
         session_url = f"{api_url}/canvas/conversations/{conversation.id}"
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
+
+    outcome_secrets = {
+        key: value
+        for key in ("AUTOMATION_OUTCOME_URL", "AUTOMATION_OUTCOME_TOKEN")
+        if (value := os.environ.get(key))
+    }
+    if len(outcome_secrets) == 2:
+        conversation.update_secrets(outcome_secrets)
+        print("  outcome API: available")
 
     try:
         print("  sending prompt")
