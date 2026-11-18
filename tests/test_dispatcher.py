@@ -35,6 +35,7 @@ from openhands.automation.dispatcher import (
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
     DailySandboxLimitReachedError,
+    LicenseLimitReachedError,
     SandboxProvisioningError,
 )
 from openhands.automation.models import (
@@ -1859,6 +1860,74 @@ class TestExecuteRunConcurrencyLimit:
         args, kwargs = call_args
         assert args[0] == "automation_run_skipped"
         assert kwargs["properties"]["skip_reason"] == "daily_sandbox_limit"
+        backend.release_context.assert_not_called()
+
+    async def test_license_limit_marks_skipped_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A run the install's license does not allow is skipped at once, not
+        deferred: it stays refused until the install has a license."""
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        message = "Only the first Super Admin can start conversations."
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(
+            side_effect=LicenseLimitReachedError(message)
+        )
+        backend.release_context = AsyncMock()
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = (
+                (
+                    await session.execute(
+                        select(AutomationRun).where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.deferred_until is None
+            assert updated.completed_at is not None
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "license_limit"
+            assert updated.status_detail["transient"] is False
+            assert updated.status_detail["detail"] == message
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.error_detail is None  # SKIPPED is not a failure
+
+            auto = (
+                (
+                    await session.execute(
+                        select(Automation).where(Automation.id == automation_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert auto.enabled is True  # a limit, not a fault in the job: not disabled
+
+        capture_event.assert_awaited_once_with(
+            "automation_run_skipped",
+            automation=run.automation,
+            run=run,
+            session_factory=async_session_factory,
+            properties={"trigger_source": "dispatcher", "skip_reason": "license_limit"},
+        )
+
+        # No execution context was acquired, so there is nothing to release.
         backend.release_context.assert_not_called()
 
     async def test_generic_context_failure_still_marks_failed(

@@ -34,6 +34,7 @@ from openhands.automation.exceptions import (
     ConversationStartError,
     ConversationStartUnavailable,
     DailySandboxLimitReachedError,
+    LicenseLimitReachedError,
     SandboxProvisioningError,
 )
 from openhands.automation.models import AutomationRun
@@ -94,8 +95,20 @@ def _daily_sandbox_limit_detail(resp: httpx.Response) -> dict | None:
     return _quota_limit_detail(resp, "DAILY_SANDBOX_LIMIT_REACHED")
 
 
-def _quota_limit_detail(resp: httpx.Response, error_code: str) -> dict | None:
-    if resp.status_code != 429:
+def _license_limit_detail(resp: httpx.Response) -> dict | None:
+    """Return the LICENSE_LIMIT_REACHED detail dict if the response is the 402
+    of an OpenHands Enterprise install without a valid license, else None.
+
+    Such an install limits who can start conversations and how many. Retrying
+    cannot succeed until the install has a license.
+    """
+    return _quota_limit_detail(resp, "LICENSE_LIMIT_REACHED", status_code=402)
+
+
+def _quota_limit_detail(
+    resp: httpx.Response, error_code: str, status_code: int = 429
+) -> dict | None:
+    if resp.status_code != status_code:
         return None
     try:
         body = resp.json()
@@ -673,6 +686,13 @@ class CloudSandboxBackend(ExecutionBackend):
             if detail is not None:
                 raise DailySandboxLimitReachedError(
                     detail.get("message") or "Daily sandbox limit reached"
+                )
+            # And for an install without a valid license: the refusal stands
+            # until the install has one.
+            detail = _license_limit_detail(resp)
+            if detail is not None:
+                raise LicenseLimitReachedError(
+                    detail.get("message") or "License limit reached"
                 )
             resp.raise_for_status()
             return resp.json()["id"]
