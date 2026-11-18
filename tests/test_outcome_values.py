@@ -1,6 +1,9 @@
 import pytest
 
-from openhands.automation.outcome_values import extract_outcome_value_columns
+from openhands.automation.outcome_values import (
+    build_outcome_payload_schema,
+    extract_outcome_value_columns,
+)
 
 
 def test_flat_outcome_payload_accepts_scalar_values():
@@ -63,3 +66,33 @@ def test_configured_outcome_parser_failure_rejects_submission():
                 }
             ],
         )
+
+
+def test_configured_outcome_parsers_build_request_schema():
+    schema = build_outcome_payload_schema(
+        [
+            {
+                "key": "score",
+                "expression": "result.score",
+                "value_type": "number",
+            },
+            {
+                "key": "finished_at",
+                "expression": "finished_at",
+                "value_type": "datetime",
+            },
+        ]
+    )
+
+    assert schema is not None
+    assert schema["required"] == ["payload"]
+    outcome_values = schema["properties"]["payload"]["x-openhands-outcome-values"]
+    assert outcome_values["required"] == ["score", "finished_at"]
+    assert outcome_values["properties"]["score"]["type"] == "number"
+    assert outcome_values["properties"]["finished_at"]["format"] == "date-time"
+    assert "result.score" in outcome_values["properties"]["score"]["description"]
+
+
+def test_empty_outcome_parsers_do_not_build_request_schema():
+    assert build_outcome_payload_schema(None) is None
+    assert build_outcome_payload_schema([]) is None
