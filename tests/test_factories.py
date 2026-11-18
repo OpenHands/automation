@@ -582,7 +582,6 @@ async def race_client(request, tmp_path: Path, mock_authenticated_user):
 async def test_delete_racing_an_assignment_never_orphans_a_live_automation(
     race_client,
 ):
-    outcomes = set()
     for round_number in range(20):
         factory = await _create_factory(race_client, f"Race {round_number}")
         automation = await _create_automation(race_client, f"Member {round_number}")
@@ -595,7 +594,6 @@ async def test_delete_racing_an_assignment_never_orphans_a_live_automation(
         )
 
         outcome = (deleted.status_code, assigned.status_code)
-        outcomes.add(outcome)
         assert outcome in {(204, 404), (409, 200)}, (deleted.text, assigned.text)
         member = (await race_client.get(f"{BASE}/{automation['id']}")).json()
         assert member["factory_id"] == (factory["id"] if outcome[0] == 409 else None)
@@ -910,6 +908,28 @@ async def test_draft_keeps_factory_id_but_its_test_run_has_none(
         Automation, uuid.UUID(dispatched.json()["automation_id"])
     )
     assert hidden is not None and hidden.factory_id is None
+    deleted = await async_client.delete(f"{FACTORIES}/{factory['id']}")
+    assert deleted.status_code == 204, deleted.text
+
+
+async def test_draft_test_run_automation_cannot_be_moved_into_a_factory(
+    async_client,
+):
+    factory = await _create_factory(async_client, "First")
+    created = await async_client.post(
+        f"{BASE}/drafts", json={"endpoint": "/v1", "draft": _raw_body("Draft")}
+    )
+    dispatched = await async_client.post(
+        f"{BASE}/drafts/{created.json()['id']}/dispatch"
+    )
+    hidden_id = dispatched.json()["automation_id"]
+
+    response = await async_client.patch(
+        f"{BASE}/{hidden_id}", json={"factory_id": factory["id"]}
+    )
+
+    assert response.status_code == 409, response.text
+    assert (await async_client.get(f"{BASE}/{hidden_id}")).json()["factory_id"] is None
     deleted = await async_client.delete(f"{FACTORIES}/{factory['id']}")
     assert deleted.status_code == 204, deleted.text
 

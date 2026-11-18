@@ -39,7 +39,7 @@ from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.factory_router import (
-    authorize_factory_change,
+    authorize_factory_for_create,
     lock_factory_for_assignment,
     reject_factory_conflict,
 )
@@ -61,6 +61,7 @@ from openhands.automation.plugin_specs import (
     pin_plugin_refs,
 )
 from openhands.automation.schemas import (
+    FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
     AutomationResponse,
     PublicAutomationState,
@@ -106,6 +107,7 @@ from openhands.automation.utils.timeout import (
     default_automation_timeout,
     validate_automation_timeout,
 )
+from openhands.automation.webhook_policy import require_compatible_trigger
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -199,11 +201,7 @@ class CreatePromptAutomationRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=500)
     factory_id: uuid.UUID | None = Field(
-        default=None,
-        description=(
-            "Factory to create the automation in. Requires manage_automations "
-            "(members get 403); an unknown or other-org factory returns 404."
-        ),
+        default=None, description=FACTORY_ID_DESCRIPTION
     )
     description: str | None = Field(default=None, max_length=2000)
     prompt: str = Field(
@@ -652,8 +650,7 @@ async def create_automation_from_prompt(
     6. Report completion status back to the automation service
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
-    if body.factory_id is not None:
-        await authorize_factory_change(session, user, body.factory_id)
+    await authorize_factory_for_create(session, user, body.factory_id)
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -665,6 +662,8 @@ async def create_automation_from_prompt(
             reject_factory_conflict(existing, body.factory_id)
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
+
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
     await ensure_agent_profile_exists(
         body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
@@ -732,8 +731,7 @@ async def create_automation_from_prompt(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
-        if body.factory_id is not None:
-            await lock_factory_for_assignment(session, user.org_id, body.factory_id)
+        await lock_factory_for_assignment(session, user.org_id, body.factory_id)
         automation = Automation(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
@@ -844,11 +842,7 @@ class CreatePluginAutomationRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=500)
     factory_id: uuid.UUID | None = Field(
-        default=None,
-        description=(
-            "Factory to create the automation in. Requires manage_automations "
-            "(members get 403); an unknown or other-org factory returns 404."
-        ),
+        default=None, description=FACTORY_ID_DESCRIPTION
     )
     description: str | None = Field(default=None, max_length=2000)
     plugins: list[PluginSource] | None = Field(
@@ -1185,8 +1179,7 @@ async def create_automation_from_plugin(
     - With repo_path: subdirectory for monorepos
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
-    if body.factory_id is not None:
-        await authorize_factory_change(session, user, body.factory_id)
+    await authorize_factory_for_create(session, user, body.factory_id)
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -1198,6 +1191,8 @@ async def create_automation_from_plugin(
             reject_factory_conflict(existing, body.factory_id)
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
+
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
     await ensure_agent_profile_exists(
         body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
@@ -1295,8 +1290,7 @@ async def create_automation_from_plugin(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
-        if body.factory_id is not None:
-            await lock_factory_for_assignment(session, user.org_id, body.factory_id)
+        await lock_factory_for_assignment(session, user.org_id, body.factory_id)
         automation = Automation(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,

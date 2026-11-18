@@ -35,20 +35,24 @@ _require_view_automations = require_permission("view_automations")
 _require_manage_automations = require_permission("manage_automations")
 
 
-def _live_automation_count(factory_id: uuid.UUID | None = None):
-    """Count of a factory's live automations, correlated to the outer Factory."""
+def _live_automation_count():
+    """Count of live automations, correlated to the outer Factory."""
     return (
         select(func.count(Automation.id))
-        .where(
-            Automation.factory_id == (factory_id or Factory.id),
-            Automation.deleted_at.is_(None),
-        )
+        .where(Automation.factory_id == Factory.id, Automation.deleted_at.is_(None))
         .scalar_subquery()
     )
 
 
 async def _count_live(session: AsyncSession, factory_id: uuid.UUID) -> int:
-    return await session.scalar(select(_live_automation_count(factory_id))) or 0
+    return (
+        await session.scalar(
+            select(func.count(Automation.id)).where(
+                Automation.factory_id == factory_id, Automation.deleted_at.is_(None)
+            )
+        )
+        or 0
+    )
 
 
 def _to_response(factory: Factory, automation_count: int) -> FactoryResponse:
@@ -108,6 +112,15 @@ async def authorize_factory_change(
         await _get_org_factory(session, user.org_id, factory_id)
 
 
+async def authorize_factory_for_create(
+    session: AsyncSession, user: AuthenticatedUser, factory_id: uuid.UUID | None
+) -> None:
+    """``authorize_factory_change`` for a create request, where no factory
+    asks for no check."""
+    if factory_id is not None:
+        await authorize_factory_change(session, user, factory_id)
+
+
 def reject_factory_conflict(
     existing: Automation, requested_factory_id: uuid.UUID | None
 ) -> None:
@@ -133,16 +146,18 @@ def reject_factory_conflict(
 
 
 async def lock_factory_for_assignment(
-    session: AsyncSession, org_id: uuid.UUID, factory_id: uuid.UUID
+    session: AsyncSession, org_id: uuid.UUID, factory_id: uuid.UUID | None
 ) -> None:
     """Keep the factory from being deleted until this transaction ends, or raise
-    404 if it is already gone.
+    404 if it is already gone. Nothing to lock when ``factory_id`` is None.
 
     Call it right before the write, not before slow calls, so the lock is short.
     SQLite has no row locks, so a no-op write takes its single write lock
     instead: a delete then runs wholly before this (404 here) or wholly after the
     commit (409 for the new member).
     """
+    if factory_id is None:
+        return
     if using_sqlite():
         result = await session.execute(
             update(Factory)
@@ -168,7 +183,7 @@ async def create_factory(
     """Create a factory. A fresh install has none."""
     factory = Factory(org_id=user.org_id, name=data.name)
     session.add(factory)
-    await session.commit()
+    await session.flush()
     await session.refresh(factory)
     return _to_response(factory, 0)
 

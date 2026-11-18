@@ -379,6 +379,121 @@ class TestVerifyAndMarkRunFirstRunOutcome:
             assert first_run["failure_stage"] == "watchdog"
 
 
+class _FakeTelemetryResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeTelemetryClient:
+    """Stand-in for the external PostHog HTTP transport only."""
+
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url: str, json: dict) -> _FakeTelemetryResponse:
+        self.posts.append((url, json))
+        return _FakeTelemetryResponse()
+
+
+class TestVerifyAndMarkRunTelemetry:
+    """Terminal watchdog failures emit bounded, categorized telemetry."""
+
+    @pytest.mark.parametrize(
+        ("exit_code", "expected_kind"),
+        [(1, "execution_error"), (-1, "timeout")],
+    )
+    @pytest.mark.asyncio
+    async def test_verified_failure_emits_categorized_telemetry(
+        self, monkeypatch, mock_settings, exit_code, expected_kind
+    ):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.orm import selectinload
+
+        from openhands.automation import telemetry
+        from openhands.automation.models import Base
+
+        monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+        monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+        clear_config_cache()
+        fake_client = _FakeTelemetryClient()
+        monkeypatch.setattr(telemetry, "_telemetry_http_client", fake_client)
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with session_factory() as session:
+                automation = Automation(
+                    user_id=TEST_USER_ID,
+                    org_id=TEST_ORG_ID,
+                    name="Telemetry Automation",
+                    trigger={"type": "cron", "schedule": "* * * * *"},
+                    tarball_path="s3://bucket/code.tar.gz",
+                    entrypoint="uv run main.py",
+                    enabled=True,
+                    timeout=60,
+                )
+                session.add(automation)
+                await session.commit()
+                now = utcnow()
+                run = AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.RUNNING,
+                    sandbox_id="test-sandbox-123",
+                    started_at=now - timedelta(minutes=5),
+                    timeout_at=now - timedelta(minutes=1),
+                )
+                session.add(run)
+                await session.commit()
+                run_id = run.id
+
+            verification = VerificationResult(
+                verified=True,
+                success=False,
+                exit_code=exit_code,
+                stdout="",
+                stderr="boom token=sekrit",
+            )
+            mock_backend = _create_mock_backend(verification)
+            with patch(
+                "openhands.automation.watchdog.get_backend",
+                return_value=mock_backend,
+            ):
+                async with session_factory() as session:
+                    run = (
+                        (
+                            await session.execute(
+                                select(AutomationRun)
+                                .options(selectinload(AutomationRun.automation))
+                                .where(AutomationRun.id == run_id)
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                    assert run is not None
+                    result = await _verify_and_mark_run(session, run, mock_settings)
+                    await session.commit()
+
+            assert result is True
+            assert len(fake_client.posts) == 1
+            _, payload = fake_client.posts[0]
+            assert payload["event"] == "automation_run_failed"
+            assert payload["distinct_id"] == str(TEST_USER_ID)
+            properties = payload["properties"]
+            assert properties["failure_kind"] == expected_kind
+            assert properties["failure_stage"] == "watchdog"
+            assert properties["trigger_source"] == "watchdog"
+            assert properties["trigger_type"] == "cron"
+            assert properties["run_status"] == "FAILED"
+            assert properties["deployment_mode"] == "cloud"
+            assert "sekrit" not in str(properties)
+        finally:
+            await engine.dispose()
+            clear_config_cache()
+
+
 class TestVerifyAndMarkRunVerificationFailed:
     """Tests for _verify_and_mark_run when verification fails."""
 

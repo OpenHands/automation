@@ -5,8 +5,8 @@
   NULL for every existing row, so nothing is backfilled. Deleting a factory
   sets it back to NULL.
 
-Revision ID: 039
-Revises: 038
+Revision ID: 040
+Revises: 039
 Create Date: 2026-11-12
 """
 
@@ -16,8 +16,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "039"
-down_revision: str = "038"
+revision: str = "040"
+down_revision: str = "039"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

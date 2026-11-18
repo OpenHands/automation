@@ -35,6 +35,7 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
+    FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
     CronTrigger,
     PublicAutomationState,
@@ -419,11 +420,7 @@ class CreatePluginSpecAutomationRequest(BaseModel):
     )
     name: str = Field(..., min_length=1, max_length=500)
     factory_id: uuid.UUID | None = Field(
-        default=None,
-        description=(
-            "Factory to create the automation in. Requires manage_automations "
-            "(members get 403); an unknown or other-org factory returns 404."
-        ),
+        default=None, description=FACTORY_ID_DESCRIPTION
     )
     plugin: AutomationPluginSource
     config: dict[str, Any] = Field(default_factory=dict)

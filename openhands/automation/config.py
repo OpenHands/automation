@@ -558,9 +558,10 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_MAX_CONCURRENT_RUNS: Cap on concurrently RUNNING runs across
             the service (default: 0 = unlimited). At the cap, further PENDING
             runs wait in the queue until a slot frees.
-        AUTOMATION_DEFER_MAX_AGE_SECONDS: Longest a run blocked by a transient
-            limit stays deferred before it is SKIPPED (default: 21600; 0
-            disables deferral and restores immediate skip)
+        AUTOMATION_DEFER_MAX_AGE_SECONDS: Longest a run blocked by the
+            concurrency limit stays deferred before it is SKIPPED (default:
+            21600; 0 disables deferral and restores immediate skip). Runs
+            blocked by the daily sandbox limit are always skipped at once.
         AUTOMATION_DEFER_BACKOFF_BASE_SECONDS: Base delay of the bounded
             exponential backoff between deferrals (default: 60)
         AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
@@ -678,16 +679,16 @@ class ServiceSettings(BaseSettings):
     # queue) until a slot frees. The gate bounds total in-flight sandboxes.
     max_concurrent_runs: int = Field(default=0, ge=0)
 
-    # A run blocked by a transient limit (organization concurrency cap, daily
-    # sandbox quota) is returned to PENDING with deferred_until instead of being
-    # marked terminal SKIPPED. This is the longest a run may stay deferred; past
-    # it the run is SKIPPED with a `defer_expired` status detail. 0 disables
-    # deferral and restores the immediate-skip behavior.
+    # A run blocked by the organization concurrency cap is returned to PENDING
+    # with deferred_until instead of being marked terminal SKIPPED. This is the
+    # longest a run may stay deferred; past it the run is SKIPPED with a
+    # `defer_expired` status detail. 0 disables deferral and restores the
+    # immediate-skip behavior.
     defer_max_age_seconds: int = Field(default=21600, ge=0)  # 6 hours
 
     # Base delay of the bounded exponential backoff between deferrals. The nth
-    # consecutive deferral waits defer_backoff_base_seconds * 2**(n-1), capped
-    # at defer_max_age_seconds.
+    # consecutive deferral waits defer_backoff_base_seconds * 2**(n-1), +/-50%
+    # jitter, capped at defer_max_age_seconds.
     defer_backoff_base_seconds: int = Field(default=60, ge=0)
 
     # Auto-disable rules. `failure_disable_threshold` is the fast path for

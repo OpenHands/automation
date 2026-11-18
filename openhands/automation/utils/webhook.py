@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.automation.acknowledgements import DEFAULT_ACKNOWLEDGEMENT
 from openhands.automation.config import get_settings
 from openhands.automation.db import using_sqlite
 from openhands.automation.models import (
@@ -104,6 +105,9 @@ async def get_webhook_config(
             signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
             # NULL means this source does not identify deliveries.
             event_id_header=webhook.event_id_header,
+            event_id_expr=webhook.event_id_expr,
+            admission_expr=webhook.admission_expr,
+            acknowledgement=webhook.acknowledgement or DEFAULT_ACKNOWLEDGEMENT,
         )
     return None
 

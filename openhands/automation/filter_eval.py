@@ -197,6 +197,36 @@ def validate_filter(expression: str) -> tuple[bool, str | None]:
         return False, str(e)
 
 
+def validate_payload_expression(expression: str) -> tuple[bool, str | None]:
+    """Validate syntax and function contracts without evaluating a payload.
+
+    Unlike routing filters, webhook admission and delivery-ID expressions must
+    reject unknown functions and invalid arity at configuration time. Argument
+    types depend on the delivery and remain runtime checks.
+    """
+    try:
+        pending = [jmespath.compile(expression).parsed]
+        while pending:
+            node = pending.pop()
+            children = node.get("children", [])
+            if node["type"] == "function_expression":
+                name = node["value"]
+                spec = FilterFunctions.FUNCTION_TABLE.get(name)
+                if spec is None:
+                    return False, "Unknown JMESPath function"
+                signature = spec["signature"]
+                variadic = bool(signature and signature[-1].get("variadic"))
+                if (variadic and len(children) < len(signature)) or (
+                    not variadic and len(children) != len(signature)
+                ):
+                    return False, "Invalid JMESPath function argument count"
+            # Slice bounds are scalar metadata (start, stop, step), not nodes.
+            pending.extend(child for child in children if isinstance(child, dict))
+        return True, None
+    except jmespath_exceptions.JMESPathError:
+        return False, "Invalid JMESPath expression"
+
+
 class FilterEvaluationError(Exception):
     """Raised when filter evaluation fails."""
 

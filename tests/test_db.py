@@ -221,6 +221,7 @@ class TestPostgresSslMode:
         assert url.host == "db.example.com"
         assert url.port == 5433
         assert captured["kwargs"]["connect_args"] == {"ssl": "require"}
+        assert captured["kwargs"]["hide_parameters"] is True
         assert captured["kwargs"]["pool_size"] == settings.db_pool_size
         assert captured["kwargs"]["max_overflow"] == settings.db_max_overflow
         assert captured["kwargs"]["pool_recycle"] == settings.db_pool_recycle
@@ -476,3 +477,20 @@ class TestSqliteMigrations:
         )
         # The migration should fail (non-zero exit code)
         assert result.returncode != 0
+
+
+async def test_sql_bind_logging_hides_webhook_secrets(tmp_path, caplog):
+    """Even SQL INFO logging must not expose a provider-issued token."""
+    result = _create_sqlite_engine(f"sqlite+aiosqlite:///{tmp_path / 'secret-log.db'}")
+    try:
+        with caplog.at_level("INFO", logger="sqlalchemy.engine"):
+            async with result.engine.begin() as connection:
+                await connection.execute(text("CREATE TABLE secret_probe (value TEXT)"))
+                await connection.execute(
+                    text("INSERT INTO secret_probe VALUES (:value)"),
+                    {"value": "synthetic-provider-token-do-not-log"},
+                )
+        assert "synthetic-provider-token-do-not-log" not in caplog.text
+        assert "SQL parameters hidden" in caplog.text
+    finally:
+        await result.dispose()
