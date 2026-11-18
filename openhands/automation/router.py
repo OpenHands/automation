@@ -37,6 +37,7 @@ from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.factory_router import (
     authorize_factory_change,
+    authorize_factory_for_create,
     lock_factory_for_assignment,
     reject_factory_conflict,
 )
@@ -265,8 +266,7 @@ async def create_automation(
     ``run_as_user_id`` creates it as a service account of the org (managers only).
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
-    if body.factory_id is not None:
-        await authorize_factory_change(session, user, body.factory_id)
+    await authorize_factory_for_create(session, user, body.factory_id)
 
     # Enabling the same template twice returns the existing automation rather
     # than a duplicate. Before tarball validation, so a repeat enable costs one
@@ -337,8 +337,7 @@ async def create_automation(
     )
     # Before ``add``: the new row must not count as another user of the upload.
     await assign_upload_to_run_as(session, body.tarball_path, user.org_id, run_as)
-    if body.factory_id is not None:
-        await lock_factory_for_assignment(session, user.org_id, body.factory_id)
+    await lock_factory_for_assignment(session, user.org_id, body.factory_id)
     session.add(auto)
     await session.flush()
     await session.refresh(auto)
@@ -371,8 +370,7 @@ async def create_automation_from_plugin_spec(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""
-    if body.factory_id is not None:
-        await authorize_factory_change(session, user, body.factory_id)
+    await authorize_factory_for_create(session, user, body.factory_id)
     if body.template is not None:
         existing = await find_existing_template_automation(
             session, user.org_id, user.user_id, body.template.id
@@ -440,8 +438,7 @@ async def create_automation_from_plugin_spec(
             request
         ).frontend_distinct_id,
     )
-    if body.factory_id is not None:
-        await lock_factory_for_assignment(session, user.org_id, body.factory_id)
+    await lock_factory_for_assignment(session, user.org_id, body.factory_id)
     session.add(automation)
     await session.flush()
     await session.refresh(automation)
@@ -922,6 +919,13 @@ async def update_automation(
     )
     if factory_changing:
         await authorize_factory_change(session, user, update_data["factory_id"])
+        # The hidden test-run automation of a draft must stay out of factories:
+        # it would hold the factory open and receive its run token.
+        if auto.state == ModelAutomationState.DRAFT:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A draft automation cannot change its factory",
+            )
     # Same ownership check as create. Only a new value is checked: resending the
     # stored path cannot grant anything the row does not already have, and that
     # upload need not be owned by the editor or still be live.
@@ -1149,7 +1153,7 @@ async def update_automation(
             elif auto.user_id == user.user_id:
                 update_data["model"] = resolve_model_profile_for_user(None, user)
 
-    if factory_changing and update_data["factory_id"] is not None:
+    if factory_changing:
         await lock_factory_for_assignment(
             session, user.org_id, update_data["factory_id"]
         )

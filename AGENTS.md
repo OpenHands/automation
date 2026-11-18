@@ -302,7 +302,8 @@ NULL`). Zero factories is a valid state; there is no default factory.
   `factory_id`, but their hidden test-run automation never gets it.
 - Membership gives an automation access to its factory's data, so the creator
   exception of `_assert_can_manage` stops at the factory: any `PATCH` of an
-  automation that is in a factory needs `manage_automations`.
+  automation that is in a factory needs `manage_automations`. A draft's hidden
+  test-run automation cannot be put in a factory (`PATCH` returns 409).
 - Re-enabling an installed template (`template` on a create endpoint) returns
   the existing automation unchanged; if the request names a `factory_id` the
   automation is not in, it is `409` rather than silently ignored. Move it with
@@ -318,7 +319,9 @@ NULL`). Zero factories is a valid state; there is no default factory.
   (`race_client` in `tests/test_factories.py`); the shared-session `async_client`
   cannot show it.
 - Git sync neither writes nor reads `factory_id`: a factory's id is
-  local to an install.
+  local to an install. The `PATCH` rule above is enforced at the API only. Git
+  sync, plugin refs and external tarball URLs are trusted as the source of an
+  automation's code, so whoever controls them controls what runs in a factory.
 
 ## Preset-Based Automation Creation
 

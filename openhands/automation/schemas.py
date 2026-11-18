@@ -516,6 +516,12 @@ RUN_AS_USER_ID_DESCRIPTION = (
 )
 
 
+FACTORY_ID_DESCRIPTION = (
+    "Factory to create the automation in. Requires manage_automations "
+    "(members get 403); an unknown or other-org factory returns 404."
+)
+
+
 CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR = (
     "keep_alive cannot be false when destination is "
     "'continue_conversation': deleting the sandbox would destroy "
@@ -586,11 +592,7 @@ class CreateAutomationRequest(BaseModel):
     )
     tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     factory_id: uuid.UUID | None = Field(
-        default=None,
-        description=(
-            "Factory to create the automation in. Requires manage_automations "
-            "(members get 403); an unknown or other-org factory returns 404."
-        ),
+        default=None, description=FACTORY_ID_DESCRIPTION
     )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
