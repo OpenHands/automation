@@ -22,7 +22,7 @@ Routes: `POST /api/automation/v1/outcomes`,
 
 ## How to get to it (agent POV)
 
-- REST: automation code reads `AUTOMATION_OUTCOME_URL` and `AUTOMATION_OUTCOME_TOKEN` from its environment and posts `SubmitOutcomeRequest` JSON. Human or spawned-conversation callers can use the same endpoint with normal user auth and an `automation_id` query parameter.
+- REST: automation code reads `AUTOMATION_OUTCOME_URL` and the existing `AUTOMATION_KV_TOKEN` from its environment, then posts `SubmitOutcomeRequest` JSON with `Authorization: Bearer $AUTOMATION_KV_TOKEN`. If `AUTOMATION_OUTCOME_SCHEMA` is set, it describes the configured outcome submission shape. Human or spawned-conversation callers can use the same endpoint with normal user auth and an `automation_id` query parameter.
 - Config: raw, preset, plugin-spec and git-sync automation definitions may include `outcome_parsers`; parser keys are unique and use only alphanumeric, underscore, dash and dot characters.
 - Reads: analytics consumers use the authenticated automation routes to fetch raw rows or aggregate facts for one automation at a time.
 
