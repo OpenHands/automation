@@ -101,6 +101,7 @@ from openhands.automation.utils.timeout import (
     default_automation_timeout,
     validate_automation_timeout,
 )
+from openhands.automation.webhook_policy import require_compatible_trigger
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -645,11 +646,13 @@ async def create_automation_from_prompt(
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.org_id, body.template.id
+            session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
+
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
     await ensure_agent_profile_exists(
         body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id
@@ -1166,11 +1169,13 @@ async def create_automation_from_plugin(
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.org_id, body.template.id
+            session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
+
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
     await ensure_agent_profile_exists(
         body.agent_profile_id, request, user, runs_as_user_id=body.run_as_user_id

@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "1.32.1"
+version = "1.33.0"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
@@ -77,7 +77,7 @@ dev = [
     "testcontainers[postgres,minio]>=4.10.0",
 ]
 production = [
-    "ddtrace==4.16.3",
+    "ddtrace==4.17.0",
 ]
 
 # Ruff configuration

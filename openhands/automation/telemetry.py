@@ -267,6 +267,59 @@ def _resolve_distinct_id(
     )
 
 
+def _failure_kind_from_error_detail(error_detail: str | None) -> str | None:
+    """Coarse, non-identifying failure category derived from stored prefixes.
+
+    ``error_detail`` itself is free text and must never reach telemetry; only
+    the closed set of prefixes this service writes is mapped.
+    """
+    if not error_detail:
+        return None
+    if error_detail.startswith("Timed out: verification failed"):
+        return "verification_failed"
+    if error_detail.startswith("Timed out:"):
+        return "timeout"
+    if error_detail.startswith("Cancelled"):
+        return "cancelled"
+    if error_detail.startswith("Failed to get execution context"):
+        return "dispatch_error"
+    return "execution_error"
+
+
+# Failure events must stay categorizable even when a caller stored no error
+# text, so terminal failure captures fall back to these bounded values.
+# Stage names reuse the vocabulary record_first_run_outcome already records.
+_FAILURE_STAGE_BY_TRIGGER_SOURCE = {
+    "callback": "execution",
+    "dispatcher": "dispatch",
+    "watchdog": "watchdog",
+}
+_FAILURE_EVENTS = frozenset({"automation_run_failed", "automation_run_dispatch_failed"})
+
+
+def _ensure_failure_properties(event: str, properties: dict[str, Any]) -> None:
+    """Guarantee bounded failure_stage/failure_kind on failure events.
+
+    Explicit caller properties always win; raw error text is never copied.
+    """
+    if event not in _FAILURE_EVENTS:
+        return
+    stage = properties.get("failure_stage")
+    if not stage:
+        trigger_source = properties.get("trigger_source")
+        stage = (
+            _FAILURE_STAGE_BY_TRIGGER_SOURCE.get(trigger_source)
+            if isinstance(trigger_source, str)
+            else None
+        )
+        if stage is not None:
+            properties["failure_stage"] = stage
+    if not properties.get("failure_kind"):
+        properties["failure_kind"] = (
+            "dispatch_error" if stage == "dispatch" else "execution_error"
+        )
+
+
 @lru_cache(maxsize=1)
 def _installed_sdk_version() -> str:
     # Only successful lookups are cached: lru_cache does not memoize exceptions.
@@ -350,6 +403,9 @@ def _base_properties(
                 "has_conversation_id": bool(run.conversation_id),
             }
         )
+        failure_kind = _failure_kind_from_error_detail(run.error_detail)
+        if failure_kind is not None:
+            properties["failure_kind"] = failure_kind
         properties.setdefault("automation_id", str(run.automation_id))
         if run.started_at and run.completed_at:
             duration_ms = int(
@@ -484,6 +540,7 @@ async def _capture_automation_event(
     )
     if properties:
         event_properties.update(properties)
+    _ensure_failure_properties(event, event_properties)
 
     payload = {
         "api_key": settings.posthog_api_key,

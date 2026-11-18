@@ -36,7 +36,8 @@ Common env vars:
   AUTOMATION_ID               - automation ID for observability correlation (optional)
   AUTOMATION_NAME             - automation name for observability correlation (optional)
   AUTOMATION_RUN_ID           - run ID for the callback payload (optional)
-  AUTOMATION_USER_ID          - owner user ID for observability attribution (optional)
+  AUTOMATION_USER_ID          - observability attribution ID (optional): the owner's
+                                user ID in cloud mode, this installation's ID in local mode
   AUTOMATION_ORG_ID           - owner org ID for observability context (optional)
   AUTOMATION_TRIGGER_SOURCE   - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD    - JSON with trigger info and event payload (optional)

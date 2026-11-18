@@ -6,6 +6,7 @@ import logging
 import re
 import unicodedata
 import uuid
+from collections.abc import Coroutine
 from datetime import timedelta
 from typing import Any, Literal
 from urllib.parse import quote
@@ -31,6 +32,7 @@ from openhands.automation.auth import (
     get_http_client,
     require_permission,
 )
+from openhands.automation.backends import get_backend
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
@@ -150,6 +152,7 @@ from openhands.automation.utils.templates import (
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 from openhands.automation.utils.webhook import is_builtin_source
+from openhands.automation.webhook_policy import require_compatible_trigger
 
 
 logger = logging.getLogger(__name__)
@@ -263,7 +266,7 @@ async def create_automation(
     # query and leaves the new upload unreferenced rather than adopting it.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.org_id, body.template.id
+            session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
@@ -296,6 +299,8 @@ async def create_automation(
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
 
     state = model_automation_state(body.state, body.enabled)
+
+    await require_compatible_trigger(user.org_id, body.trigger.model_dump(), session)
 
     auto = Automation(
         user_id=run_as.user_id,
@@ -357,7 +362,7 @@ async def create_automation_from_plugin_spec(
     """Create an automation from an executable plugin specification."""
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.org_id, body.template.id
+            session, user.org_id, user.user_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
@@ -381,6 +386,8 @@ async def create_automation_from_plugin_spec(
         user=user,
         session=session,
     )
+
+    await require_compatible_trigger(user.org_id, trigger.model_dump(), session)
 
     # The trigger may come from the manifest, so the rule is applied here
     # rather than on the request model.
@@ -1039,6 +1046,9 @@ async def update_automation(
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
     trigger = update_data.get("trigger") or auto.trigger or {}
+    if body.trigger is not None or update_data.get("enabled") is True:
+        await require_compatible_trigger(user.org_id, trigger, session)
+
     keep_alive = update_data.get("keep_alive", auto.keep_alive)
     try:
         settled_keep_alive = continue_conversation_keep_alive(trigger, keep_alive)
@@ -1705,11 +1715,13 @@ async def complete_run(
     (by ``authenticate_request``) and the resulting user must own the run's
     parent automation.
 
-    If keep_alive is not true, deletes the sandbox after updating the run
-    status, or -- when ``sandbox_cleanup_delay_seconds`` is set -- pauses it
-    and leaves deletion to the watchdog once the delay has passed. When
-    post-run callbacks are configured, cleanup will happen after callbacks
-    instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
+    If keep_alive is not true, the sandbox is torn down once
+    ``sandbox_event_flush_grace_seconds`` have passed, so the agent server can
+    post the conversation's last buffered events to the app server first. It
+    is deleted by the watchdog when ``sandbox_cleanup_due_at`` passes; with
+    ``sandbox_cleanup_delay_seconds`` set it is paused after the grace period
+    and deleted once the delay has passed. With both at 0 it is deleted at
+    once. keep_alive=true leaves cleanup to the runtime TTL reaper.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -1732,11 +1744,9 @@ async def complete_run(
 
     settings = get_settings()
     cleanup_delay = settings.sandbox_cleanup_delay_seconds
-    # Same gate as the cleanup branch below; a delay only replaces deletion
-    # with a pause and stamps when the watchdog should delete instead.
-    defer_cleanup = (
-        cleanup_delay > 0 and bool(run.sandbox_id) and automation.keep_alive is not True
-    )
+    flush_grace = settings.sandbox_event_flush_grace_seconds
+    tear_down = bool(run.sandbox_id) and automation.keep_alive is not True
+    defer_cleanup = tear_down and (cleanup_delay > 0 or flush_grace > 0)
     new_status = (
         AutomationRunStatus.COMPLETED
         if body.status == "COMPLETED"
@@ -1747,7 +1757,9 @@ async def complete_run(
         "completed_at": now,
     }
     if defer_cleanup:
-        values["sandbox_cleanup_due_at"] = now + timedelta(seconds=cleanup_delay)
+        values["sandbox_cleanup_due_at"] = now + timedelta(
+            seconds=max(cleanup_delay, flush_grace)
+        )
     if body.conversation_id:
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
@@ -1871,14 +1883,11 @@ async def complete_run(
     )
     await record_first_run_outcome(run, new_status, "execution", session=session)
 
-    # Clean up immediately when this automation owns explicit cleanup. Once
-    # post-run callbacks exist, this path should run them before deleting.
-    #
     # A `continue_conversation` automation is forced keep_alive at creation, so
     # deleting the sandbox out from under its conversation is already excluded
-    # here without a second condition.
-    if run.sandbox_id and automation.keep_alive is not True:
-        # Fire-and-forget sandbox deletion in background
+    # here without a second condition. A deferred deletion is left to the
+    # watchdog; only a pause, or a deletion with no grace, happens from here.
+    if tear_down and run.sandbox_id and (cleanup_delay > 0 or flush_grace == 0):
         api_key = user.api_key
         if api_key is None:
             # Cookie-authenticated users don't carry an API key;
@@ -1895,10 +1904,12 @@ async def complete_run(
 
         if api_key is not None:
             if cleanup_delay > 0:
-                # Deferred: pause now so the conversation stays resumable; the
-                # watchdog deletes the sandbox at sandbox_cleanup_due_at.
-                asyncio.create_task(
-                    pause_sandbox(
+                # Pause so the conversation stays resumable; the watchdog
+                # deletes the sandbox at sandbox_cleanup_due_at. A lost pause
+                # only leaves the sandbox running until then.
+                _spawn_teardown(
+                    _pause_after_event_flush(
+                        flush_grace,
                         api_url=settings.openhands_api_base_url,
                         api_key=api_key,
                         sandbox_id=run.sandbox_id,
@@ -1906,7 +1917,7 @@ async def complete_run(
                     )
                 )
             else:
-                asyncio.create_task(
+                _spawn_teardown(
                     cleanup_sandbox(
                         api_url=settings.openhands_api_base_url,
                         api_key=api_key,
@@ -1916,6 +1927,22 @@ async def complete_run(
                 )
 
     return AutomationRunResponse.model_validate(run)
+
+
+_pending_teardowns: set[asyncio.Task] = set()
+
+
+def _spawn_teardown(coro: Coroutine[Any, Any, Any]) -> None:
+    # Hold a reference: the event loop keeps only weak ones to its tasks.
+    task = asyncio.create_task(coro)
+    _pending_teardowns.add(task)
+    task.add_done_callback(_pending_teardowns.discard)
+
+
+async def _pause_after_event_flush(grace_seconds: int, **pause_kwargs: str) -> None:
+    """Pause the sandbox once its agent server has flushed buffered events."""
+    await asyncio.sleep(grace_seconds)
+    await pause_sandbox(**pause_kwargs)
 
 
 # --- Run phase reporting ---
@@ -1984,7 +2011,9 @@ async def cancel_run(
     """Cancel a pending or running automation run.
 
     For PENDING runs, prevents future dispatch.
-    For RUNNING runs, marks as cancelled and cleans up the sandbox.
+    For RUNNING runs, marks as cancelled and stops the run's work: Cloud runs
+    lose their sandbox; local runs share one persistent agent server, so only
+    the run's entrypoint command is stopped.
     Returns 409 if the run is already in a terminal state.
     """
     result = await session.execute(
@@ -2080,6 +2109,8 @@ async def cancel_run(
                     run_id=str(run_id),
                 )
             )
+    elif run.bash_command_id:
+        await get_backend(run).stop_command(run.bash_command_id)
 
     return AutomationRunResponse.model_validate(run)
 

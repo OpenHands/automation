@@ -681,6 +681,43 @@ async def test_accept_event_telemetry_needs_a_session_source(
 
 
 @pytest.mark.asyncio
+async def test_accept_event_skips_product_telemetry_when_nothing_matches(
+    org_id: uuid.UUID,
+    async_session,
+    async_session_factory,
+    slack_payload: dict,
+    mock_authenticated_user,
+    captured_telemetry: list[str],
+):
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "message"},
+        )
+    )
+    await async_session.commit()
+
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+        ),
+        async_session,
+        session_factory=async_session_factory,
+    )
+
+    assert result.matched == 0
+    assert captured_telemetry == []
+
+    events = await fetch_events(async_session)
+    assert len(events) == 1
+    assert events[0].matched_count == 0
+
+
+@pytest.mark.asyncio
 async def test_accepted_event_defaults():
     """Only `source` and `event_key` are required."""
     event = AcceptedEvent(source="slack", event_key="app_mention")

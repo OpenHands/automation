@@ -198,7 +198,10 @@ async def _run_git_once(
         proc.kill()
         await proc.wait()
         raise GitSyncError(
-            f"git command timed out after {timeout}s: {' '.join(logged_args)}"
+            f"git command timed out after {timeout}s: {' '.join(logged_args)}. "
+            "A large repo or slow link may need longer: raise the git timeout "
+            "(`git_timeout_seconds` in the Git Sync config, or "
+            "AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS)."
         ) from None
 
     if proc.returncode != 0:
