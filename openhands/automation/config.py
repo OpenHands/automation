@@ -687,8 +687,8 @@ class ServiceSettings(BaseSettings):
     defer_max_age_seconds: int = Field(default=21600, ge=0)  # 6 hours
 
     # Base delay of the bounded exponential backoff between deferrals. The nth
-    # consecutive deferral waits defer_backoff_base_seconds * 2**(n-1), capped
-    # at defer_max_age_seconds.
+    # consecutive deferral waits defer_backoff_base_seconds * 2**(n-1), +/-50%
+    # jitter, capped at defer_max_age_seconds.
     defer_backoff_base_seconds: int = Field(default=60, ge=0)
 
     # Auto-disable rules. `failure_disable_threshold` is the fast path for

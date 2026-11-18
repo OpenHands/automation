@@ -2950,8 +2950,15 @@ class TestRequeueDeferredRun:
                         .first()
                     )
                 before = utcnow()
-                with patch(
-                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                with (
+                    patch(
+                        "openhands.automation.dispatcher.get_backend",
+                        return_value=backend,
+                    ),
+                    patch(
+                        "openhands.automation.dispatcher.random.uniform",
+                        return_value=1.0,
+                    ),
                 ):
                     await _execute_run(
                         run, mock_settings, async_session_factory, mock_client
@@ -2968,6 +2975,47 @@ class TestRequeueDeferredRun:
                     await session.commit()
 
             assert delays[0] < delays[1] < delays[2]
+        finally:
+            clear_config_cache()
+
+    @pytest.mark.parametrize("factor", [0.5, 1.5])
+    async def test_backoff_delay_is_jittered(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch, factor
+    ):
+        """The deferral delay is the backoff scaled by a random factor in
+        [0.5, 1.5], so runs blocked together do not retry together."""
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_DEFER_BACKOFF_BASE_SECONDS", "100")
+        clear_config_cache()
+        try:
+            run, run_id = await self._make_running_run(async_session_factory)
+            backend = MagicMock()
+            backend.is_local_mode = False
+            backend.get_execution_context = AsyncMock(
+                side_effect=ConcurrencyLimitReachedError("limit")
+            )
+            backend.release_context = AsyncMock()
+
+            before = utcnow()
+            with (
+                patch(
+                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                ),
+                patch(
+                    "openhands.automation.dispatcher.random.uniform",
+                    return_value=factor,
+                ) as uniform,
+            ):
+                await _execute_run(
+                    run, mock_settings, async_session_factory, mock_client
+                )
+
+            uniform.assert_called_once_with(0.5, 1.5)
+            async with async_session_factory() as session:
+                updated = await session.get(AutomationRun, run_id)
+            delay = (updated.deferred_until - before).total_seconds()
+            assert 100 * factor - 5 <= delay <= 100 * factor + 5
         finally:
             clear_config_cache()
 
