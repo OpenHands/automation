@@ -344,6 +344,11 @@ scoped to a factory), which the OpenHands server stores and serves
   it expires, even if its automation is moved to another factory mid-run. A run
   sends it as a Bearer token to a route of a service that accepts it, which
   decides what the factory may do (Enterprise's worklog routes are the first).
+  The token carries the authority of the automation's code: whoever controls
+  what a factory member runs can use it. `PATCH` of a member needs
+  `manage_automations` (see Factories), but git sync, plugin refs and external
+  tarball URLs are trusted as the source of that code. A draft's hidden
+  test-run automation cannot be in a factory, so it never gets a token.
   Only a service that holds the service key can verify it. The tests in
   `tests/test_factory_token.py` commit the contract test vector that
   Enterprise's tests also commit; if the two differ, the enterprise issue is
