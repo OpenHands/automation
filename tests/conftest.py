@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 
 import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -26,6 +27,7 @@ from openhands.automation.auth import (  # noqa: E402
 from openhands.automation.config import Settings  # noqa: E402
 from openhands.automation.db import get_session  # noqa: E402
 from openhands.automation.models import Base  # noqa: E402
+from openhands.automation.utils.change_events import bind_request  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -128,7 +130,9 @@ async def async_client(
 ) -> AsyncGenerator[AsyncClient, None]:
     """Create an async test client with mocked auth and DB session."""
 
-    async def override_get_session():
+    async def override_get_session(request: Request):
+        # As get_session does: the audit hook reads the request's user.
+        bind_request(async_session, request)
         yield async_session
 
     async def override_authenticate():
@@ -198,13 +202,144 @@ async def agent_profiles_api(
     clear_agent_profile_cache()
 
 
+class EnterpriseApi:
+    """The enterprise service API's membership lookup, as a cloud-mode test sees it.
+
+    ``members`` maps a user id to the membership the endpoint reports for it;
+    a user not in it gets the 404 enterprise returns for a non-member.
+    """
+
+    def __init__(self) -> None:
+        self.members: dict[str, dict] = {}
+        self.error: int | None = None
+        self.requests: list[httpx.Request] = []
+
+    def add_member(
+        self,
+        user_id,
+        org_id,
+        *,
+        account_type: str = "service",
+        status: str = "active",
+        role: str = "service_account",
+    ) -> None:
+        self.members[str(user_id)] = {
+            "user_id": str(user_id),
+            "org_id": str(org_id),
+            "account_type": account_type,
+            "role": role,
+            "status": status,
+        }
+
+    def respond(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.error is not None:
+            return httpx.Response(self.error)
+        # /api/service/users/{user_id}/orgs/{org_id}/membership
+        user_id = request.url.path.split("/")[4]
+        member = self.members.get(user_id)
+        if member is None:
+            return httpx.Response(404, json={"detail": "Not a member"})
+        return httpx.Response(200, json=member)
+
+
+async def _serve_enterprise_api(monkeypatch) -> AsyncGenerator[EnterpriseApi, None]:
+    """Cloud mode, with the enterprise service API answering on the test HTTP client.
+
+    Any other request goes to the HTTP client the test had installed before
+    (for example ``agent_profiles_api``'s), so both can be used together.
+    """
+    from openhands.automation.config import clear_config_cache
+
+    monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+    monkeypatch.setenv("AUTOMATION_SERVICE_KEY", "test-service-key")
+    clear_config_cache()
+    api = EnterpriseApi()
+    previous = app.state.http_client
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/service/"):
+            return api.respond(request)
+        return await previous._transport.handle_async_request(request)
+
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    yield api
+    await app.state.http_client.aclose()
+    app.state.http_client = previous
+    clear_config_cache()
+
+
+@pytest.fixture
+async def enterprise_api(
+    async_client, monkeypatch
+) -> AsyncGenerator[EnterpriseApi, None]:
+    """The enterprise API for a test whose caller holds ``manage_automations``."""
+    async for api in _serve_enterprise_api(monkeypatch):
+        yield api
+
+
+@pytest.fixture
+async def member_enterprise_api(
+    readonly_client, monkeypatch
+) -> AsyncGenerator[EnterpriseApi, None]:
+    """The enterprise API for a test whose caller is a view-only member."""
+    async for api in _serve_enterprise_api(monkeypatch):
+        yield api
+
+
+@pytest.fixture
+def mock_service_account_user():
+    """Return a mock authenticated user with enterprise's service_account role."""
+    import uuid
+
+    return AuthenticatedUser(
+        user_id=uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
+        email="",
+        role="service_account",
+        permissions=["view_org_settings", "view_automations", "view_llm_settings"],
+        auth_method=AuthMethod.API_KEY,
+        api_key="test-api-key",
+    )
+
+
+@pytest.fixture
+async def service_account_client(
+    async_engine, async_session_factory, async_session, mock_service_account_user
+) -> AsyncGenerator[AsyncClient, None]:
+    """Create an async test client whose user is a service account."""
+
+    async def override_get_session(request: Request):
+        # As get_session does: the audit hook reads the request's user.
+        bind_request(async_session, request)
+        yield async_session
+
+    async def override_authenticate():
+        return mock_service_account_user
+
+    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[authenticate_request] = override_authenticate
+
+    app.state.engine = async_engine
+    app.state.session_factory = async_session_factory
+    app.state.http_client = create_http_client()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        yield client
+
+
 @pytest.fixture
 async def readonly_client(
     async_engine, async_session_factory, async_session, mock_readonly_user
 ) -> AsyncGenerator[AsyncClient, None]:
     """Create an async test client with a user lacking manage_automations permission."""
 
-    async def override_get_session():
+    async def override_get_session(request: Request):
+        # As get_session does: the audit hook reads the request's user.
+        bind_request(async_session, request)
         yield async_session
 
     async def override_authenticate():

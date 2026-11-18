@@ -62,7 +62,12 @@ uv pip install --python "$VENV_PYTHON" --quiet \
   "openhands-tools==${SDK_VERSION}" \
   "openhands-workspace==${SDK_VERSION}"
 
-if ! "$VENV_PYTHON" -c 'import openhands.sdk, openhands.tools, openhands.workspace'; then
+# The entrypoint imports the SDK; verify installation without initializing it here.
+if ! "$VENV_PYTHON" -c '
+from importlib.metadata import version
+for package in ("openhands-sdk", "openhands-tools", "openhands-workspace"):
+    version(package)
+'; then
     echo "[setup] ERROR: OpenHands SDK is not importable from .venv" >&2
     exit 1
 fi

@@ -6,9 +6,11 @@ extract it, run setup, run the entrypoint, tear down.
 
 import asyncio
 import io
+import json
 import logging
 import re
 import tarfile
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import httpx
@@ -25,13 +27,17 @@ from openhands.automation.config import get_config
 from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.utils import log_extra
-from openhands.automation.utils.sandbox import delete_sandbox
+from openhands.automation.utils.sandbox import delete_sandbox, find_agent_server_url
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 from openhands.sdk.workspace import AsyncRemoteWorkspace
 
 
 # Default working directory for cloud/container mode
 DEFAULT_WORK_DIR = "/workspace/project"
+
+# Uploaded into the run's work directory when the agent server runs on
+# Windows; see windows_runner.py.
+_WINDOWS_RUNNER_SOURCE = Path(__file__).with_name("windows_runner.py")
 
 logger = logging.getLogger(__name__)
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -72,14 +78,6 @@ def build_tarball(files: dict[str, str | bytes]) -> bytes:
 
 
 # -- Sandbox helpers (private) ------------------------------------------------
-
-
-def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
-    """Return ``(agent_url, session_key)`` if an AGENT_SERVER URL exists."""
-    for url_info in sandbox.get("exposed_urls") or []:
-        if url_info.get("name") == "AGENT_SERVER":
-            return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
-    return None
 
 
 async def _create_sandbox(
@@ -143,7 +141,7 @@ async def _create_and_wait(
         status = sb.get("status", "UNKNOWN")
 
         if status == "RUNNING":
-            result = _find_agent_server_url(sb)
+            result = find_agent_server_url(sb)
             if result is None:
                 raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
             agent_url, session_key = result
@@ -173,6 +171,20 @@ async def _upload(
 ) -> None:
     """Upload bytes through the SDK workspace API."""
     await workspace.file_upload(data, dest)
+
+
+async def upload_files(
+    agent_url: str, session_key: str, files: dict[str, bytes]
+) -> None:
+    """Write files into the execution environment, keyed by absolute path."""
+    workspace = AsyncRemoteWorkspace(
+        host=agent_url, api_key=session_key, working_dir="/"
+    )
+    try:
+        for path, data in files.items():
+            await _upload(workspace, data, path)
+    finally:
+        await workspace.reset_client()
 
 
 async def _bash(
@@ -301,6 +313,7 @@ async def execute_in_context(
     timeout: int | None = None,
     run_id: str | None = None,
     sandbox_id: str | None = None,
+    setup_script_path: str | None = None,
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -308,7 +321,10 @@ async def execute_in_context(
     The context (agent_url, session_key) is obtained from the backend.
 
     1. Get tarball into environment (upload bytes OR download from URL).
-    2. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
+    2. Extract it, run the setup script (see ``_setup_step``), then start
+       *entrypoint*. When *work_dir* is a Windows path, ``windows_runner.py``
+       does this step instead and runs ``setup.py`` (if present);
+       *setup_script_path* does not apply there.
     3. Return immediately without waiting for the entrypoint to complete.
 
     Args:
@@ -323,6 +339,9 @@ async def execute_in_context(
             path (/tmp/automation-<run_id>.tar.gz) that prevents collisions
             when concurrent runs share the same filesystem (sandboxless mode)
         sandbox_id: Sandbox ID for logging (Cloud mode only)
+        setup_script_path: The automation's stored setup script, relative to
+            the extracted tarball. Validated at the request layer (relative,
+            no traversal, no shell metacharacters); quoted here regardless.
 
     Returns:
         DispatchResult with success status
@@ -334,14 +353,22 @@ async def execute_in_context(
     def _log_ctx() -> dict[str, Any]:
         return log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
-    # Use a per-run tarball path to avoid collisions when multiple automations
-    # run concurrently on a shared filesystem (sandboxless/local mode).
-    # Guard against path separators in run_id before embedding it in a shell command.
-    tarball_path = (
-        f"/tmp/automation-{run_id}.tar.gz"
-        if run_id and "/" not in run_id
-        else TARBALL_PATH
-    )
+    # Local mode hands us a host path. A drive-qualified one means the agent
+    # server runs on Windows, where /tmp is not absolute and commands run in
+    # cmd.exe, so the run is staged in its own work directory instead.
+    windows = _is_windows_path(work_dir)
+    if windows:
+        tarball_path = str(PureWindowsPath(work_dir, ".automation-run.tar.gz"))
+    else:
+        # Use a per-run tarball path to avoid collisions when multiple
+        # automations run concurrently on a shared filesystem (sandboxless/local
+        # mode). Guard against path separators in run_id before embedding it in
+        # a shell command.
+        tarball_path = (
+            f"/tmp/automation-{run_id}.tar.gz"
+            if run_id and "/" not in run_id
+            else TARBALL_PATH
+        )
     env_path: str | None = None
     workspace = AsyncRemoteWorkspace(
         host=agent_url,
@@ -354,28 +381,51 @@ async def execute_in_context(
         if isinstance(tarball_source, bytes):
             logger.info("Uploading tarball", extra=_log_ctx())
             await _upload(workspace, tarball_source, tarball_path)
+        elif windows:
+            raise ValueError(
+                "Tarball URLs are not supported on a Windows agent server; "
+                "upload the tarball instead"
+            )
         else:
             logger.info("Downloading tarball from URL", extra=_log_ctx())
             await _download_in_sandbox(workspace, tarball_source, tarball_path)
 
-        env_prefix = ""
-        if env_vars:
-            env_path = f"{tarball_path}.env"
-            await _upload(
-                workspace,
-                _serialize_env_vars(env_vars),
-                env_path,
+        if windows:
+            # Same steps as the POSIX chain below, done by a Python runner.
+            # Secrets travel in the spec file, never in the command text.
+            env_path = str(PureWindowsPath(work_dir, ".automation-run.json"))
+            spec = {
+                "work_dir": work_dir,
+                "tarball": tarball_path,
+                "entrypoint": entrypoint,
+                "env": env_vars,
+            }
+            await _upload(workspace, json.dumps(spec).encode(), env_path)
+            runner_path = str(PureWindowsPath(work_dir, ".automation-run.py"))
+            await _upload(workspace, _WINDOWS_RUNNER_SOURCE.read_bytes(), runner_path)
+            cmd = (
+                f'uv run --no-project --python ">=3.12" python'
+                f' "{runner_path}" "{env_path}"'
             )
-            env_prefix = _env_command_prefix(env_path)
+        else:
+            env_prefix = ""
+            if env_vars:
+                env_path = f"{tarball_path}.env"
+                await _upload(
+                    workspace,
+                    _serialize_env_vars(env_vars),
+                    env_path,
+                )
+                env_prefix = _env_command_prefix(env_path)
 
-        cmd = (
-            f"{env_prefix}mkdir -p {work_dir}"
-            f" && tar xzf {tarball_path} -C {work_dir}"
-            f" && rm -f {tarball_path}"
-            f" && cd {work_dir}"
-            f" && ([ ! -f setup.sh ] || bash setup.sh)"
-            f" && {entrypoint}"
-        )
+            cmd = (
+                f"{env_prefix}mkdir -p {work_dir}"
+                f" && tar xzf {tarball_path} -C {work_dir}"
+                f" && rm -f {tarball_path}"
+                f" && cd {work_dir}"
+                f" && {_setup_step(setup_script_path)}"
+                f" && {entrypoint}"
+            )
 
         logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
         command_id = await _start_bash(workspace, cmd, timeout=timeout)
@@ -400,10 +450,15 @@ async def execute_in_context(
         return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
     finally:
         if env_path is not None:
+            remove_cmd = (
+                f'del /f /q "{env_path}"'
+                if windows
+                else f"rm -f -- {_shell_quote(env_path)}"
+            )
             try:
                 exit_code, _, stderr = await _bash(
                     workspace,
-                    f"rm -f -- {_shell_quote(env_path)}",
+                    remove_cmd,
                     timeout=int(get_config().http.http_timeout),
                 )
                 if exit_code != 0:
@@ -441,6 +496,7 @@ async def run_automation(
     run_id: str | None = None,
     keep_sandbox: bool = False,
     work_dir: str = DEFAULT_WORK_DIR,
+    setup_script_path: str | None = None,
 ) -> AutomationResult:
     """Execute an automation end-to-end in a fresh sandbox (blocking).
 
@@ -449,7 +505,8 @@ async def run_automation(
 
     1. Create sandbox and wait until RUNNING.
     2. Get tarball into sandbox (upload bytes OR download from URL).
-    3. Extract it, run ``setup.sh`` (if present), then run *entrypoint*.
+    3. Extract it, run the setup script (see ``_setup_step``), then run
+       *entrypoint*.
     4. Wait for completion and return the result.
     5. Delete the sandbox (unless *keep_sandbox* is True).
 
@@ -457,10 +514,13 @@ async def run_automation(
     (downloaded directly inside sandbox via curl). URLs avoid downloading
     untrusted/large files on the automation service.
 
-    *env_vars* are exported before setup.sh and the entrypoint run,
-    so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
-    The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
-    **always** injected so the SDK's ``local_agent_server_mode`` works.
+    *env_vars* are exported before the setup script and the entrypoint run,
+    so setup can consume injected values such as ``AUTOMATION_API_URL``.
+    The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``,
+    ``AUTOMATION_CALLBACK_API_KEY``) are **always** injected so the SDK's
+    ``local_agent_server_mode`` works and scripts can sign their completion
+    callback, along with ``AUTOMATION_RUN_MODE=cloud``. ``AGENT_SERVER_URL``
+    is not: stored scripts read it as running on a local Agent Canvas.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -511,6 +571,12 @@ async def run_automation(
             # get_llm() / get_secrets() inside the sandbox.
             env_vars.setdefault("SANDBOX_ID", sandbox_id)
             env_vars.setdefault("SESSION_API_KEY", session_key)
+            # The per-run API key used for callbacks is the same one the SDK
+            # authenticates with. AGENT_SERVER_URL is not exported: scripts
+            # read it as running on a local Agent Canvas.
+            env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", api_key)
+            # This helper always runs in a cloud sandbox; say so.
+            env_vars.setdefault("AUTOMATION_RUN_MODE", "cloud")
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):
@@ -534,7 +600,7 @@ async def run_automation(
                 f"{env_prefix}mkdir -p {work_dir}"
                 f" && tar xzf {TARBALL_PATH} -C {work_dir}"
                 f" && cd {work_dir}"
-                f" && ([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {_setup_step(setup_script_path)}"
                 f" && {entrypoint}"
             )
 
@@ -574,6 +640,30 @@ async def run_automation(
             if not keep_sandbox:
                 logger.info("Deleting sandbox", extra=_log_ctx())
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
+
+
+def _is_windows_path(path: str) -> bool:
+    """Return True for a drive-qualified or UNC path such as ``C:\\runs\\1``."""
+    return not path.startswith("/") and bool(PureWindowsPath(path).drive)
+
+
+DEFAULT_SETUP_SCRIPT = "setup.sh"
+
+
+def _setup_step(setup_script_path: str | None) -> str:
+    """Shell fragment that runs the automation's setup script.
+
+    The default root ``setup.sh`` stays optional, as it always has been. A
+    script the automation names explicitly must exist: skipping it silently
+    only moves the failure to the entrypoint, with nothing pointing at setup.
+    """
+    if not setup_script_path or setup_script_path == DEFAULT_SETUP_SCRIPT:
+        return f"([ ! -f {DEFAULT_SETUP_SCRIPT} ] || bash {DEFAULT_SETUP_SCRIPT})"
+    path = _shell_quote(setup_script_path)
+    missing = _shell_quote(
+        f"setup script not found in the tarball: {setup_script_path}"
+    )
+    return f"([ -f {path} ] || {{ echo {missing} >&2; exit 1; }}) && bash {path}"
 
 
 def _shell_quote(s: str) -> str:

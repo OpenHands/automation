@@ -58,6 +58,23 @@ class AutomationState(StrEnum):
     DRAFT = "DRAFT"
 
 
+class AutomationRunAsKind(StrEnum):
+    """What kind of identity an automation runs as (``Automation.user_id``)."""
+
+    USER = "user"
+    SERVICE = "service"
+
+
+class AutomationChangeActorKind(StrEnum):
+    """Who made a recorded change to an automation."""
+
+    USER = "user"
+    SERVICE = "service"
+    GIT_SYNC = "git_sync"
+    # The service itself: the scheduler, the watchdog, the unhealthy check.
+    SYSTEM = "system"
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -65,8 +82,25 @@ class Automation(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # SERVICE: user_id is a service account of the org. Managers (not the
+    # service account itself) may then edit and enable the automation.
+    run_as_kind: Mapped[AutomationRunAsKind] = mapped_column(
+        Enum(AutomationRunAsKind, native_enum=False, length=16),
+        nullable=False,
+        default=AutomationRunAsKind.USER,
+        server_default=AutomationRunAsKind.USER.name,  # ORM stores member names
+    )
+    # The person who created the automation. Set once on create; a run-as
+    # change keeps it. Every create path sets it; the default (the run-as user)
+    # is right for an automation created to run as its creator.
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        nullable=False,
+        default=lambda ctx: ctx.get_current_parameters()["user_id"],
+    )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     telemetry_distinct_id: Mapped[str | None] = mapped_column(
         String(256), nullable=True
     )
@@ -99,6 +133,12 @@ class Automation(Base):
     # triggering event payload when an event run is created.
     observability_associations: Mapped[dict[str, str] | None] = mapped_column(
         JSON, nullable=True
+    )
+
+    # User-facing labels for grouping and filtering, normalized by tags.py.
+    # Never NULL, so the tag facet query can expand every row.
+    tags: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'")
     )
 
     # Path to SDK code tarball (e.g., S3 or GCS URL)
@@ -153,8 +193,15 @@ class Automation(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Every created_at in this module is written from Python (utcnow, with
+    # microseconds); CURRENT_TIMESTAMP is only the fallback for raw SQL. SQLite
+    # stores the server default in whole seconds, so same-second rows would tie
+    # in newest-first lists and compare wrongly against another table's
+    # created_at (e.g. runs vs. the last disable event in utils/unhealthy.py).
+    # Keep one clock for all of them.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -253,6 +300,22 @@ class AutomationRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # When a run blocked by a transient limit (org concurrency cap, daily
+    # sandbox quota) may be dispatched again. NULL on every other run. A
+    # deferred run stays PENDING with this set in the future; the dispatch poll
+    # skips it until the timestamp passes. Cleared when the run is claimed.
+    deferred_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # How many times this run has been deferred by a transient limit. Drives
+    # the bounded exponential backoff between deferrals. Reset to 0 on the
+    # RUNNING transition would lose it, so it lives on the row, not in
+    # status_detail (which is cleared when the run starts).
+    deferral_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
     # The agent-server BashCommand id for this run's dispatched bash chain.
     # Stored so the verifier can filter BashOutput events by this specific
     # command and avoid sampling output from concurrent bash activity on a
@@ -264,6 +327,10 @@ class AutomationRun(Base):
     trigger_source: Mapped[str | None] = mapped_column(
         String(32), nullable=True, index=True
     )
+
+    # The person who started a manual run. Null for cron and event runs, and
+    # for runs from before it was recorded.
+    triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     # Integration event row that created this run, for event-triggered runs.
     trigger_event_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -304,6 +371,7 @@ class AutomationRun(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -327,6 +395,14 @@ class AutomationRun(Base):
             postgresql_where=(status == AutomationRunStatus.PENDING),
         ),
         Index("ix_automation_runs_status", "status"),
+        # Partial: NULL on nearly every row (only limit-deferred runs stamp it),
+        # so a full index would be almost all NULLs.
+        Index(
+            "ix_automation_runs_deferred_until",
+            "deferred_until",
+            postgresql_where=(deferred_until.isnot(None)),
+            sqlite_where=(deferred_until.isnot(None)),
+        ),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
         Index("ix_automation_runs_status_trigger_source", "status", "trigger_source"),
@@ -392,6 +468,7 @@ class AutomationDraft(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -437,6 +514,7 @@ class AutomationDisableEvent(Base):
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
         index=True,
@@ -447,6 +525,53 @@ class AutomationDisableEvent(Base):
         back_populates="disable_events",
     )
     run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
+
+
+class AutomationChangeEvent(Base):
+    """Audit record of who changed an automation and which fields.
+
+    Holds field NAMES only, never values, so a prompt, secret or URL cannot
+    leak through the audit trail. One row per automation per transaction,
+    written by the ``before_flush`` hook in ``utils/change_events.py``: every
+    ORM insert, update and soft delete is recorded, with no call at the write
+    site. Core ``update(Automation)`` statements bypass the hook; the two that
+    disable an automation call ``record_core_disable``.
+
+    ``automation_id`` has no foreign key, so a row outlives its automation.
+    ``org_id`` is copied from the automation, so reads stay org-scoped without
+    a join.
+    """
+
+    __tablename__ = "automation_change_events"
+    __table_args__ = (
+        Index(
+            "ix_automation_change_events_automation_created",
+            "automation_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # NULL for Git sync, which has no acting user.
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    actor_kind: Mapped[AutomationChangeActorKind] = mapped_column(
+        Enum(AutomationChangeActorKind, native_enum=False, length=16),
+        nullable=False,
+    )
+    # create | update | enable | disable | run_as_change | delete, git_sync_ prefixed
+    # for Git sync, or the label a session set (utils/change_events.py)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    changed_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    # Each flush sets its own microsecond value, so a create and an update in
+    # the same second still list newest first (see Automation.created_at).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
 
 
 class TarballUpload(Base):
@@ -481,6 +606,7 @@ class TarballUpload(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -517,9 +643,10 @@ class CustomWebhook(Base):
     - Generic: "X-Signature-256" (default)
 
     The event_id_header field names the HTTP header carrying the provider's own
-    delivery id, used to drop redeliveries. It is optional: a source that does
-    not identify its deliveries leaves it NULL, and its events are recorded and
-    routed but never deduplicated.
+    delivery id, used to drop redeliveries. Alternatively, event_id_expr extracts
+    an ID from the verified body. With neither configured, events are recorded
+    and routed but never deduplicated. admission_expr optionally rejects a
+    verified delivery before storage; acknowledgement selects a fixed response.
     """
 
     __tablename__ = "custom_webhooks"
@@ -573,15 +700,23 @@ class CustomWebhook(Base):
     )
 
     # HTTP header naming the provider's own delivery id, used to drop
-    # redeliveries (e.g. GitHub's "X-GitHub-Delivery"). NULL means this source
-    # does not identify its deliveries: events are recorded and routed, never
-    # deduplicated. Optional so a webhook can opt in to the existing
+    # redeliveries (e.g. GitHub's "X-GitHub-Delivery"). Without this or a body-ID
+    # expression, events are recorded and routed but never deduplicated.
+    # Optional so a webhook can opt in to the existing
     # `integration_events` dedupe path without the router hard-coding a source.
     event_id_header: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Optional verified-body ID and source admission expressions. NULL retains
+    # legacy header-only deduplication and per-automation routing filters.
+    event_id_expr: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    admission_expr: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    # NULL selects the existing event metadata response.
+    acknowledgement: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -673,6 +808,7 @@ class AutomationServiceMetadata(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -710,6 +846,7 @@ class AutomationKVMeta(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -764,6 +901,7 @@ class AutomationKV(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -829,6 +967,7 @@ class AutomationGitSyncState(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
@@ -898,6 +1037,7 @@ class AutomationGitSyncOrgConfig(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )

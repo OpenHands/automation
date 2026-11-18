@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationRun,
     AutomationRunStatus,
     AutomationState,
@@ -438,6 +439,16 @@ class TestPollAndSchedule:
             invalid_automation = result.scalars().one()
             assert invalid_automation.enabled is False
             assert invalid_automation.last_polled_at is not None
+            (event,) = await session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == invalid_id,
+                    AutomationChangeEvent.action == "disable",
+                )
+            )
+            assert (event.actor_kind, event.changed_fields) == (
+                "system",
+                ["enabled", "state"],
+            )
 
     async def test_poll_excludes_disabled(self, async_session_factory):
         """Disabled automations are not returned."""

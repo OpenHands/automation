@@ -23,7 +23,7 @@ from openhands.automation.utils import utcnow
 from openhands.automation.utils.agent_server import VerificationResult
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
-    _should_cleanup_sandbox_after_terminal,
+    _should_cleanup_after_terminal,
     _verify_and_mark_run,
     cleanup_due_sandboxes,
     mark_stale_runs,
@@ -40,10 +40,30 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def _create_mock_backend(verification_result: VerificationResult) -> MagicMock:
     """Create a mock backend with configured verification result."""
     mock_backend = MagicMock()
+    mock_backend.is_local_mode = False
     mock_backend.verify_run = AsyncMock(return_value=verification_result)
     mock_backend.cleanup_after_verification = AsyncMock()
     mock_backend.get_api_key = AsyncMock(return_value="test-api-key")
     return mock_backend
+
+
+def _local_backend() -> MagicMock:
+    backend = MagicMock()
+    backend.is_local_mode = True
+    return backend
+
+
+def _cloud_backend() -> MagicMock:
+    backend = MagicMock()
+    backend.is_local_mode = False
+    return backend
+
+
+def _sandboxless_run() -> MagicMock:
+    run = MagicMock(spec=AutomationRun)
+    run.sandbox_id = None
+    run.subject_key = None
+    return run
 
 
 @pytest.fixture
@@ -357,6 +377,121 @@ class TestVerifyAndMarkRunFirstRunOutcome:
             first_run = automation.preset_metadata["first_run"]
             assert first_run["status"] == "failure"
             assert first_run["failure_stage"] == "watchdog"
+
+
+class _FakeTelemetryResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeTelemetryClient:
+    """Stand-in for the external PostHog HTTP transport only."""
+
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url: str, json: dict) -> _FakeTelemetryResponse:
+        self.posts.append((url, json))
+        return _FakeTelemetryResponse()
+
+
+class TestVerifyAndMarkRunTelemetry:
+    """Terminal watchdog failures emit bounded, categorized telemetry."""
+
+    @pytest.mark.parametrize(
+        ("exit_code", "expected_kind"),
+        [(1, "execution_error"), (-1, "timeout")],
+    )
+    @pytest.mark.asyncio
+    async def test_verified_failure_emits_categorized_telemetry(
+        self, monkeypatch, mock_settings, exit_code, expected_kind
+    ):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.orm import selectinload
+
+        from openhands.automation import telemetry
+        from openhands.automation.models import Base
+
+        monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+        monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+        clear_config_cache()
+        fake_client = _FakeTelemetryClient()
+        monkeypatch.setattr(telemetry, "_telemetry_http_client", fake_client)
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with session_factory() as session:
+                automation = Automation(
+                    user_id=TEST_USER_ID,
+                    org_id=TEST_ORG_ID,
+                    name="Telemetry Automation",
+                    trigger={"type": "cron", "schedule": "* * * * *"},
+                    tarball_path="s3://bucket/code.tar.gz",
+                    entrypoint="uv run main.py",
+                    enabled=True,
+                    timeout=60,
+                )
+                session.add(automation)
+                await session.commit()
+                now = utcnow()
+                run = AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.RUNNING,
+                    sandbox_id="test-sandbox-123",
+                    started_at=now - timedelta(minutes=5),
+                    timeout_at=now - timedelta(minutes=1),
+                )
+                session.add(run)
+                await session.commit()
+                run_id = run.id
+
+            verification = VerificationResult(
+                verified=True,
+                success=False,
+                exit_code=exit_code,
+                stdout="",
+                stderr="boom token=sekrit",
+            )
+            mock_backend = _create_mock_backend(verification)
+            with patch(
+                "openhands.automation.watchdog.get_backend",
+                return_value=mock_backend,
+            ):
+                async with session_factory() as session:
+                    run = (
+                        (
+                            await session.execute(
+                                select(AutomationRun)
+                                .options(selectinload(AutomationRun.automation))
+                                .where(AutomationRun.id == run_id)
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                    assert run is not None
+                    result = await _verify_and_mark_run(session, run, mock_settings)
+                    await session.commit()
+
+            assert result is True
+            assert len(fake_client.posts) == 1
+            _, payload = fake_client.posts[0]
+            assert payload["event"] == "automation_run_failed"
+            assert payload["distinct_id"] == str(TEST_USER_ID)
+            properties = payload["properties"]
+            assert properties["failure_kind"] == expected_kind
+            assert properties["failure_stage"] == "watchdog"
+            assert properties["trigger_source"] == "watchdog"
+            assert properties["trigger_type"] == "cron"
+            assert properties["run_status"] == "FAILED"
+            assert properties["deployment_mode"] == "cloud"
+            assert "sekrit" not in str(properties)
+        finally:
+            await engine.dispose()
+            clear_config_cache()
 
 
 class TestVerifyAndMarkRunVerificationFailed:
@@ -829,13 +964,23 @@ class TestSubjectOwningRunsKeepTheirSandbox:
         run = MagicMock(spec=AutomationRun)
         run.sandbox_id = "sbx-1"
         run.subject_key = "T06P212QSEA/C123/1755000000.000100"
-        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=True) is False
+        assert (
+            _should_cleanup_after_terminal(
+                run, keep_alive=True, backend=_cloud_backend()
+            )
+            is False
+        )
 
     def test_an_ordinary_run_is_still_cleaned_up(self):
         run = MagicMock(spec=AutomationRun)
         run.sandbox_id = "sbx-1"
         run.subject_key = None
-        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=False) is True
+        assert (
+            _should_cleanup_after_terminal(
+                run, keep_alive=False, backend=_cloud_backend()
+            )
+            is True
+        )
 
     @pytest.mark.asyncio
     async def test_watchdog_does_not_delete_the_conversations_sandbox(
@@ -872,6 +1017,95 @@ class TestSubjectOwningRunsKeepTheirSandbox:
             # about, and nothing has released it.
             assert run.subject_key == "T06P212QSEA/C123/1755000000.000100"
             assert run.subject_released_at is None
+
+
+class TestLocalRunsReachTerminalCleanup:
+    """#422: a local run has no sandbox id, so the sandbox test excluded it."""
+
+    def test_a_local_run_without_a_sandbox_is_cleaned_up(self):
+        assert (
+            _should_cleanup_after_terminal(
+                _sandboxless_run(), keep_alive=None, backend=_local_backend()
+            )
+            is True
+        )
+
+    def test_keep_alive_still_holds_a_local_workspace(self):
+        assert (
+            _should_cleanup_after_terminal(
+                _sandboxless_run(), keep_alive=True, backend=_local_backend()
+            )
+            is False
+        )
+
+    @staticmethod
+    async def _run_local(async_session_factory, run_id, settings, verification):
+        backend = _create_mock_backend(verification)
+        backend.is_local_mode = True
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.sandbox_id = None
+            run.started_at = utcnow() - timedelta(hours=2)
+            await session.commit()
+        with patch("openhands.automation.watchdog.get_backend", return_value=backend):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                await _verify_and_mark_run(session, run, settings)
+                await session.commit()
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_still_running_local_workspace_is_left_alone(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        run_id = automation_with_run["run_id"]
+        backend = await self._run_local(
+            async_session_factory,
+            run_id,
+            mock_settings,
+            VerificationResult(verified=False, error="Command still running"),
+        )
+
+        backend.cleanup_after_verification.assert_not_called()
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_local_run_is_still_cleaned_up(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        backend = await self._run_local(
+            async_session_factory,
+            automation_with_run["run_id"],
+            mock_settings,
+            VerificationResult(verified=False, error="Sandbox not found"),
+        )
+
+        backend.cleanup_after_verification.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_delay_does_not_strand_a_local_workspace(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        backend = await self._run_local(
+            async_session_factory,
+            automation_with_run["run_id"],
+            mock_settings.model_copy(update={"sandbox_cleanup_delay_seconds": 600}),
+            VerificationResult(
+                verified=True, success=True, exit_code=0, stdout="ok", stderr=""
+            ),
+        )
+
+        backend.cleanup_after_verification.assert_called_once()
+
+    def test_a_cloud_run_without_a_sandbox_is_unchanged(self):
+        assert (
+            _should_cleanup_after_terminal(
+                _sandboxless_run(), keep_alive=None, backend=_cloud_backend()
+            )
+            is False
+        )
 
 
 @pytest.mark.asyncio

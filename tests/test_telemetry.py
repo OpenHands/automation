@@ -1,3 +1,4 @@
+import importlib.metadata
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
@@ -17,6 +18,7 @@ from openhands.automation.middleware import (
 from openhands.automation.models import (
     Automation,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationServiceMetadata,
     Base,
@@ -24,7 +26,10 @@ from openhands.automation.models import (
 from openhands.automation.schemas import TelemetryConsentRequest
 from openhands.automation.telemetry_router import set_telemetry_consent
 from openhands.automation.utils.run import create_pending_run
-from openhands.automation.utils.version import get_server_version_info
+from openhands.automation.utils.version import (
+    SDK_PACKAGE_NAME,
+    get_server_version_info,
+)
 from openhands.automation.utils.webhook import create_automation_run
 
 
@@ -35,9 +40,11 @@ class _Response:
 
 class _MockAsyncClient:
     posts: ClassVar[list[tuple[str, dict]]] = []
+    instances: ClassVar[list["_MockAsyncClient"]] = []
 
     def __init__(self, *args, **kwargs) -> None:
-        pass
+        self.is_closed = False
+        self.instances.append(self)
 
     async def __aenter__(self):
         return self
@@ -48,6 +55,9 @@ class _MockAsyncClient:
     async def post(self, url: str, json: dict) -> _Response:
         self.posts.append((url, json))
         return _Response()
+
+    async def aclose(self) -> None:
+        self.is_closed = True
 
 
 def _automation(telemetry_distinct_id: str | None = None) -> Automation:
@@ -102,6 +112,254 @@ def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
     assert properties["duration_ms"] == 2000
 
 
+@pytest.mark.parametrize(
+    ("error_detail", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("Timed out: verification failed: boom", "verification_failed"),
+        ("Timed out: sandbox stalled", "timeout"),
+        ("Cancelled by user", "cancelled"),
+        ("Failed to get execution context", "dispatch_error"),
+        ("Script exited with code 1", "execution_error"),
+    ],
+)
+def test_failure_kind_from_error_detail(error_detail, expected):
+    assert telemetry._failure_kind_from_error_detail(error_detail) == expected
+
+
+def test_base_properties_includes_derived_failure_kind(monkeypatch):
+    monkeypatch.setattr(
+        telemetry,
+        "get_server_version_info",
+        lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
+    )
+    automation = _automation()
+    run = _run(automation)
+    run.status = AutomationRunStatus.FAILED
+    run.error_detail = "Timed out: sandbox stalled; secret path /home/user/x"
+
+    properties = telemetry._base_properties(
+        request_context=TelemetryRequestContext(),
+        user=None,
+        automation=automation,
+        run=run,
+        backend_distinct_id="automation-backend:test",
+    )
+
+    assert properties["failure_kind"] == "timeout"
+    assert "secret path" not in str(properties.values())
+
+
+async def _capture_payloads(monkeypatch, captures):
+    """Run captures through the real telemetry path; only PostHog HTTP is faked."""
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+    for event, kwargs in captures:
+        await telemetry.capture_automation_event(event, **kwargs)
+    return [payload for _, payload in _MockAsyncClient.posts]
+
+
+def _failed_run(automation, error_detail=None):
+    run = _run(automation)
+    run.status = AutomationRunStatus.FAILED
+    run.error_detail = error_detail
+    return run
+
+
+@pytest.mark.parametrize(
+    ("trigger_source", "expected_stage", "expected_kind"),
+    [
+        ("callback", "execution", "execution_error"),
+        ("dispatcher", "dispatch", "dispatch_error"),
+        ("watchdog", "watchdog", "execution_error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_event_without_error_detail_is_categorized(
+    monkeypatch, trigger_source, expected_stage, expected_kind
+):
+    """A terminal failure with no stored error text still gets bounded stage/kind."""
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_failed",
+                {
+                    "automation": automation,
+                    "run": _failed_run(automation),
+                    "properties": {"trigger_source": trigger_source},
+                },
+            )
+        ],
+    )
+
+    assert len(payloads) == 1
+    properties = payloads[0]["properties"]
+    assert properties["failure_stage"] == expected_stage
+    assert properties["failure_kind"] == expected_kind
+    assert properties["trigger_source"] == trigger_source
+    assert properties["run_status"] == "FAILED"
+    assert properties["deployment_mode"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_failed_event_keeps_explicit_failure_kind(monkeypatch):
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_failed",
+                {
+                    "automation": automation,
+                    "run": _failed_run(automation, "Timed out: sandbox stalled"),
+                    "properties": {
+                        "trigger_source": "watchdog",
+                        "failure_kind": "verification_failed",
+                    },
+                },
+            )
+        ],
+    )
+
+    properties = payloads[0]["properties"]
+    assert properties["failure_kind"] == "verification_failed"
+    assert properties["failure_stage"] == "watchdog"
+
+
+@pytest.mark.asyncio
+async def test_completed_event_has_no_failure_properties(monkeypatch):
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_completed",
+                {
+                    "automation": automation,
+                    "run": _run(automation),
+                    "properties": {"trigger_source": "callback"},
+                },
+            )
+        ],
+    )
+
+    properties = payloads[0]["properties"]
+    assert "failure_kind" not in properties
+    assert "failure_stage" not in properties
+
+
+@pytest.mark.asyncio
+async def test_failed_event_never_leaks_raw_error_detail(monkeypatch):
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_failed",
+                {
+                    "automation": automation,
+                    "run": _failed_run(
+                        automation,
+                        "Timed out: token=sekrit at /home/user/private",
+                    ),
+                    "properties": {"trigger_source": "callback"},
+                },
+            )
+        ],
+    )
+
+    properties = payloads[0]["properties"]
+    assert properties["failure_kind"] == "timeout"
+    assert properties["failure_stage"] == "execution"
+    assert "sekrit" not in str(properties)
+    assert "private" not in str(properties)
+
+
+@pytest.mark.asyncio
+async def test_terminal_events_separate_success_users_from_failure_only(
+    monkeypatch,
+):
+    """Unique users with a success are separable from failure-only users."""
+    successful_user = _automation()
+    failure_only_user = _automation()
+    success_run = _run(successful_user)
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_completed",
+                {
+                    "automation": successful_user,
+                    "run": success_run,
+                    "properties": {"trigger_source": "callback"},
+                },
+            ),
+            (
+                "automation_run_failed",
+                {
+                    "automation": successful_user,
+                    "run": _failed_run(successful_user),
+                    "properties": {"trigger_source": "watchdog"},
+                },
+            ),
+            (
+                "automation_run_failed",
+                {
+                    "automation": failure_only_user,
+                    "run": _failed_run(failure_only_user),
+                    "properties": {"trigger_source": "dispatcher"},
+                },
+            ),
+        ],
+    )
+
+    events_by_user: dict[str, set[str]] = {}
+    for payload in payloads:
+        events_by_user.setdefault(payload["distinct_id"], set()).add(payload["event"])
+    with_success = {
+        user
+        for user, events in events_by_user.items()
+        if "automation_run_completed" in events
+    }
+    failure_only = set(events_by_user) - with_success
+
+    assert with_success == {str(successful_user.user_id)}
+    assert failure_only == {str(failure_only_user.user_id)}
+    for payload in payloads:
+        if payload["event"] == "automation_run_failed":
+            assert payload["properties"]["failure_stage"]
+            assert payload["properties"]["failure_kind"]
+
+
+def test_base_properties_report_run_as_kind(monkeypatch):
+    monkeypatch.setattr(
+        telemetry,
+        "get_server_version_info",
+        lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
+    )
+    automation = _automation()
+    automation.run_as_kind = AutomationRunAsKind.SERVICE
+
+    properties = telemetry._base_properties(
+        request_context=TelemetryRequestContext(),
+        user=None,
+        automation=automation,
+        run=None,
+        backend_distinct_id="automation-backend:test",
+    )
+
+    assert properties["run_as_kind"] == "service"
+
+
 @pytest.mark.asyncio
 async def test_capture_contains_property_building_errors(monkeypatch):
     monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
@@ -133,8 +391,40 @@ def _reset_config(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     clear_config_cache()
     _MockAsyncClient.posts.clear()
+    _MockAsyncClient.instances.clear()
+    monkeypatch.setattr(telemetry, "_telemetry_http_client", None)
     yield
     clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_capture_reuses_shared_http_client(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    await telemetry.capture_automation_event("automation_created")
+    await telemetry.capture_automation_event("automation_event_received")
+
+    assert len(_MockAsyncClient.instances) == 1
+    assert len(_MockAsyncClient.posts) == 2
+
+
+@pytest.mark.asyncio
+async def test_close_telemetry_http_client_allows_clean_restart(monkeypatch):
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+    first_client = telemetry.get_telemetry_http_client()
+
+    await telemetry.close_telemetry_http_client()
+
+    assert first_client.is_closed is True
+    second_client = telemetry.get_telemetry_http_client()
+    assert second_client is not first_client
 
 
 @pytest.mark.asyncio
@@ -613,3 +903,64 @@ async def test_backend_distinct_id_is_db_backed_and_stable():
         assert stored == first
     finally:
         await engine.dispose()
+
+
+def test_server_version_properties_cache_package_metadata_lookup(monkeypatch):
+    calls = 0
+
+    def package_version(name: str) -> str:
+        nonlocal calls
+        calls += 1
+        assert name == SDK_PACKAGE_NAME
+        return "1.2.3"
+
+    monkeypatch.setattr(importlib.metadata, "version", package_version)
+    telemetry._installed_sdk_version.cache_clear()
+    try:
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+        assert calls == 1
+    finally:
+        telemetry._installed_sdk_version.cache_clear()
+
+
+def test_server_version_properties_do_not_cache_missing_sdk(monkeypatch):
+    def missing_package_version(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing_package_version)
+    telemetry._installed_sdk_version.cache_clear()
+    try:
+        assert telemetry._server_version_properties()["sdk_version"] == "unknown"
+
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.2.3")
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+    finally:
+        telemetry._installed_sdk_version.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_override_labels_cloud_mode_events_as_local(
+    monkeypatch, request
+):
+    request.addfinalizer(clear_config_cache)
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    monkeypatch.setenv("AUTOMATION_TELEMETRY_DEPLOYMENT_MODE", "self_hosted")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:ohe"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+    automation = _automation()
+
+    await telemetry.capture_automation_event(
+        "automation_created", automation=automation
+    )
+
+    _, payload = _MockAsyncClient.posts[-1]
+    properties = payload["properties"]
+    assert properties["deployment_mode"] == "self_hosted"
+    assert properties["deployment_kind"] == "local"
+    assert properties["cloud_user_id"] == str(automation.user_id)

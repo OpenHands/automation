@@ -23,7 +23,11 @@ if TYPE_CHECKING:
 
 
 DEFAULT_VERIFIER: Final[str] = "hmac_sha256_hex"
+TEAMS_VERIFIER: Final[str] = "teams_hmac_sha256"
 DEFAULT_BUILTIN_SIGNATURE_HEADER: Final[str] = "X-Hub-Signature-256"
+# The OpenHands server forwards every built-in source's delivery id in GitHub's
+# header name, as it signs every source into GitHub's signature header.
+DEFAULT_BUILTIN_EVENT_ID_HEADER: Final[str] = "X-GitHub-Delivery"
 
 STANDARD_WEBHOOKS_TOLERANCE_SECONDS: Final[int] = 300
 STANDARD_WEBHOOKS_ID_HEADER: Final[str] = "webhook-id"
@@ -268,17 +272,61 @@ class SlackV0Verifier:
         return hmac.compare_digest(signature.encode("utf-8"), expected)
 
 
+def teams_webhook_key(secret: str) -> bytes:
+    """Strictly decode a provider-issued Teams token, without raw-byte fallback."""
+    try:
+        key = base64.b64decode(secret, validate=True)
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("Teams requires a valid base64 security token") from exc
+    if not key:
+        raise ValueError("Teams requires a nonempty base64 security token")
+    return key
+
+
+@dataclass(frozen=True, slots=True)
+class TeamsHmacSha256Verifier:
+    """Teams Outgoing Webhooks: Authorization: HMAC <base64 digest>.
+
+    The raw activity body (and thus a body-derived delivery ID) is signed.
+    There is no timestamp freshness check; replay protection lasts only while
+    the deduplication record is retained.
+    """
+
+    def verify(
+        self,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        secret: str,
+        signature_header: str,
+    ) -> bool:
+        signature = get_header(headers, signature_header)
+        if not signature or not signature.startswith("HMAC "):
+            return False
+        try:
+            candidate = base64.b64decode(signature[5:], validate=True)
+            key = teams_webhook_key(secret)
+        except (ValueError, UnicodeError):
+            return False
+        expected = hmac.new(key, body, hashlib.sha256).digest()
+        return hmac.compare_digest(candidate, expected)
+
+
 VERIFIERS.update(
     {
         "hmac_sha256_hex": HmacSha256HexVerifier(),
         "standard_webhooks": StandardWebhooksVerifier(),
         "slack_v0": SlackV0Verifier(),
+        TEAMS_VERIFIER: TeamsHmacSha256Verifier(),
     }
 )
 
 
 def _register_builtin_providers() -> None:
     """Register the built-in providers. Called at module load."""
+    from openhands.automation.event_schemas.azure_devops import (
+        parse_azure_devops_event,
+    )
     from openhands.automation.event_schemas.bitbucket_data_center import (
         parse_bitbucket_data_center_event,
     )
@@ -286,12 +334,19 @@ def _register_builtin_providers() -> None:
     from openhands.automation.event_schemas.jira_dc import parse_jira_dc_event
 
     # All forwarded by the OpenHands server, which signs with the single shared
-    # AUTOMATION_WEBHOOK_SECRET into GitHub's header name. Only GitHub names its
-    # deliveries; the other two are recorded without being deduplicated.
+    # AUTOMATION_WEBHOOK_SECRET into GitHub's header name and names the
+    # delivery the same way: GitHub's own delivery id, Bitbucket DC's request
+    # id, the body signature it already dedupes Jira DC on. It sends no id for
+    # Azure DevOps, whose events are recorded without being deduplicated.
     for source, parse, event_id_header in (
-        ("bitbucket_data_center", parse_bitbucket_data_center_event, None),
-        ("github", parse_github_event_auto, "X-GitHub-Delivery"),
-        ("jira_dc", parse_jira_dc_event, None),
+        ("azure_devops", parse_azure_devops_event, None),
+        (
+            "bitbucket_data_center",
+            parse_bitbucket_data_center_event,
+            DEFAULT_BUILTIN_EVENT_ID_HEADER,
+        ),
+        ("github", parse_github_event_auto, DEFAULT_BUILTIN_EVENT_ID_HEADER),
+        ("jira_dc", parse_jira_dc_event, DEFAULT_BUILTIN_EVENT_ID_HEADER),
     ):
         register_provider(
             Provider(

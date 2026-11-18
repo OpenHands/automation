@@ -5,6 +5,7 @@ import pytest
 from openhands.automation.event_schemas import (
     parse_event,
 )
+from openhands.automation.event_schemas.azure_devops import AzureDevOpsEvent
 from openhands.automation.event_schemas.bitbucket_data_center import (
     BitbucketDataCenterEvent,
 )
@@ -17,6 +18,7 @@ from openhands.automation.event_schemas.github import (
     PullRequestReviewPayload,
     PushPayload,
     ReleasePayload,
+    WorkflowRunPayload,
     detect_github_event_type,
     parse_github_event_auto,
 )
@@ -260,6 +262,41 @@ class TestTriggerMatching:
             "sender": {"id": 1, "login": "testuser"},
         }
 
+    def _workflow_run_payload(
+        self, action: str = "completed", conclusion: str | None = "success"
+    ) -> dict:
+        """Create a workflow_run payload dict."""
+        return {
+            "action": action,
+            "workflow_run": {
+                "id": 289782451,
+                "name": "CI",
+                "path": ".github/workflows/ci.yml",
+                "head_branch": "main",
+                "head_sha": "3484a3fb816e0859fd6e1cea078d76385ff50625",
+                "event": "push",
+                "status": "completed" if action == "completed" else "queued",
+                "conclusion": conclusion,
+                "run_number": 163,
+                "run_attempt": 1,
+                "workflow_id": 2823525,
+                "html_url": "https://github.com/org/test-repo/actions/runs/289782451",
+                "pull_requests": [],
+            },
+            "workflow": {
+                "id": 2823525,
+                "name": "CI",
+                "path": ".github/workflows/ci.yml",
+            },
+            "repository": {
+                "id": 123,
+                "name": "test-repo",
+                "full_name": "org/test-repo",
+                "private": False,
+            },
+            "sender": {"id": 1, "login": "testuser"},
+        }
+
     def test_exact_event_key_match(self):
         """Exact event key should match."""
         payload = self._pr_payload(action="opened")
@@ -296,6 +333,25 @@ class TestTriggerMatching:
             matches_trigger(trigger, "github", "pull_request.opened", payload) is True
         )
         assert matches_trigger(trigger, "github", "issues.opened", payload) is False
+
+    def test_workflow_run_failure_filter_excludes_other_runs(self):
+        """A CI-remediation trigger fires for failed runs only."""
+        trigger = EventTrigger(
+            source="github",
+            on="workflow_run.completed",
+            filter="workflow_run.conclusion == 'failure'",
+        )
+        failed = self._workflow_run_payload(conclusion="failure")
+        succeeded = self._workflow_run_payload(conclusion="success")
+        requested = self._workflow_run_payload(action="requested", conclusion=None)
+
+        assert matches_trigger(trigger, "github", "workflow_run.completed", failed)
+        assert not matches_trigger(
+            trigger, "github", "workflow_run.completed", succeeded
+        )
+        assert not matches_trigger(
+            trigger, "github", "workflow_run.requested", requested
+        )
 
     def test_source_mismatch(self):
         """Different source should not match."""
@@ -607,6 +663,89 @@ class TestCustomWebhookEvent:
         )
         result = matches_trigger(trigger, "stripe", "payment.completed", payload)
         assert result is False
+
+
+def _azure_devops_pull_request_payload(event_type: str) -> dict:
+    """A trimmed Azure DevOps Service Hook payload for a pull request event."""
+    return {
+        "id": "2ab4e3d3-b7a6-425e-92b1-5a9982c1269e",
+        "eventType": event_type,
+        "publisherId": "tfs",
+        "resource": {
+            "repository": {
+                "name": "fabrikam-web",
+                "project": {"name": "Fabrikam Fiber"},
+            },
+            "pullRequestId": 42,
+            "status": "active",
+            "reviewers": [{"displayName": "Reviewer", "vote": 10}],
+        },
+        "resourceContainers": {
+            "account": {"baseUrl": "https://dev.azure.com/fabrikam/"},
+        },
+    }
+
+
+class TestAzureDevOpsEvent:
+    """Tests for Azure DevOps Service Hook events."""
+
+    def test_parse_azure_devops_pull_request_created(self):
+        """Azure DevOps event keys come from eventType."""
+        payload = _azure_devops_pull_request_payload("git.pullrequest.created")
+
+        event = parse_event("azure_devops", payload)
+
+        assert isinstance(event, AzureDevOpsEvent)
+        assert event.source == "azure_devops"
+        assert event.event_key == "git.pullrequest.created"
+        assert event.payload == payload
+
+    def test_parse_azure_devops_pull_request_comment(self):
+        """Pull request comments keep the Service Hook's own event type."""
+        payload = {
+            "eventType": "ms.vss-code.git-pullrequest-comment-event",
+            "resource": {
+                "comment": {"content": "please review"},
+                "pullRequest": {"pullRequestId": 42},
+            },
+        }
+
+        event = parse_event("azure_devops", payload)
+
+        assert event.event_key == "ms.vss-code.git-pullrequest-comment-event"
+
+    def test_azure_devops_trigger_matching_with_filter(self):
+        """Azure DevOps events support wildcards and filters on the raw payload."""
+        payload = _azure_devops_pull_request_payload("git.pullrequest.updated")
+        trigger = EventTrigger(
+            source="azure_devops",
+            on="git.pullrequest.*",
+            filter=(
+                "resource.repository.project.name == 'Fabrikam Fiber' && "
+                "length(resource.reviewers[?vote == `10`]) > `0`"
+            ),
+        )
+        other_repo = EventTrigger(
+            source="azure_devops",
+            on="git.pullrequest.*",
+            filter="resource.repository.name == 'other-repo'",
+        )
+
+        assert (
+            matches_trigger(trigger, "azure_devops", "git.pullrequest.updated", payload)
+            is True
+        )
+        assert (
+            matches_trigger(
+                other_repo, "azure_devops", "git.pullrequest.updated", payload
+            )
+            is False
+        )
+
+    def test_azure_devops_missing_event_type(self):
+        """Azure DevOps events require eventType."""
+        with pytest.raises(ValueError, match="Cannot detect azure_devops event type"):
+            parse_event("azure_devops", {"resource": {"pullRequestId": 42}})
 
 
 class TestJiraDcEvent:
@@ -958,6 +1097,52 @@ class TestGitHubAutoDetection:
         assert isinstance(event, ReleasePayload)
         assert event.event_key == "release.published"
 
+    def test_detect_workflow_run(self):
+        """Detect workflow_run event and keep the fields a CI fix needs."""
+        payload = {
+            **self._base_payload(),
+            "action": "completed",
+            "workflow": {"id": 2823525, "name": "CI"},
+            "workflow_run": {
+                "id": 289782451,
+                "name": "CI",
+                "path": ".github/workflows/ci.yml",
+                "head_branch": "feature",
+                "head_sha": "abc123",
+                "event": "pull_request",
+                "status": "completed",
+                "conclusion": "failure",
+                "run_number": 163,
+                "run_attempt": 2,
+                "workflow_id": 2823525,
+                "html_url": "https://github.com/org/test-repo/actions/runs/289782451",
+                "pull_requests": [
+                    {
+                        "id": 1,
+                        "number": 42,
+                        "url": "https://api.github.com/repos/org/test-repo/pulls/42",
+                        "head": {
+                            "ref": "feature",
+                            "sha": "abc123",
+                            "repo": {"id": 123},
+                        },
+                        "base": {"ref": "main", "sha": "def456", "repo": {"id": 123}},
+                    }
+                ],
+            },
+        }
+
+        assert detect_github_event_type(payload) == "workflow_run"
+
+        event = parse_github_event_auto(payload)
+        assert isinstance(event, WorkflowRunPayload)
+        assert event.event_key == "workflow_run.completed"
+        assert event.workflow_run.conclusion == "failure"
+        assert event.workflow_run.head_branch == "feature"
+        assert event.workflow_run.run_attempt == 2
+        assert event.workflow_run.pull_requests[0].number == 42
+        assert event.workflow_run.pull_requests[0].base.ref == "main"
+
     def test_detect_unknown_raises(self):
         """Unknown payload structure raises ValueError."""
         payload = {
@@ -1004,6 +1189,7 @@ class TestGitHubDetectionRules:
         assert "issue_comment" in supported
         assert "push" in supported
         assert "release" in supported
+        assert "workflow_run" in supported
 
 
 class TestHtmlUrlSurvivesParsing:

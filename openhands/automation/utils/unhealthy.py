@@ -33,6 +33,11 @@ from openhands.automation.models import (
     AutomationRunStatus,
     AutomationState,
 )
+from openhands.automation.utils.change_events import (
+    SYSTEM_ACTOR,
+    record_core_disable,
+    set_audit_actor,
+)
 from openhands.automation.utils.run import skip_pending_runs_for_disabled_automation
 from openhands.automation.utils.time import ensure_utc, utcnow
 
@@ -261,6 +266,8 @@ async def _apply_disable(
     automation = await session.get(Automation, automation_id)
     if automation is not None:
         await mark_git_sync_dirty(session, automation)
+        # The Core update above is invisible to the audit hook.
+        record_core_disable(session, automation)
 
     session.add(
         AutomationDisableEvent(
@@ -335,6 +342,7 @@ async def maybe_disable_unhealthy_automation_after_run(
     """Open a short transaction and maybe auto-disable an automation."""
     try:
         async with session_factory() as session:
+            set_audit_actor(session, SYSTEM_ACTOR)
             disabled = await maybe_disable_unhealthy_automation(
                 session,
                 automation_id,

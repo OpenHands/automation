@@ -43,7 +43,7 @@ Routes: none
   signed instead, see the webhook and events families) and the KV routes
   (which also accept a per-run KV JWT, see the KV family). The probes in F01
   need nothing. The recipes below drive auth through `GET /v1`,
-  `GET /v1/{automation_id}`, `DELETE /v1/uploads/{upload_id}` and the probes.
+  `GET /v1/{automation_id}`, `DELETE /v1/webhooks/{webhook_id}` and the probes.
 - Headers: `X-Session-API-Key: <key>` (what `api --auth key` sends, the
   default), `Authorization: Bearer <key>` (`--auth bearer`), cookies
   `openhands_auth` then legacy `keycloak_auth` (chunks `<name>_1`..`_7`
@@ -118,7 +118,7 @@ Preconditions:
   control-automation api GET /health --auth none --expect 200 --check status eq ok
   control-automation api GET /api/automation/ready --auth none --expect 200
   control-automation api POST /v1/events/46d09c5c-7d7d-585f-8c37-a6b45a3de738/qa-no-such-source --auth none --json '{"type":"qa.ping"}' --expect 404 --check detail eq 'Unknown webhook source: qa-no-such-source'
-  control-automation api POST /v1/webhooks --json '{"name":"qa auth hook","source":"qa-auth-hook","webhook_secret":"qa-auth-hook-secret"}' --expect 201 --check source eq qa-auth-hook --quiet
+  HOOK=$(control-automation api POST /v1/webhooks --json '{"name":"qa auth hook","source":"qa-auth-hook","webhook_secret":"qa-auth-hook-secret"}' --expect 201 --check source eq qa-auth-hook --field id)
   control-automation api POST /v1/events/46d09c5c-7d7d-585f-8c37-a6b45a3de738/qa-auth-hook --auth none --json '{"type":"qa.ping"}' --expect 401 --check detail eq 'Missing signature header: X-Signature-256' --save F02.no-key-routes/unsigned
   control-automation event send qa-auth-hook --secret qa-auth-hook-secret --json '{"type":"qa.ping"}' --expect 200 --save F02.no-key-routes/signed
   ```
@@ -137,12 +137,11 @@ Preconditions:
   control-automation api GET /v1 --auth none --header 'Cookie: openhands_auth=qa-cookie' --expect 200 --check automations len-eq 0
   control-automation api GET "/v1/$LAID" --expect 200 --check id eq "$LAID"
   ```
-- **Permissions (`F02.permissions`).** Deleting an upload needs `manage_automations`, which the stub user lacks; the upload is still there afterwards. The upload is the one `F02.local-identity`'s fixture made.
-  Requires: `F02.local-identity`, `F02.cookie-upstream`
+- **Permissions (`F02.permissions`).** Deleting a custom webhook needs `manage_automations`, which the stub user lacks; the webhook is still there afterwards. The webhook is the one `F02.no-key-routes` registered.
+  Requires: `F02.no-key-routes`, `F02.cookie-upstream`
   ```sh
-  UPID=$(control-automation api GET /v1/uploads --expect 200 --field uploads.0.id)
-  control-automation api DELETE "/v1/uploads/$UPID" --auth none --header 'Cookie: openhands_auth=qa-cookie' --expect 403 --check detail eq 'Requires manage_automations permission' --save F02.permissions/forbidden
-  control-automation api GET "/v1/uploads/$UPID" --expect 200 --check status eq COMPLETED
+  control-automation api DELETE "/v1/webhooks/$HOOK" --auth none --header 'Cookie: openhands_auth=qa-cookie' --expect 403 --check detail eq 'Requires manage_automations permission' --save F02.permissions/forbidden
+  control-automation api GET "/v1/webhooks/$HOOK" --expect 200 --check source eq qa-auth-hook
   ```
 - **X-Org-Id on the upstream path (`F02.org-header`).** A malformed org header is refused before upstream; a UUID is forwarded.
   Requires: `F02.cookie-upstream`

@@ -8,6 +8,7 @@ sandbox. Sending the turn is stubbed; `test_conversation_turn.py` covers it.
 import asyncio
 import json
 import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -31,6 +32,7 @@ from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.models import (
     Automation,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
 )
 from openhands.automation.schemas import (
@@ -41,6 +43,7 @@ from openhands.automation.subjects import (
     conversation_id_for,
 )
 from openhands.automation.utils.conversation_turn import compose_turn
+from openhands.automation.utils.run import expire_aged_deferred_runs
 from openhands.automation.utils.time import utcnow
 
 
@@ -77,9 +80,11 @@ def make_automation(
     user_id: uuid.UUID,
     trigger: dict,
     name: str = "Test Automation",
+    run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER,
 ) -> Automation:
     return Automation(
         user_id=user_id,
+        run_as_kind=run_as_kind,
         org_id=org_id,
         name=name,
         trigger=trigger,
@@ -159,7 +164,7 @@ async def start_run(session, run_id, sandbox_id: str | None = "sandbox-1") -> No
 
 
 def expected_conversation(org_id, automation_id, subject_key, source="slack") -> str:
-    return conversation_id_for(org_id, automation_id, source, subject_key)
+    return conversation_id_for(org_id, automation_id, source, subject_key, None)
 
 
 @pytest.fixture
@@ -587,6 +592,39 @@ async def test_an_event_arriving_mid_run_continues_that_conversation(
 
 
 @pytest.mark.asyncio
+async def test_a_run_as_service_automation_continues_its_account_keyed_conversation(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """The routing side of the run-as rule: the follow-up goes to the id the
+    dispatcher gave the run, which carries the service account."""
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        continuing_trigger(),
+        run_as_kind=AutomationRunAsKind.SERVICE,
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    await start_run(async_session, uuid.UUID(first.run_ids[0]), "sandbox-live")
+    follow_up = slack_envelope(
+        ts="1755000002.000200", thread_ts="1755000000.000100", text="<@U999> also"
+    )
+    second = await _mention(async_session, org_id, follow_up, "Ev2")
+
+    key = f"{TEAM}/C123/1755000000.000100"
+    assert second.conversation_ids == [
+        conversation_id_for(
+            org_id, automation.id, "slack", key, mock_authenticated_user.user_id
+        )
+    ]
+    assert second.conversation_ids != [
+        expected_conversation(org_id, automation.id, key)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_an_event_on_a_queued_run_is_folded_into_it(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
@@ -770,6 +808,61 @@ async def test_an_unreachable_conversation_degrades_to_a_run(
 
 
 @pytest.mark.asyncio
+async def test_an_expired_deferred_run_releases_its_subject(
+    org_id, async_session_factory, mock_authenticated_user, delivered_turns
+):
+    """An event after a deferred run expires must start a fresh run.
+
+    A deferred run has no ``started_at`` (the requeue clears it), so if the
+    sweep left its subject held, the next thread message would be folded into
+    the SKIPPED run's payload and never dispatched. Expiring releases the
+    subject in the same statement, so the event creates a new run instead.
+    """
+    subject_key = f"{TEAM}/C123/1755000000.000100"
+    async with async_session_factory() as setup:
+        automation = make_automation(
+            org_id, mock_authenticated_user.user_id, continuing_trigger()
+        )
+        setup.add(automation)
+        await setup.commit()
+        first = await _mention(setup, org_id, slack_envelope(), "Ev1")
+
+        # The run was accepted, then deferred behind a transient limit:
+        # PENDING with deferred_until set and started_at cleared, aged past max.
+        run = await setup.get(AutomationRun, uuid.UUID(first.run_ids[0]))
+        assert run is not None
+        run.started_at = None
+        run.status = AutomationRunStatus.PENDING
+        run.deferred_until = utcnow() - timedelta(seconds=1)
+        run.created_at = utcnow() - timedelta(hours=7)
+        await setup.commit()
+
+    skipped = await expire_aged_deferred_runs(
+        async_session_factory,
+        max_age_seconds=6 * 3600,
+        status_detail={"kind": "defer_expired"},
+    )
+    assert skipped == 1
+
+    # A fresh session, so no identity-map copy masks the committed release.
+    async with async_session_factory() as session:
+        expired = await session.get(AutomationRun, uuid.UUID(first.run_ids[0]))
+        assert expired is not None
+        assert expired.status == AutomationRunStatus.SKIPPED
+        assert expired.subject_released_at is not None
+        assert expired.subject_key == subject_key
+
+        reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
+        second = await _mention(session, org_id, reply, "Ev2")
+
+        # A fresh run owns the subject; nothing was folded into the dead run.
+        assert len(second.run_ids) == 1
+        assert second.run_ids != first.run_ids
+        owners = await subject_runs(session)
+        assert [str(r.id) for r in owners] == second.run_ids
+
+
+@pytest.mark.asyncio
 async def test_an_event_without_a_subject_falls_back_to_a_run(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
@@ -874,7 +967,9 @@ async def test_github_threads_on_the_documented_expression(
 
     assert second.run_ids == []
     assert second.conversation_ids == [
-        conversation_id_for(org_id, automation.id, "github", "OpenHands/automation#362")
+        conversation_id_for(
+            org_id, automation.id, "github", "OpenHands/automation#362", None
+        )
     ]
 
 
@@ -975,6 +1070,8 @@ async def test_completing_a_subject_owning_run_keeps_its_sandbox(
 
     assert response.status_code == 200
     mock_cleanup.assert_not_awaited()
+    await async_session.refresh(run)
+    assert run.sandbox_cleanup_due_at is None
 
 
 @pytest.mark.asyncio
@@ -998,10 +1095,12 @@ async def test_completing_an_ordinary_run_still_cleans_up(
     async_session.add(run)
     await async_session.commit()
 
-    response, mock_cleanup = await _complete(async_client, run.id)
+    response, _ = await _complete(async_client, run.id)
 
     assert response.status_code == 200
-    mock_cleanup.assert_awaited_once()
+    # Booked for the watchdog's deletion once buffered events have flushed.
+    await async_session.refresh(run)
+    assert run.sandbox_cleanup_due_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1097,12 +1196,13 @@ async def test_continue_conversation_loads_the_run_s_automation(
             source="slack",
             subject_key=subject_key,
             automation_id=automation_id,
+            service_account_id=None,
             event_key="app_mention",
             event_payload={"hello": "world"},
         )
         await session.commit()
 
-    derived = conversation_id_for(org_id, automation_id, "slack", subject_key)
+    derived = conversation_id_for(org_id, automation_id, "slack", subject_key, None)
     assert result.conversation_id == derived
     assert result.coalesced is False
     assert key_urls, "the API key was never minted, so run.automation failed"
@@ -1151,7 +1251,7 @@ async def test_concurrent_follow_ups_all_continue_one_conversation(
     results = await asyncio.gather(*(deliver(f"Later{n}") for n in range(5)))
 
     derived = conversation_id_for(
-        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100"
+        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100", None
     )
     assert sent == [derived] * 5
     assert all(r.conversation_ids == [derived] for r in results)
@@ -1236,7 +1336,7 @@ async def test_a_burst_on_one_subject_creates_exactly_one_run(
     results = await asyncio.gather(*(deliver(f"Ev{n}") for n in range(5)))
 
     derived = conversation_id_for(
-        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100"
+        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100", None
     )
     assert [run_id for r in results for run_id in r.run_ids] != []
     assert sum(len(r.run_ids) for r in results) == 1

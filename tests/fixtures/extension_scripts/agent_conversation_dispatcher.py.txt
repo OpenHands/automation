@@ -1,0 +1,13 @@
+import os
+
+
+class CloudConversations:
+    """Stands in for the OpenHands API client the dispatcher builds."""
+
+
+class AgentConversationDispatcher:
+    def __init__(self) -> None:
+        # The automation service hands a run the Agent Server URL only on a
+        # local Agent Canvas; elsewhere conversations go through the OpenHands API.
+        self.agent_url = os.environ.get("AGENT_SERVER_URL")
+        self._cloud = None if self.agent_url else CloudConversations()

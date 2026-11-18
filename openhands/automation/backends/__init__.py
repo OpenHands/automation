@@ -20,7 +20,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
+from openhands.automation.backends.base import (
+    ConversationStart,
+    ExecutionBackend,
+    ExecutionContext,
+    StartedConversation,
+)
 from openhands.automation.backends.cloud import CloudSandboxBackend
 from openhands.automation.backends.local import LocalAgentServerBackend
 
@@ -60,8 +65,10 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
 
 
 __all__ = [
+    "ConversationStart",
     "ExecutionBackend",
     "ExecutionContext",
+    "StartedConversation",
     "CloudSandboxBackend",
     "LocalAgentServerBackend",
     "get_backend",

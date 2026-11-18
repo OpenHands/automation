@@ -288,6 +288,16 @@ class TestGetValue:
         assert data["path"] == "database.host"
         assert data["value"] == "localhost"
 
+    async def test_get_value_with_malformed_path_is_400(self, kv_client, async_session):
+        """An unclosed bracket is a client error, as on PATCH (not a 500)."""
+        await create_test_state(async_session, TEST_AUTOMATION_ID, {"cfg": {"a": 1}})
+        await async_session.commit()
+
+        response = await kv_client.get("/api/automation/v1/kv/cfg?path=a[b")
+
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith("invalid_path: ")
+
     async def test_get_value_with_meta(self, kv_client, async_session):
         """Get with meta=true returns timestamps."""
         await create_test_state(async_session, TEST_AUTOMATION_ID, {"config": "test"})
@@ -407,6 +417,23 @@ class TestPatchValue:
         data = response.json()
         assert data["path"] == "database.host"
         assert data["value"] == "new"
+
+    @pytest.mark.parametrize("path", ["", ".", "a[b"])
+    async def test_patch_empty_or_malformed_path_is_400(
+        self, kv_client, async_session, path
+    ):
+        """A path naming no field or with bad syntax is 400 and changes nothing."""
+        await create_test_state(async_session, TEST_AUTOMATION_ID, {"cfg": {"a": 1}})
+        await async_session.commit()
+
+        response = await kv_client.patch(
+            "/api/automation/v1/kv/cfg", json={"path": path, "value": 2}
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith("invalid_path: ")
+        response = await kv_client.get("/api/automation/v1/kv/cfg")
+        assert response.json()["value"] == {"a": 1}
 
     async def test_patch_not_found(self, kv_client):
         """Patch returns 404 for non-existent key."""

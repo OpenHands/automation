@@ -24,8 +24,9 @@ from openhands.automation.utils import utcnow
 
 router = APIRouter(prefix="/v1/uploads", tags=["Uploads"])
 
+# Any org member may upload and delete their own tarballs; every lookup is
+# scoped to the caller's own uploads.
 _require_view_automations = require_permission("view_automations")
-_require_manage_automations = require_permission("manage_automations")
 
 # Maximum upload size: 1MB
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024
@@ -118,7 +119,7 @@ async def create_upload(
     name: str = Query(..., min_length=1, max_length=255),
     description: str | None = Query(default=None, max_length=2000),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> UploadResponse:
     """Upload a tarball for use in automations.
@@ -227,7 +228,7 @@ async def list_uploads(
     offset: int = Query(default=0, ge=0),
     status_filter: UploadStatus | None = Query(default=None, alias="status"),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> UploadListResponse:
     """List uploads for the authenticated user.
 
@@ -250,7 +251,10 @@ async def list_uploads(
 
     # Fetch paginated results
     result = await session.execute(
-        base_query.order_by(TarballUpload.created_at.desc()).offset(offset).limit(limit)
+        # id breaks exact created_at ties, so offset pages stay stable.
+        base_query.order_by(TarballUpload.created_at.desc(), TarballUpload.id.desc())
+        .offset(offset)
+        .limit(limit)
     )
     uploads = result.scalars().all()
 
@@ -264,7 +268,7 @@ async def list_uploads(
 async def get_upload(
     upload_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> UploadResponse:
     """Get a single upload by ID."""
     upload = await _get_user_upload(session, upload_id, user.user_id, user.org_id)
@@ -274,8 +278,8 @@ async def get_upload(
 @router.delete("/{upload_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_upload(
     upload_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> None:
     """Delete an upload.

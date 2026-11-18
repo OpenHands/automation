@@ -31,7 +31,10 @@ class RunStatusDetailKind(StrEnum):
     ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
     EXECUTION_ERROR = "execution_error"
     CONCURRENCY_LIMIT = "concurrency_limit"
+    DAILY_SANDBOX_LIMIT = "daily_sandbox_limit"
+    DEFER_EXPIRED = "defer_expired"
     BLOCKED = "blocked"
+    AUTH = "auth"
     UNKNOWN = "unknown"
 
 

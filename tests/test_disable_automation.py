@@ -72,9 +72,13 @@ async def _create_completed_upload(async_session_factory) -> uuid.UUID:
 
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
-    try:
-        import socket
+    import socket
 
+    # Windows has no AF_UNIX; without this guard the module fails to import
+    # there and none of its tests run.
+    if not hasattr(socket, "AF_UNIX"):
+        return False
+    try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")
         sock.close()
@@ -248,7 +252,7 @@ class TestDownloadInternalTarball:
 
         async with async_session_factory() as session:
             with pytest.raises(TarballNotFoundError) as exc_info:
-                await _download_internal_tarball(fake_upload_id, session)
+                await _download_internal_tarball(fake_upload_id, TEST_ORG_ID, session)
 
         assert "not found" in str(exc_info.value).lower()
         assert str(fake_upload_id) in str(exc_info.value)
@@ -274,7 +278,7 @@ class TestDownloadInternalTarball:
         with patch("openhands.automation.storage.get_file_store", return_value=store):
             async with async_session_factory() as session:
                 with pytest.raises(TarballNotFoundError) as exc_info:
-                    await _download_internal_tarball(upload_id, session)
+                    await _download_internal_tarball(upload_id, TEST_ORG_ID, session)
 
         message = str(exc_info.value)
         assert "missing from storage" in message
@@ -302,7 +306,7 @@ class TestDownloadInternalTarball:
         with patch("openhands.automation.storage.get_file_store", return_value=store):
             async with async_session_factory() as session:
                 with pytest.raises(FileNotFoundError) as exc_info:
-                    await _download_internal_tarball(upload_id, session)
+                    await _download_internal_tarball(upload_id, TEST_ORG_ID, session)
 
         assert not isinstance(exc_info.value, TarballNotFoundError)
 
@@ -472,7 +476,7 @@ def _create_mock_backend_with_api_key_check() -> MagicMock:
     """
     from openhands.automation.backends.base import ExecutionContext
 
-    mock_backend = MagicMock()
+    mock_backend = MagicMock(is_local_mode=False)
     mock_backend._api_key_initialized = False
 
     async def mock_get_execution_context(client):

@@ -16,9 +16,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
+from openhands.automation.backends import CloudSandboxBackend
 from openhands.automation.config import get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
@@ -26,22 +27,33 @@ from openhands.automation.dispatcher import (
     _execute_run,
     _execute_run_safe,
     _fetch_plugins_on_agent_server,
+    _lock_dispatch_admission,
     _validate_plugin_run_agent_profile,
     dispatch_pending_runs,
     dispatcher_loop,
 )
-from openhands.automation.exceptions import ConcurrencyLimitReachedError
+from openhands.automation.exceptions import (
+    ConcurrencyLimitReachedError,
+    DailySandboxLimitReachedError,
+    SandboxProvisioningError,
+)
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
 )
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
+    DeferredRunRequeueError,
+    count_running_runs,
+    expire_aged_deferred_runs,
     mark_run_status,
     mark_run_terminal,
+    requeue_deferred_run,
     update_run_current_phase,
     update_run_timeout_at,
 )
@@ -276,6 +288,98 @@ async def test_execute_run_safe_resumes_triggering_event_trace():
     assert mock_span.call_args.kwargs["parent_span_context"] == parent_context
 
 
+class _FakeTelemetryResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeTelemetryClient:
+    """Stand-in for the external PostHog HTTP transport only."""
+
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url: str, json: dict) -> _FakeTelemetryResponse:
+        self.posts.append((url, json))
+        return _FakeTelemetryResponse()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_safe_emits_categorized_failure_telemetry(
+    async_session_factory, mock_settings, mock_client, monkeypatch
+):
+    """A last-resort dispatcher failure still emits a terminal failed event."""
+    from openhands.automation import telemetry
+    from openhands.automation.config import clear_config_cache
+
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+    clear_config_cache()
+    fake_client = _FakeTelemetryClient()
+    monkeypatch.setattr(telemetry, "_telemetry_http_client", fake_client)
+    try:
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Dispatcher Telemetry Automation",
+                trigger={"type": "cron", "schedule": "* * * * *"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=60,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        with patch(
+            "openhands.automation.dispatcher._execute_run",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom token=sekrit"),
+        ):
+            await _execute_run_safe(
+                run, mock_settings, async_session_factory, mock_client
+            )
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+
+        assert len(fake_client.posts) == 1
+        _, payload = fake_client.posts[0]
+        assert payload["event"] == "automation_run_failed"
+        assert payload["distinct_id"] == str(TEST_USER_ID)
+        properties = payload["properties"]
+        assert properties["failure_kind"] == "dispatch_error"
+        assert properties["failure_stage"] == "dispatch"
+        assert properties["trigger_source"] == "dispatcher"
+        assert properties["run_status"] == "FAILED"
+        assert "sekrit" not in str(properties)
+    finally:
+        clear_config_cache()
+
+
 class TestIsHttpUrl:
     """Tests for is_http_url helper function."""
 
@@ -301,6 +405,38 @@ class TestIsHttpUrl:
     def test_gs_url_is_not_http(self):
         """GCS URLs are not HTTP URLs (need special handling, not curl)."""
         assert is_http_url("gs://bucket/key.tar.gz") is False
+
+
+async def test_download_internal_tarball_ignores_other_org_upload(
+    async_session_factory,
+):
+    """An upload outside the automation's org is treated as missing."""
+    from openhands.automation.dispatcher import _download_internal_tarball
+    from openhands.automation.exceptions import TarballNotFoundError
+    from openhands.automation.models import TarballUpload, UploadStatus
+
+    upload_id = uuid.uuid4()
+    async with async_session_factory() as session:
+        session.add(
+            TarballUpload(
+                id=upload_id,
+                user_id=TEST_USER_ID,
+                org_id=uuid.uuid4(),
+                name="other-org-upload",
+                status=UploadStatus.COMPLETED,
+                storage_path=f"uploads/other/{upload_id}.tar",
+            )
+        )
+        await session.commit()
+    store = MagicMock()
+    store.read.return_value = b"other org tarball"
+
+    with patch("openhands.automation.storage.get_file_store", return_value=store):
+        async with async_session_factory() as session:
+            with pytest.raises(TarballNotFoundError):
+                await _download_internal_tarball(upload_id, TEST_ORG_ID, session)
+
+    store.read.assert_not_called()
 
 
 class TestMarkRunStatus:
@@ -553,6 +689,37 @@ class TestMarkRunTerminalFirstRunOutcome:
             first_run = automation.preset_metadata["first_run"]
             assert first_run["status"] == "failure"
             assert first_run["failure_stage"] == "dispatch"
+
+    async def test_dispatch_failure_first_run_write_has_an_audit_actor(
+        self, async_session_factory, monkeypatch
+    ):
+        """The dispatcher's own session names SYSTEM, so strict mode does not
+        raise (and lose the write) when it records the first run."""
+        from openhands.automation.utils import change_events
+
+        automation_id, run = await self._seed_template_run(async_session_factory)
+        monkeypatch.setattr(change_events, "STRICT", True)
+
+        await mark_run_terminal(
+            async_session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "sandbox creation failed",
+        )
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.preset_metadata["first_run"]["status"] == "failure"
+            (change,) = await session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation_id,
+                    AutomationChangeEvent.action != "create",
+                )
+            )
+        assert (change.actor_kind, change.changed_fields) == (
+            "system",
+            ["preset_metadata"],
+        )
 
     async def test_skipped_run_does_not_consume_the_first_run_slot(
         self, async_session_factory
@@ -1138,7 +1305,10 @@ class TestEffectiveTimeout:
 
         backend = MagicMock()
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key=None,
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
@@ -1159,11 +1329,80 @@ class TestEffectiveTimeout:
             assert expected - 30 < remaining <= expected
 
 
+class TestExecuteRunSetupScriptPath:
+    @pytest.mark.parametrize("setup_script_path", ["scripts/install.sh", None])
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_stored_setup_script_path_reaches_execution(
+        self,
+        mock_execute,
+        setup_script_path,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Custom setup path",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="python3 main.py",
+                setup_script_path=setup_script_path,
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+
+        backend = MagicMock()
+        backend.get_execution_context = AsyncMock(
+            return_value=MagicMock(
+                agent_url="http://agent.test",
+                sandbox_id="sbx-1",
+                session_key="sk-1",
+                api_key=None,
+            )
+        )
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        mock_execute.assert_awaited_once()
+        assert mock_execute.await_args.kwargs["setup_script_path"] == setup_script_path
+
+
 class TestExecuteRunPhaseReporting:
     """Phase-reporting wiring in _execute_run."""
 
     async def _run_successful_execution(
-        self, mock_execute, async_session_factory, mock_settings, mock_client
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        backend_env: dict[str, str] | None = None,
     ):
         """Drive _execute_run through a successful dispatch; returns run_id."""
         async with async_session_factory() as session:
@@ -1203,10 +1442,13 @@ class TestExecuteRunPhaseReporting:
 
         backend = MagicMock()
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key="cloud-api-key",
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
-        backend.build_env_vars = MagicMock(return_value={})
+        backend.build_env_vars = MagicMock(return_value=dict(backend_env or {}))
         backend.get_work_dir = MagicMock(return_value="/workspace")
         mock_execute.return_value = MagicMock(
             success=True, bash_command_id="cmd-1", error=None
@@ -1228,6 +1470,53 @@ class TestExecuteRunPhaseReporting:
 
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_injects_callback_key_but_not_agent_server_url(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Cloud-mode runs inject AUTOMATION_CALLBACK_API_KEY so scripts can sign
+        their completion callback (see issue #679), but never AGENT_SERVER_URL:
+        stored scripts read it as running on a local Agent Canvas."""
+        await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert "AGENT_SERVER_URL" not in env_vars
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "cloud-api-key"
+        assert env_vars["SANDBOX_ID"] == "sbx-1"
+        assert env_vars["SESSION_API_KEY"] == "sk-1"
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_cloud_sandbox_env_names_its_mode(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The presets pick cloud mode from an explicit signal (#688). The real
+        cloud backend's env must carry it next to the sandbox identity, and no
+        AGENT_SERVER_URL."""
+        backend = CloudSandboxBackend(api_url="https://app.test", run=MagicMock())
+        with patch(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
+            new_callable=AsyncMock,
+            return_value="cloud-api-key",
+        ):
+            await backend.get_api_key()
+
+        await self._run_successful_execution(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            backend_env=backend.build_env_vars(),
+        )
+
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert env_vars["AUTOMATION_RUN_MODE"] == "cloud"
+        assert "AGENT_SERVER_URL" not in env_vars
+        assert env_vars["SANDBOX_ID"] == "sbx-1"
+        assert env_vars["SESSION_API_KEY"] == "sk-1"
+        assert env_vars["OPENHANDS_API_KEY"] == "cloud-api-key"
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_marks_starting_automation_phase_after_bash_dispatch(
@@ -1413,8 +1702,7 @@ class TestBuildEventPayload:
 
 
 class TestExecuteRunConcurrencyLimit:
-    """When the org/workspace is at its concurrent-sandbox limit, the run is
-    marked SKIPPED (not FAILED) and the automation is left enabled."""
+    """Quota-limited runs are skipped without disabling their automation."""
 
     async def _make_running_run(self, async_session_factory):
         """Create an automation + a RUNNING run (as the dispatcher leaves it
@@ -1457,24 +1745,34 @@ class TestExecuteRunConcurrencyLimit:
             )
         return run, run_id, automation_id
 
-    async def test_concurrency_limit_marks_skipped_and_keeps_enabled(
-        self, async_session_factory, mock_settings, mock_client
+    @pytest.mark.parametrize(
+        ("error_type", "kind"),
+        [
+            (ConcurrencyLimitReachedError, "concurrency_limit"),
+            (DailySandboxLimitReachedError, "daily_sandbox_limit"),
+        ],
+    )
+    async def test_quota_limit_defers_run_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client, error_type, kind
     ):
-        """A ConcurrencyLimitReachedError from get_execution_context marks the
-        run SKIPPED (with completed_at, no error_detail) and does NOT disable
-        the automation."""
+        """A quota-blocked run is returned to PENDING with a retry deadline,
+        not dropped, and its automation is left enabled."""
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
         backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(
-            side_effect=ConcurrencyLimitReachedError(
-                "You have reached your limit of 3 concurrent conversations."
-            )
+            side_effect=error_type("Sandbox quota reached.")
         )
         backend.release_context = AsyncMock()
 
-        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         async with async_session_factory() as session:
@@ -1487,13 +1785,21 @@ class TestExecuteRunConcurrencyLimit:
                 .scalars()
                 .first()
             )
-            assert updated.status == AutomationRunStatus.SKIPPED
-            assert updated.completed_at is not None
+            assert updated.status == AutomationRunStatus.PENDING
+            assert updated.deferred_until is not None
+            assert updated.deferral_count == 1
+            assert updated.started_at is None  # claim rolled back
+            assert updated.completed_at is None
+            assert updated.timeout_at is None
             assert updated.status_detail is not None
             assert updated.status_detail["phase"] == "dispatch"
-            assert updated.status_detail["kind"] == "concurrency_limit"
+            assert updated.status_detail["kind"] == kind
             assert updated.status_detail["transient"] is True
-            assert updated.error_detail is None  # SKIPPED is not a failure
+            assert updated.status_detail["detail"] == "Sandbox quota reached."
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.status_detail["deferral_attempts"] == 1
+            assert updated.error_detail is None  # deferral is not a failure
 
             auto = (
                 (
@@ -1505,6 +1811,14 @@ class TestExecuteRunConcurrencyLimit:
                 .first()
             )
             assert auto.enabled is True  # transient org-level condition: not disabled
+
+        capture_event.assert_awaited_once()
+        call_args = capture_event.await_args
+        assert call_args is not None
+        args, kwargs = call_args
+        assert args[0] == "automation_run_deferred"
+        assert kwargs["properties"]["defer_reason"] == kind
+        assert kwargs["properties"]["deferral_attempts"] == 1
 
         # No execution context was acquired, so there is nothing to release.
         backend.release_context.assert_not_called()
@@ -1586,6 +1900,220 @@ class TestExecuteRunConcurrencyLimit:
             auto = await session.get(Automation, automation_id)
             assert auto.enabled is True
 
+    async def test_plugin_preflight_api_key_error_fails_run_with_dispatch_detail(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A failed owner key mint in the plugin preflight fails the run as a
+        dispatch error, runs the unhealthy check, and creates no sandbox."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+        run.automation.agent_profile_id = uuid.UUID(
+            "0a1b2c3d-0000-4000-8000-000000000012"
+        )
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_api_key = AsyncMock(
+            side_effect=APIKeyError("HTTP 403: user is not a member of the org")
+        )
+        payload = (
+            b"tarball",
+            {},
+            {
+                "kind": "plugin_spec",
+                "entrypoint": "python main.py",
+                "manifest": {"runtime": {"agent_profile": {"required": True}}},
+            },
+            [{"source": "github:org/plugin"}],
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                return_value=payload,
+            ),
+            patch(
+                "openhands.automation.dispatcher.maybe_disable_unhealthy_automation_after_run",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as maybe_disable,
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        maybe_disable.assert_awaited_once_with(async_session_factory, automation_id)
+        capture_event.assert_awaited_once_with(
+            "automation_run_failed",
+            automation=run.automation,
+            run=run,
+            session_factory=async_session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "failure_kind": "dispatch_error",
+                "automation_disabled": False,
+            },
+        )
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert "API key" in updated.error_detail
+            assert "HTTP 403" in updated.error_detail
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["source"] == "openhands_api"
+            assert updated.status_detail["code"] == "APIKeyError"
+            assert updated.status_detail["kind"] == "unknown"
+            assert updated.status_detail["transient"] is False
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+    @pytest.mark.parametrize(
+        ("status_code", "transient", "kind"),
+        [
+            (401, False, "unknown"),
+            (403, False, "auth"),
+            (404, False, "auth"),
+            (500, True, "server_error"),
+            (503, True, "server_error"),
+            (429, True, "rate_limited"),
+            (None, False, "unknown"),
+        ],
+    )
+    async def test_run_as_key_mint_failure_is_classified_by_status_code(
+        self,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        status_code,
+        transient,
+        kind,
+    ):
+        """A 401/403/404 from the key mint is a permanent run failure; a 5xx is
+        transient. The run fails either way and no sandbox is created. A 403/404
+        is kind ``auth`` (the run-as identity), which the unhealthy check counts;
+        a 401 (the shared service key) stays ``unknown``."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_execution_context = AsyncMock(
+            side_effect=APIKeyError("HTTP error: body", status_code=status_code)
+        )
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.release_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.status_detail["source"] == "openhands_api"
+            assert updated.status_detail["code"] == "APIKeyError"
+            assert updated.status_detail["kind"] == kind
+            assert updated.status_detail["transient"] is transient
+            assert updated.status_detail.get("status_code") == status_code
+            if status_code == 401:
+                assert "service key" in updated.error_detail
+                assert "runs as may be disabled" not in updated.error_detail
+            if status_code in (403, 404):
+                assert "runs as may be disabled" in updated.error_detail
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+    async def test_run_as_key_mint_network_error_is_transient(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A network failure reaching the key mint has no status and is transient."""
+        import httpx
+
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        error = APIKeyError("Request failed: connect error")
+        error.__cause__ = httpx.ConnectError("connect failed")
+        backend.get_execution_context = AsyncMock(side_effect=error)
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail["kind"] == "transport"
+            assert updated.status_detail["transient"] is True
+
+    @pytest.mark.parametrize(("status_code", "transient"), [(403, False), (503, True)])
+    async def test_plugin_preflight_key_mint_failure_uses_status_code(
+        self, async_session_factory, mock_settings, mock_client, status_code, transient
+    ):
+        """The plugin preflight path classifies the key mint the same way."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+        run.automation.agent_profile_id = uuid.UUID(
+            "0a1b2c3d-0000-4000-8000-000000000012"
+        )
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_api_key = AsyncMock(
+            side_effect=APIKeyError("HTTP error", status_code=status_code)
+        )
+        payload = (
+            b"tarball",
+            {},
+            {
+                "kind": "plugin_spec",
+                "entrypoint": "python main.py",
+                "manifest": {"runtime": {"agent_profile": {"required": True}}},
+            },
+            [{"source": "github:org/plugin"}],
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                return_value=payload,
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["transient"] is transient
+            assert updated.status_detail["status_code"] == status_code
+
     async def test_plugin_fetch_transport_failure_releases_context(
         self, async_session_factory, mock_settings
     ):
@@ -1600,7 +2128,10 @@ class TestExecuteRunConcurrencyLimit:
         backend = MagicMock()
         backend.is_local_mode = False
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key=None,
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.release_context = AsyncMock()
@@ -1643,6 +2174,1240 @@ class TestExecuteRunConcurrencyLimit:
             assert auto.enabled is True
 
 
+class TestExecuteRunDeferralExpiry:
+    """A run blocked by a transient limit past its max deferral age is dropped.
+
+    Deferral is bounded: an automation that can never get a slot must not
+    queue forever, so past `defer_max_age_seconds` the run is marked SKIPPED
+    with a `defer_expired` status detail.
+    """
+
+    async def _make_running_run(self, async_session_factory, *, age_seconds: int):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                created_at=utcnow() - timedelta(seconds=age_seconds),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return run, run_id
+
+    async def test_run_past_max_defer_age_is_skipped(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A run older than defer_max_age_seconds is terminal SKIPPED, not requeued."""
+        # Older than the default 6h max deferral age.
+        run, run_id = await self._make_running_run(
+            async_session_factory, age_seconds=7 * 3600
+        )
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(
+            side_effect=ConcurrencyLimitReachedError("limit")
+        )
+        backend.release_context = AsyncMock()
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.deferred_until is None
+            assert updated.completed_at is not None
+            assert updated.status_detail is not None
+            assert updated.status_detail["kind"] == "defer_expired"
+            assert updated.status_detail["transient"] is False
+            assert updated.status_detail["blocked_by"] == "concurrency_limit"
+
+        call_args = capture_event.await_args
+        assert call_args is not None
+        args, kwargs = call_args
+        assert args[0] == "automation_run_skipped"
+        assert kwargs["properties"]["skip_reason"] == "defer_expired"
+
+    async def test_deferral_disabled_skips_immediately(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        """With defer_max_age_seconds=0 a blocked run is skipped at once.
+
+        The original limit reason is preserved (not rewritten to
+        ``defer_expired``), so consumers of the status kind and telemetry
+        ``skip_reason`` see the same values as before deferral existed.
+        """
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_DEFER_MAX_AGE_SECONDS", "0")
+        clear_config_cache()
+        try:
+            run, run_id = await self._make_running_run(
+                async_session_factory, age_seconds=1
+            )
+            backend = MagicMock()
+            backend.is_local_mode = False
+            backend.get_execution_context = AsyncMock(
+                side_effect=DailySandboxLimitReachedError("quota")
+            )
+            backend.release_context = AsyncMock()
+
+            with (
+                patch(
+                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                ),
+                patch(
+                    "openhands.automation.dispatcher.capture_automation_event",
+                    new_callable=AsyncMock,
+                ) as capture_event,
+            ):
+                await _execute_run(
+                    run, mock_settings, async_session_factory, mock_client
+                )
+
+            async with async_session_factory() as session:
+                updated = await session.get(AutomationRun, run_id)
+                assert updated.status == AutomationRunStatus.SKIPPED
+                assert updated.deferred_until is None
+                assert updated.status_detail["kind"] == "daily_sandbox_limit"
+                assert "blocked_by" not in updated.status_detail
+
+            call_args = capture_event.await_args
+            assert call_args is not None
+            args, kwargs = call_args
+            assert args[0] == "automation_run_skipped"
+            assert kwargs["properties"]["skip_reason"] == "daily_sandbox_limit"
+        finally:
+            clear_config_cache()
+
+    async def test_backoff_bounded_by_remaining_age(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        """A run near the max age is not given another full backoff.
+
+        The retry delay is capped at the time left before the deadline, so the
+        run cannot be rescheduled to start after its max age.
+        """
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_DEFER_MAX_AGE_SECONDS", "1000")
+        monkeypatch.setenv("AUTOMATION_DEFER_BACKOFF_BASE_SECONDS", "1000")
+        clear_config_cache()
+        try:
+            run, run_id = await self._make_running_run(
+                async_session_factory, age_seconds=900
+            )
+            backend = MagicMock()
+            backend.is_local_mode = False
+            backend.get_execution_context = AsyncMock(
+                side_effect=ConcurrencyLimitReachedError("limit")
+            )
+            backend.release_context = AsyncMock()
+
+            before = utcnow()
+            with patch(
+                "openhands.automation.dispatcher.get_backend", return_value=backend
+            ):
+                await _execute_run(
+                    run, mock_settings, async_session_factory, mock_client
+                )
+
+            async with async_session_factory() as session:
+                updated = await session.get(AutomationRun, run_id)
+            delay = (updated.deferred_until - before).total_seconds()
+            # Remaining age is ~100s, far below the 1000s base backoff.
+            assert 90 <= delay <= 110
+        finally:
+            clear_config_cache()
+
+
+class TestDispatchConcurrencyGate:
+    """The optional max_concurrent_runs cap admits only up to the limit.
+
+    The table is the queue: over-cap PENDING runs stay PENDING and are picked
+    up by a later poll as slots free.
+    """
+
+    async def _seed_pending(
+        self, async_session_factory, count: int, *, running: int = 0
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+
+            for _ in range(running):
+                session.add(
+                    AutomationRun(
+                        automation_id=automation_id,
+                        status=AutomationRunStatus.RUNNING,
+                        started_at=utcnow(),
+                    )
+                )
+            pending_ids = []
+            for _ in range(count):
+                run = AutomationRun(
+                    automation_id=automation_id,
+                    status=AutomationRunStatus.PENDING,
+                )
+                session.add(run)
+                await session.flush()
+                pending_ids.append(run.id)
+            await session.commit()
+        return pending_ids
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_admits_only_up_to_capacity(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "2")
+        clear_config_cache()
+        try:
+            await self._seed_pending(async_session_factory, 3)
+            dispatched = await dispatch_pending_runs(
+                async_session_factory, mock_settings, mock_client
+            )
+            assert len(dispatched) == 2
+
+            async with async_session_factory() as session:
+                remaining = (
+                    (
+                        await session.execute(
+                            select(AutomationRun).where(
+                                AutomationRun.status == AutomationRunStatus.PENDING
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert len(remaining) == 1
+        finally:
+            clear_config_cache()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_counts_existing_running_runs(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "2")
+        clear_config_cache()
+        try:
+            # One slot already taken by a RUNNING run: only one more admitted.
+            await self._seed_pending(async_session_factory, 3, running=1)
+            dispatched = await dispatch_pending_runs(
+                async_session_factory, mock_settings, mock_client
+            )
+            assert len(dispatched) == 1
+        finally:
+            clear_config_cache()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_returns_empty_at_capacity(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "1")
+        clear_config_cache()
+        try:
+            await self._seed_pending(async_session_factory, 2, running=1)
+            dispatched = await dispatch_pending_runs(
+                async_session_factory, mock_settings, mock_client
+            )
+            assert dispatched == []
+        finally:
+            clear_config_cache()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_skips_deferred_pending_runs(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A PENDING run whose deferred_until is in the future is not admitted."""
+        ids = await self._seed_pending(async_session_factory, 1)
+        async with async_session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == ids[0])
+                .values(deferred_until=utcnow() + timedelta(minutes=5))
+            )
+            await session.commit()
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+        assert dispatched == []
+
+        # Once the deferral elapses it becomes eligible again.
+        async with async_session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == ids[0])
+                .values(deferred_until=utcnow() - timedelta(seconds=1))
+            )
+            await session.commit()
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+        assert len(dispatched) == 1
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_expires_aged_deferred_run_even_at_capacity(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        """An aged deferred run is expired on a poll that admits nothing.
+
+        The poll is at capacity, so it would return before claiming; the sweep
+        must still reap the aged deferred row instead of leaving it PENDING,
+        and must emit the ``automation_run_skipped`` event the dispatcher's own
+        skip handler would have emitted had it been reached.
+        """
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "1")
+        monkeypatch.setenv("AUTOMATION_DEFER_MAX_AGE_SECONDS", "21600")
+        clear_config_cache()
+        try:
+            # One slot taken, and an aged deferred run stuck behind it.
+            ids = await self._seed_pending(async_session_factory, 1, running=1)
+            async with async_session_factory() as session:
+                await session.execute(
+                    update(AutomationRun)
+                    .where(AutomationRun.id == ids[0])
+                    .values(
+                        created_at=utcnow() - timedelta(hours=7),
+                        deferred_until=utcnow() - timedelta(seconds=1),
+                    )
+                )
+                await session.commit()
+
+            with patch(
+                "openhands.automation.utils.run.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event:
+                dispatched = await dispatch_pending_runs(
+                    async_session_factory, mock_settings, mock_client
+                )
+            assert dispatched == []
+
+            async with async_session_factory() as session:
+                updated = await session.get(AutomationRun, ids[0])
+                assert updated.status == AutomationRunStatus.SKIPPED
+                assert updated.status_detail["kind"] == "defer_expired"
+
+            # The capacity gate returns before the dispatcher's skip handler,
+            # so the sweep is the only emitter for this run.
+            capture_event.assert_awaited_once()
+            call_args = capture_event.await_args
+            assert call_args is not None
+            args, kwargs = call_args
+            assert args[0] == "automation_run_skipped"
+            assert kwargs["run"].id == ids[0]
+            assert kwargs["properties"]["skip_reason"] == "defer_expired"
+        finally:
+            clear_config_cache()
+
+
+class TestDispatchAdmissionLock:
+    """The admission step is serialized across replicas.
+
+    Under read-committed isolation, two replicas each read the same RUNNING
+    count and then claim distinct pending rows, so their combined admissions
+    exceed the cap. The admission lock must make the second replica block until
+    the first commits its RUNNING rows.
+    """
+
+    async def test_admission_lock_serializes_two_holders(self, async_session_factory):
+        # The invariant under test is: the second holder cannot acquire the lock
+        # until the first has released it. Assert that directly instead of
+        # comparing append order from two concurrent tasks, which is racy --
+        # the first task's post-commit append and the second task's resume are
+        # both scheduled after the same lock release and can interleave either
+        # way.
+        holder_marked_release = False
+        holder_ready = asyncio.Event()
+        # What the holder's release flag was when the second holder acquired.
+        # True  => it waited for the release (lock works).
+        # False => it acquired while the first still held the lock (no-op lock).
+        release_flag_at_second_acquire: bool | None = None
+
+        async def holder():
+            nonlocal holder_marked_release
+            async with async_session_factory() as session:
+                await _lock_dispatch_admission(session)
+                holder_ready.set()
+                # Hold the lock while the second holder tries to acquire it.
+                await asyncio.sleep(0.3)
+                # Set the flag while still inside the transaction, i.e. still
+                # holding the lock. A second holder that acquires before the
+                # commit would observe False and prove the lock is a no-op.
+                holder_marked_release = True
+                await session.commit()
+
+        async def waiter():
+            nonlocal release_flag_at_second_acquire
+            async with async_session_factory() as session:
+                await holder_ready.wait()
+                await _lock_dispatch_admission(session)
+                release_flag_at_second_acquire = holder_marked_release
+                await session.commit()
+
+        await asyncio.gather(holder(), waiter())
+
+        # The second holder acquired only after the first released the lock.
+        assert release_flag_at_second_acquire is True
+
+    async def test_two_polls_never_admit_more_than_capacity(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        """Two polls racing on the same batch still respect the cap.
+
+        Both polls are made to see the same pending batch (the row lock cannot
+        serialize an in-process race). Without the admission lock each poll
+        counts the same zero RUNNING rows and admits the full capacity, so the
+        combined admissions double the cap; with the lock the second poll's
+        count sees the first poll's committed RUNNING rows.
+        """
+        from openhands.automation import dispatcher
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "2")
+        clear_config_cache()
+
+        real_poll = dispatcher._poll_pending_runs
+        shared: dict = {}
+
+        async def shared_poll(session, batch_size):
+            if "runs" not in shared:
+                shared["runs"] = await real_poll(session, batch_size)
+            return shared["runs"]
+
+        monkeypatch.setattr(dispatcher, "_poll_pending_runs", shared_poll)
+        try:
+            async with async_session_factory() as session:
+                automation = Automation(
+                    user_id=TEST_USER_ID,
+                    org_id=TEST_ORG_ID,
+                    name="Test",
+                    trigger={
+                        "type": "cron",
+                        "schedule": "* * * * *",
+                        "timezone": "UTC",
+                    },
+                    tarball_path="s3://bucket/code.tar.gz",
+                    entrypoint="uv run main.py",
+                    enabled=True,
+                )
+                session.add(automation)
+                await session.commit()
+                for _ in range(2):
+                    session.add(
+                        AutomationRun(
+                            automation_id=automation.id,
+                            status=AutomationRunStatus.PENDING,
+                        )
+                    )
+                await session.commit()
+
+            with patch(
+                "openhands.automation.dispatcher._execute_run_safe",
+                new_callable=AsyncMock,
+            ):
+                first, second = await asyncio.gather(
+                    dispatch_pending_runs(
+                        async_session_factory, mock_settings, mock_client, batch_size=2
+                    ),
+                    dispatch_pending_runs(
+                        async_session_factory, mock_settings, mock_client, batch_size=2
+                    ),
+                )
+            assert len(first) + len(second) <= 2
+
+            async with async_session_factory() as session:
+                running = (
+                    (
+                        await session.execute(
+                            select(AutomationRun).where(
+                                AutomationRun.status == AutomationRunStatus.RUNNING
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert len(running) <= 2
+        finally:
+            clear_config_cache()
+
+
+class TestRequeueDeferredRun:
+    """The requeue write is guarded and drives the backoff counter."""
+
+    async def _make_running_run(self, async_session_factory):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(hours=1),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return run, run_id
+
+    async def test_requeue_returns_run_to_pending(self, async_session_factory):
+        run, run_id = await self._make_running_run(async_session_factory)
+        when = utcnow() + timedelta(minutes=2)
+
+        ok = await requeue_deferred_run(
+            async_session_factory,
+            run,
+            deferred_until=when,
+            status_detail={"kind": "concurrency_limit"},
+        )
+        assert ok is True
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.PENDING
+            assert updated.started_at is None
+            assert updated.timeout_at is None
+            assert updated.completed_at is None
+            assert updated.deferred_until is not None
+            assert updated.deferral_count == 1
+            assert updated.status_detail == {"kind": "concurrency_limit"}
+
+    async def test_requeue_is_idempotent_and_never_resurrects_terminal(
+        self, async_session_factory
+    ):
+        """A second requeue after the run left RUNNING is a no-op."""
+        run, run_id = await self._make_running_run(async_session_factory)
+        await requeue_deferred_run(
+            async_session_factory, run, deferred_until=utcnow() + timedelta(minutes=1)
+        )
+
+        # The run is now PENDING; a stale requeue must not move it again.
+        ok = await requeue_deferred_run(
+            async_session_factory, run, deferred_until=utcnow() + timedelta(minutes=5)
+        )
+        assert ok is False
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.PENDING
+            assert updated.deferral_count == 1  # not double-incremented
+
+    async def test_requeue_leaves_terminal_run_untouched(self, async_session_factory):
+        """A run that completed (callback) while deferred is not resurrected."""
+        run, run_id = await self._make_running_run(async_session_factory)
+        async with async_session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(status=AutomationRunStatus.COMPLETED, completed_at=utcnow())
+            )
+            await session.commit()
+
+        ok = await requeue_deferred_run(
+            async_session_factory, run, deferred_until=utcnow() + timedelta(minutes=1)
+        )
+        assert ok is False
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.COMPLETED
+
+    async def test_backoff_delay_grows_per_attempt(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        """Consecutive deferrals wait progressively longer (bounded).
+
+        Drives the real dispatch path twice so the delay is read from the
+        run's persisted deferral_count, not re-derived from the formula.
+        """
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_DEFER_BACKOFF_BASE_SECONDS", "10")
+        clear_config_cache()
+        try:
+            _, run_id = await self._make_running_run(async_session_factory)
+            backend = MagicMock()
+            backend.is_local_mode = False
+            backend.get_execution_context = AsyncMock(
+                side_effect=ConcurrencyLimitReachedError("limit")
+            )
+            backend.release_context = AsyncMock()
+
+            delays = []
+            for _ in range(3):
+                async with async_session_factory() as session:
+                    run = (
+                        (
+                            await session.execute(
+                                select(AutomationRun)
+                                .options(selectinload(AutomationRun.automation))
+                                .where(AutomationRun.id == run_id)
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                before = utcnow()
+                with patch(
+                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                ):
+                    await _execute_run(
+                        run, mock_settings, async_session_factory, mock_client
+                    )
+                async with async_session_factory() as session:
+                    current = await session.get(AutomationRun, run_id)
+                    delays.append((current.deferred_until - before).total_seconds())
+                    # Put the run back in RUNNING so it can be deferred again.
+                    await session.execute(
+                        update(AutomationRun)
+                        .where(AutomationRun.id == run_id)
+                        .values(status=AutomationRunStatus.RUNNING, deferred_until=None)
+                    )
+                    await session.commit()
+
+            assert delays[0] < delays[1] < delays[2]
+        finally:
+            clear_config_cache()
+
+    async def test_count_running_runs_counts_only_running(self, async_session_factory):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            for status in (
+                AutomationRunStatus.RUNNING,
+                AutomationRunStatus.RUNNING,
+                AutomationRunStatus.PENDING,
+                AutomationRunStatus.COMPLETED,
+            ):
+                session.add(AutomationRun(automation_id=automation.id, status=status))
+            await session.commit()
+
+            assert await count_running_runs(session) == 2
+
+
+class _BrokenSessionContext:
+    async def __aenter__(self):
+        raise RuntimeError("database unreachable")
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def _broken_session_factory() -> Any:
+    return _BrokenSessionContext()
+
+
+class TestDeferredRunRequeueFailure:
+    """A failed requeue write must not leave the run stranded as RUNNING.
+
+    ``requeue_deferred_run`` returns False only when the guarded update matched
+    no row. A write failure raises so the caller records the failure instead of
+    treating it as a lost race and leaving the run RUNNING with no sandbox.
+    """
+
+    async def _make_running_run(self, async_session_factory):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(hours=1),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return run, run_id
+
+    async def test_requeue_write_failure_raises(self, async_session_factory):
+        run, _ = await self._make_running_run(async_session_factory)
+
+        with pytest.raises(DeferredRunRequeueError):
+            await requeue_deferred_run(
+                cast(Any, _broken_session_factory),
+                run,
+                deferred_until=utcnow() + timedelta(minutes=1),
+            )
+
+    async def test_failed_requeue_marks_run_failed(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A requeue write failure fails the run instead of stranding it."""
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(
+            side_effect=ConcurrencyLimitReachedError("limit")
+        )
+        backend.release_context = AsyncMock()
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.requeue_deferred_run",
+                new_callable=AsyncMock,
+                side_effect=DeferredRunRequeueError("write failed"),
+            ),
+        ):
+            await _execute_run_safe(
+                run, mock_settings, async_session_factory, mock_client
+            )
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.error_detail == "Internal error"
+
+
+class TestExpireAgedDeferredRuns:
+    """The sweep terminally skips aged deferred runs without any capacity check.
+
+    A deferred run is normally expired by its next dispatch attempt, but a poll
+    that finds every slot occupied returns before claiming, so the sweep must
+    reap those rows independently.
+    """
+
+    async def _seed_deferred_run(
+        self,
+        async_session_factory,
+        *,
+        age_seconds: int,
+        retry_in_seconds: int,
+        subject_key: str | None = None,
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+                created_at=utcnow() - timedelta(seconds=age_seconds),
+                deferred_until=utcnow() + timedelta(seconds=retry_in_seconds),
+                subject_key=subject_key,
+            )
+            session.add(run)
+            await session.commit()
+            return run.id
+
+    async def test_expires_run_past_age_and_retry(self, async_session_factory):
+        run_id = await self._seed_deferred_run(
+            async_session_factory, age_seconds=7 * 3600, retry_in_seconds=-1
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 1
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.deferred_until is None
+            assert updated.completed_at is not None
+            assert updated.status_detail == {"kind": "defer_expired"}
+
+    async def test_expiring_a_subject_run_releases_its_subject(
+        self, async_session_factory
+    ):
+        """A run that owns a subject must not keep routing events once dead.
+
+        The run has no ``started_at`` (the requeue clears it), so a terminal
+        run that kept its subject would still answer ``continue_conversation``
+        and swallow later events into a run that never dispatches.
+        """
+        run_id = await self._seed_deferred_run(
+            async_session_factory,
+            age_seconds=7 * 3600,
+            retry_in_seconds=-1,
+            subject_key="TEAM/C123/1.1",
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 1
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.subject_released_at is not None
+
+    async def test_expiring_a_non_subject_run_leaves_release_unset(
+        self, async_session_factory
+    ):
+        """Only a run that owns a subject gets a release stamp."""
+        run_id = await self._seed_deferred_run(
+            async_session_factory, age_seconds=7 * 3600, retry_in_seconds=-1
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 1
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.subject_released_at is None
+
+    @patch(
+        "openhands.automation.utils.run.capture_automation_event",
+        new_callable=AsyncMock,
+    )
+    async def test_expiring_emits_skip_event_per_run(
+        self, capture_event, async_session_factory
+    ):
+        """The sweep is the only path that skips a capacity-blocked run, so it
+        must emit the same ``automation_run_skipped`` event the dispatcher
+        does, with ``skip_reason: defer_expired`` and run attribution."""
+        run_id = await self._seed_deferred_run(
+            async_session_factory, age_seconds=7 * 3600, retry_in_seconds=-1
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 1
+
+        capture_event.assert_awaited_once()
+        call_args = capture_event.await_args
+        assert call_args is not None
+        args, kwargs = call_args
+        assert args[0] == "automation_run_skipped"
+        assert kwargs["run"].id == run_id
+        assert kwargs["automation"].id == kwargs["run"].automation_id
+        assert kwargs["properties"]["skip_reason"] == "defer_expired"
+        assert kwargs["properties"]["trigger_source"] == "dispatcher"
+
+    async def test_keeps_run_within_age(self, async_session_factory):
+        run_id = await self._seed_deferred_run(
+            async_session_factory, age_seconds=3600, retry_in_seconds=-1
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 0
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.PENDING
+
+    async def test_keeps_run_not_yet_due(self, async_session_factory):
+        run_id = await self._seed_deferred_run(
+            async_session_factory, age_seconds=7 * 3600, retry_in_seconds=300
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 0
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.PENDING
+
+
+class TestExecuteRunProvisioningRetry:
+    """A sandbox that fails to start before the entrypoint runs is retried with
+    a fresh sandbox, as long as the run is still RUNNING."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_retries(self, monkeypatch):
+        sandbox_cfg = get_config().sandbox
+        monkeypatch.setattr(sandbox_cfg, "sandbox_provision_retry_delay", 0)
+        monkeypatch.setattr(sandbox_cfg, "sandbox_provision_max_attempts", 3)
+
+    async def _make_running_run(self, async_session_factory):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(seconds=60),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+        return run, run_id
+
+    @staticmethod
+    async def _load(async_session_factory, run_id) -> AutomationRun:
+        async with async_session_factory() as session:
+            return (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+
+    @staticmethod
+    async def _set_status(async_session_factory, run_id, status, error=None):
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run is not None
+            run.status = status
+            run.error_detail = error
+            await session.commit()
+
+    @staticmethod
+    def _provisioning_error() -> SandboxProvisioningError:
+        return SandboxProvisioningError(
+            "Sandbox failed to start: status=ERROR, "
+            "status_detail=runtime_ingress:connection_error",
+            sandbox_id="sb-failed",
+            status="ERROR",
+            reason="runtime_ingress:connection_error",
+        )
+
+    @staticmethod
+    def _backend(side_effect) -> MagicMock:
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(side_effect=side_effect)
+        backend.release_context = AsyncMock()
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        return backend
+
+    @staticmethod
+    def _ctx() -> MagicMock:
+        return MagicMock(
+            agent_url="http://agent.test",
+            sandbox_id="sbx-ok",
+            session_key="sk-1",
+            api_key=None,
+        )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_retries_sandbox_that_failed_to_start(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        original_timeout_at = run.timeout_at
+        deadlines = []
+        ctx = self._ctx()
+
+        async def acquire(_client):
+            if not deadlines:
+                deadlines.append(None)
+                raise self._provisioning_error()
+            # The retry must have pushed the watchdog deadline out first.
+            deadlines.append(
+                (await self._load(async_session_factory, run_id)).timeout_at
+            )
+            return ctx
+
+        backend = self._backend(acquire)
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 2
+        assert deadlines[1] > original_timeout_at + timedelta(
+            seconds=get_config().sandbox.sandbox_ready_timeout
+        )
+        mock_execute.assert_awaited_once()
+        backend.release_context.assert_not_called()
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.RUNNING
+        assert updated.sandbox_id == "sbx-ok"
+
+    async def test_exhausted_retries_fail_with_runtime_reason(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(self._provisioning_error())
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 3
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.FAILED
+        assert updated.error_detail is not None
+        assert "runtime_ingress:connection_error" in updated.error_detail
+        assert "attempts: 3" in updated.error_detail
+        detail = updated.status_detail
+        assert detail is not None
+        assert detail["phase"] == "dispatch"
+        assert detail["kind"] == "environment_unavailable"
+        assert detail["transient"] is True
+        assert detail["code"] == "sandbox_error"
+        assert detail["sandbox_status"] == "ERROR"
+        assert detail["sandbox_status_detail"] == "runtime_ingress:connection_error"
+        assert detail["attempts"] == 3
+        assert updated.automation.enabled is True
+        backend.release_context.assert_not_called()
+
+    async def test_single_attempt_disables_retry(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        monkeypatch.setattr(get_config().sandbox, "sandbox_provision_max_attempts", 1)
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(self._provisioning_error())
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 1
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.FAILED
+        assert updated.status_detail is not None
+        assert updated.status_detail["attempts"] == 1
+
+    @pytest.mark.parametrize(
+        ("status", "error"),
+        [
+            (AutomationRunStatus.CANCELLED, "Cancelled by user"),
+            (AutomationRunStatus.FAILED, "Timed out: watchdog"),
+        ],
+    )
+    async def test_no_retry_once_run_is_terminal(
+        self, async_session_factory, mock_settings, mock_client, status, error
+    ):
+        """Cancel or watchdog expiry during provisioning stops retries, and the
+        dispatcher never overwrites that terminal state."""
+        run, run_id = await self._make_running_run(async_session_factory)
+
+        async def acquire(_client):
+            await self._set_status(async_session_factory, run_id, status, error)
+            raise self._provisioning_error()
+
+        backend = self._backend(acquire)
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 1
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == status
+        assert updated.error_detail == error
+        assert updated.status_detail is None
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_cancel_during_provisioning_releases_sandbox(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A sandbox that comes up after the run was cancelled is deleted and
+        the entrypoint never starts."""
+        run, run_id = await self._make_running_run(async_session_factory)
+        ctx = self._ctx()
+
+        async def acquire(_client):
+            await self._set_status(
+                async_session_factory,
+                run_id,
+                AutomationRunStatus.CANCELLED,
+                "Cancelled by user",
+            )
+            return ctx
+
+        backend = self._backend(acquire)
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.release_context.assert_awaited_once_with(mock_client, ctx)
+        mock_execute.assert_not_called()
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.CANCELLED
+        assert updated.sandbox_id is None
+
+    async def test_concurrency_limit_on_retry_is_deferred(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(
+            [self._provisioning_error(), ConcurrencyLimitReachedError("limit")]
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 2
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.PENDING
+        assert updated.deferred_until is not None
+        assert updated.status_detail is not None
+        assert updated.status_detail["kind"] == "concurrency_limit"
+
+    async def test_other_errors_are_not_retried(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(RuntimeError("boom"))
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 1
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.FAILED
+        assert updated.status_detail is not None
+        assert updated.status_detail["kind"] == "unknown"
+
+
 class TestExecuteRunDerivedConversationId:
     """A subject-owning run creates its conversation under the derived id."""
 
@@ -1656,11 +3421,13 @@ class TestExecuteRunDerivedConversationId:
         trigger: dict,
         subject_key: str | None,
         agent_profile_id: uuid.UUID | None = None,
+        run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER,
     ):
         """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
+                run_as_kind=run_as_kind,
                 org_id=TEST_ORG_ID,
                 name="Mention Responder",
                 agent_profile_id=agent_profile_id,
@@ -1699,7 +3466,10 @@ class TestExecuteRunDerivedConversationId:
 
         backend = MagicMock()
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key=None,
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
@@ -1734,8 +3504,35 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
-            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997"
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997", None
         )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_as_service_subject_run_gets_an_account_keyed_id(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A run-as-service run's id carries the account; a run-as change re-keys it."""
+        env_vars, org_id, automation_id = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "event", "source": "github-events", "on": "*"},
+            subject_key="OpenHands/OpenHands/16997",
+            run_as_kind=AutomationRunAsKind.SERVICE,
+        )
+
+        user_owned_id = conversation_id_for(
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997", None
+        )
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
+            org_id,
+            automation_id,
+            "github-events",
+            "OpenHands/OpenHands/16997",
+            TEST_USER_ID,
+        )
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] != user_owned_id
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_run_without_a_subject_gets_no_id(

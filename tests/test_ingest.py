@@ -128,10 +128,16 @@ def captured_telemetry(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args) -> bool:
             return False
 
+        async def aclose(self) -> None:
+            return None
+
         async def post(self, url: str, *, json: dict[str, Any]) -> FakeResponse:
             events.append(str(json["event"]))
             return FakeResponse()
 
+    # The shared client caches the first instance it creates; start the test
+    # without one so the fake is dropped again with the rest of the patch.
+    monkeypatch.setattr(telemetry, "_telemetry_http_client", None)
     monkeypatch.setattr(telemetry.httpx, "AsyncClient", FakeClient)
     yield events
     clear_config_cache()
@@ -672,6 +678,43 @@ async def test_accept_event_telemetry_needs_a_session_source(
 
     assert result.matched == 1
     assert captured_telemetry == []
+
+
+@pytest.mark.asyncio
+async def test_accept_event_skips_product_telemetry_when_nothing_matches(
+    org_id: uuid.UUID,
+    async_session,
+    async_session_factory,
+    slack_payload: dict,
+    mock_authenticated_user,
+    captured_telemetry: list[str],
+):
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "message"},
+        )
+    )
+    await async_session.commit()
+
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+        ),
+        async_session,
+        session_factory=async_session_factory,
+    )
+
+    assert result.matched == 0
+    assert captured_telemetry == []
+
+    events = await fetch_events(async_session)
+    assert len(events) == 1
+    assert events[0].matched_count == 0
 
 
 @pytest.mark.asyncio

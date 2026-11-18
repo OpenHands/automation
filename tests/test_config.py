@@ -3,6 +3,7 @@
 import warnings
 
 import pytest
+from pydantic import ValidationError
 
 from openhands.automation.config import (
     HttpSettings,
@@ -170,6 +171,16 @@ class TestSandboxSettings:
         assert settings.default_run_duration == 1200
         assert settings.max_run_duration == 2400
         assert settings.sandbox_poll_interval == 10
+
+    def test_provision_retry_settings(self, monkeypatch):
+        assert SandboxSettings().sandbox_provision_max_attempts == 3
+        assert SandboxSettings().sandbox_provision_retry_delay == 30
+        monkeypatch.setenv("AUTOMATION_SANDBOX_PROVISION_MAX_ATTEMPTS", "1")
+        assert SandboxSettings().sandbox_provision_max_attempts == 1
+        with pytest.raises(ValidationError):
+            SandboxSettings(sandbox_provision_max_attempts=0)
+        with pytest.raises(ValidationError):
+            SandboxSettings(sandbox_provision_retry_delay=-1)
 
 
 class TestAppConfig:

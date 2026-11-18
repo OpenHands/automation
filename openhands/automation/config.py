@@ -211,11 +211,24 @@ class SandboxSettings(BaseSettings):
             verification result becomes terminal in seconds (default: 600)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
+        AUTOMATION_SANDBOX_PROVISION_MAX_ATTEMPTS: Sandboxes tried per run when
+            one fails to start before the entrypoint runs; 1 disables retries
+            (default: 3)
+        AUTOMATION_SANDBOX_PROVISION_RETRY_DELAY: Base delay in seconds before
+            the next attempt, doubled per attempt with +/-50% jitter
+            (default: 30)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
         AUTOMATION_EXTERNAL_MAX_FILESIZE: Max tarball size (default: 100MB)
         AUTOMATION_RATE_LIMIT_MIN_WAIT: Initial 429 wait (default: 10)
         AUTOMATION_RATE_LIMIT_MAX_WAIT: Max retry wait (default: 60)
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
+        AUTOMATION_SANDBOX_INTERNAL_URL: URL this service uses to reach
+            sandboxes. The OpenHands API returns sandbox URLs with the public
+            address that browsers use. When set, this URL replaces their
+            origin (scheme://host[:port]) and keeps the path and query. Set it
+            when the public address resolves differently inside the network
+            or a firewall blocks it. Empty uses the URLs unchanged
+            (default: "")
     """
 
     default_run_duration: int = 10 * 60  # 10 minutes
@@ -230,11 +243,14 @@ class SandboxSettings(BaseSettings):
     run_timeout_hard_grace: int = 600
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
+    sandbox_provision_max_attempts: int = Field(default=3, ge=1)
+    sandbox_provision_retry_delay: float = Field(default=30, ge=0)
     external_download_timeout: int = 120
     external_max_filesize: int = 100 * 1024 * 1024  # 100 MB
     rate_limit_min_wait: int = 10
     rate_limit_max_wait: int = 60
     rate_limit_max_retries: int = 5
+    sandbox_internal_url: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
@@ -367,6 +383,8 @@ class GitSyncSettings(BaseSettings):
         AUTOMATION_GIT_SYNC_TOKEN: PAT (or other bearer token) for HTTPS
             authentication against the repo. Passed per git-invocation via
             `-c http.extraHeader`, never written to disk or the remote URL.
+            Sent as Basic auth (`x-access-token`), or as a Bearer header for
+            remotes such as Bitbucket Data Center that reject that username.
         AUTOMATION_GIT_SYNC_ENCRYPTION_KEY: When set, encrypts file contents
             (via the SDK's Fernet-based Cipher, same primitive as the KV
             store) before they're written to the synced repo. Empty disables
@@ -378,7 +396,9 @@ class GitSyncSettings(BaseSettings):
         AUTOMATION_GIT_SYNC_LOCAL_WORKDIR: Local working directory for the
             clone. Defaults to "{workspace_base}/git-sync" when empty.
         AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS: Timeout for individual git
-            subprocess invocations (default: 60).
+            subprocess invocations (default: 300). A first clone of a
+            normal-sized repo over a slow link can take minutes. Each org can
+            override it from the Git Sync config (`git_timeout_seconds`).
         AUTOMATION_GIT_SYNC_SECRET: Key that wraps the per-org git token and
             encryption key at rest (see `git_sync/secret_store.py`). Falls
             back to AUTOMATION_KV_SECRET, then (local mode only) to a key
@@ -407,7 +427,7 @@ class GitSyncSettings(BaseSettings):
     git_sync_author_name: str = "OpenHands Automation"
     git_sync_author_email: str = "automation@openhands.dev"
     git_sync_local_workdir: str = ""
-    git_sync_git_timeout_seconds: float = 60.0
+    git_sync_git_timeout_seconds: float = 300.0
     git_sync_secret: str = ""
 
     # After this many consecutive auth failures, the loop stops logging a full
@@ -501,6 +521,13 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DB_POOL_SIZE: Connection pool size (default: 10)
         AUTOMATION_DB_MAX_OVERFLOW: Max overflow connections (default: 5)
         AUTOMATION_DB_POOL_RECYCLE: Pool recycle time in seconds (default: 1800)
+        AUTOMATION_RUN_MIGRATIONS_ON_STARTUP: Run `alembic upgrade head` on
+            startup for PostgreSQL too (default: false). SQLite always migrates
+            on startup.
+        AUTOMATION_CREATE_DATABASE_IF_MISSING: Have the migrations create the
+            PostgreSQL database first if it does not exist (default: false).
+            Read by migrations/env.py, so it also applies to
+            `alembic upgrade head`. The database user needs CREATEDB.
 
         # Database URL (alternative to host/port config, supports SQLite for local mode)
         AUTOMATION_DB_URL: Full database URL (e.g., sqlite+aiosqlite:////data/automations.db)
@@ -528,6 +555,14 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
         AUTOMATION_DISPATCHER_BATCH_SIZE: Dispatcher batch size (default: 10)
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
+        AUTOMATION_MAX_CONCURRENT_RUNS: Cap on concurrently RUNNING runs across
+            the service (default: 0 = unlimited). At the cap, further PENDING
+            runs wait in the queue until a slot frees.
+        AUTOMATION_DEFER_MAX_AGE_SECONDS: Longest a run blocked by a transient
+            limit stays deferred before it is SKIPPED (default: 21600; 0
+            disables deferral and restores immediate skip)
+        AUTOMATION_DEFER_BACKOFF_BASE_SECONDS: Base delay of the bounded
+            exponential backoff between deferrals (default: 60)
         AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
             auto-disabling an automation (default: 3, <=0 disables auto-disable)
         AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD: Consecutive failures
@@ -540,6 +575,10 @@ class ServiceSettings(BaseSettings):
         # Workspace retention (local mode only)
         AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
             for terminal runs older than this (default: 604800 — 7 days).
+            A run the watchdog itself terminalizes has its workspace removed
+            right then, so this is the backstop for the ones it never sees:
+            runs completed by callback, cancelled runs, and crashes. Set it to
+            0 to disable the sweep.
 
         # Sandbox cleanup (cloud mode only)
         AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS: Seconds after a run ends before
@@ -564,6 +603,8 @@ class ServiceSettings(BaseSettings):
         # Product telemetry (optional)
         AUTOMATION_POSTHOG_API_KEY: PostHog project key. Empty disables capture.
         AUTOMATION_POSTHOG_HOST: PostHog capture host (default: https://us.i.posthog.com)
+        AUTOMATION_TELEMETRY_DEPLOYMENT_MODE: Label events local, cloud, or self_hosted
+            (default: local in local mode, otherwise cloud)
     """
 
     # Database (PostgreSQL - Cloud mode)
@@ -576,6 +617,7 @@ class ServiceSettings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800  # 30 minutes
+    run_migrations_on_startup: bool = False
 
     # Database URL (alternative config, supports SQLite for local mode)
     # When set, takes precedence over host/port config.
@@ -629,6 +671,25 @@ class ServiceSettings(BaseSettings):
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
 
+    # Maximum number of automation runs allowed to be RUNNING at once across the
+    # whole service. 0 (the default) disables the gate: every claimed run is
+    # launched, preserving today's behavior. When set, the dispatcher admits at
+    # most this many runs per poll and leaves the rest PENDING (the table is the
+    # queue) until a slot frees. The gate bounds total in-flight sandboxes.
+    max_concurrent_runs: int = Field(default=0, ge=0)
+
+    # A run blocked by a transient limit (organization concurrency cap, daily
+    # sandbox quota) is returned to PENDING with deferred_until instead of being
+    # marked terminal SKIPPED. This is the longest a run may stay deferred; past
+    # it the run is SKIPPED with a `defer_expired` status detail. 0 disables
+    # deferral and restores the immediate-skip behavior.
+    defer_max_age_seconds: int = Field(default=21600, ge=0)  # 6 hours
+
+    # Base delay of the bounded exponential backoff between deferrals. The nth
+    # consecutive deferral waits defer_backoff_base_seconds * 2**(n-1), capped
+    # at defer_max_age_seconds.
+    defer_backoff_base_seconds: int = Field(default=60, ge=0)
+
     # Auto-disable rules. `failure_disable_threshold` is the fast path for
     # unambiguous config faults (bad key, revoked token) and needs no time
     # guard. The two rules below catch automations that merely fail forever;
@@ -651,6 +712,12 @@ class ServiceSettings(BaseSettings):
     # and the watchdog deletes it once the delay has passed, so the run's
     # conversation stays resumable in the UI meanwhile.
     sandbox_cleanup_delay_seconds: int = Field(default=0, ge=0)
+
+    # Cloud mode: how long a completed run's sandbox keeps running before it is
+    # deleted or paused. The agent server posts a partial batch of conversation
+    # events to the app server only after WebhookSpec.flush_delay (30 s) without
+    # a new event, so earlier teardown loses the conversation's last events.
+    sandbox_event_flush_grace_seconds: int = Field(default=35, ge=0)
 
     # How long an accepted event stays in `integration_events`. It bounds two
     # things: the dedupe window (a redelivery older than this is indistinguishable
@@ -691,6 +758,9 @@ class ServiceSettings(BaseSettings):
     # project key is configured by the deployment.
     posthog_api_key: str = ""
     posthog_host: str = "https://us.i.posthog.com"
+    # Overrides the deployment_mode / deployment_kind event labels. A self-hosted
+    # (OHE) deployment runs in cloud mode but is not remote.
+    telemetry_deployment_mode: Literal["local", "cloud", "self_hosted"] | None = None
 
     model_config = {"env_prefix": "AUTOMATION_"}
 

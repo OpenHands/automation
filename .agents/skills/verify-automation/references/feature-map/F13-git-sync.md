@@ -41,8 +41,8 @@ Routes: `GET /api/automation/v1/git-sync/status`, `PUT /api/automation/v1/git-sy
 - `F13.commit-author`: commits use the message `Sync automations from agent server` and author `OpenHands Automation <automation@openhands.dev>` unless `author_name`/`author_email` are set.
 - `F13.slugs`: slugs are the lowercased name with non-alphanumeric runs collapsed to `-`, capped at 80 characters; a second automation with the same name gets `-<first 8 hex of its id>`.
 - `F13.export-external`: an automation with an external `tarball_path` exports only `automation.yaml` with `tarball_source: {type: external, url: ...}`.
-- `F13.import-new`: a directory pushed to the repo with `automation.yaml` and `tarball/` becomes an automation owned by the configuring user, with an internal tarball, and the import pushes no commit of its own.
-- `F13.import-invalid-skipped`: a directory with invalid YAML or without `entrypoint` is skipped with a logged warning; the cycle still succeeds.
+- `F13.import-new`: a directory pushed to the repo with `automation.yaml` and `tarball/` becomes an INACTIVE automation (its YAML sets neither `enabled` nor `state`) owned by the configuring user, with an internal tarball, and the import pushes no commit of its own.
+- `F13.import-invalid-skipped`: a directory with invalid YAML, without `entrypoint`, or with `keep_alive: false` on a `continue_conversation` trigger is skipped with a logged warning; the cycle still succeeds.
 - `F13.import-update`: editing `name` and `enabled` in a synced `automation.yaml` updates the automation; its slug directory stays.
 - `F13.conflict-service-wins`: when the same automation is edited through the API and in git before a sync, the API version ends up in both the database and the repo.
 - `F13.import-delete`: removing a synced directory in git soft-deletes the automation (404 afterwards) and drops its state row.
@@ -278,29 +278,33 @@ Preconditions:
   control-automation api POST /v1/git-sync/sync --expect 202 --check triggered eq true
   control-automation api GET /v1/git-sync/status --until-ok 60 --check last_synced_at ne "$PREV" --check sync_in_progress eq false --check last_error eq null --check last_synced_commit eq "$PUSHED"
   IMP=$(control-automation state sql "SELECT automation_id FROM automation_git_sync_state WHERE slug = 'qa-from-git'" --field rows.0.automation_id)
-  control-automation api GET "/v1/$IMP" --expect 200 --check name eq 'qa from git' --check user_id eq "$ME" --check entrypoint eq 'bash run.sh' --check trigger.schedule eq '0 9 * * 1' --check tarball_path matches '^oh-internal://' --check enabled eq true --save F13.import-new/automation
+  control-automation api GET "/v1/$IMP" --expect 200 --check name eq 'qa from git' --check user_id eq "$ME" --check entrypoint eq 'bash run.sh' --check trigger.schedule eq '0 9 * * 1' --check tarball_path matches '^oh-internal://' --check enabled eq false --check state eq INACTIVE --save F13.import-new/automation
   control-automation state sql "SELECT dirty FROM automation_git_sync_state WHERE slug = 'qa-from-git'" --check rows.0.dirty eq 0
   test "$(git -C "$B" rev-parse main)" = "$PUSHED"
   ```
-  The new automation runs as the configuring user (`$ME`), its tarball was
+  The new automation is INACTIVE because the YAML sets neither `enabled` nor
+  `state`; an edit that omits both keeps the current value. It runs as the
+  configuring user (`$ME`), its tarball was
   rebuilt from `tarball/` into an internal upload, and the cycle pushed
   nothing back (`main` is still the pushed commit).
 - **Invalid directories are skipped (`F13.import-invalid-skipped`).**
   Requires: `F13.import-new`
   ```sh
-  mkdir -p "$W/automations/qa-bad-yaml" "$W/automations/qa-no-entry"
+  mkdir -p "$W/automations/qa-bad-yaml" "$W/automations/qa-no-entry" "$W/automations/qa-keep-off"
   printf 'name: [unclosed\n' > "$W/automations/qa-bad-yaml/automation.yaml"
   printf 'name: qa no entry\ntrigger: {type: cron, schedule: "0 9 * * 1"}\ntarball_source: {type: external, url: "https://example.com/qa.tar.gz"}\n' > "$W/automations/qa-no-entry/automation.yaml"
+  printf 'name: qa keep off\nentrypoint: bash run.sh\nkeep_alive: false\ntrigger: {type: event, source: qa-src, "on": "qa.*", destination: continue_conversation, subject_key_expr: id}\ntarball_source: {type: external, url: "https://example.com/qa.tar.gz"}\n' > "$W/automations/qa-keep-off/automation.yaml"
   git -C "$W" add -A
   git -C "$W" -c user.name=qa -c user.email=qa@example.invalid commit -qm 'qa: invalid automations'
   git -C "$W" push -q origin HEAD:main
   PREV=$(control-automation api GET /v1/git-sync/status --field last_synced_at)
   control-automation api POST /v1/git-sync/sync --expect 202 --check triggered eq true
   control-automation api GET /v1/git-sync/status --until-ok 60 --check last_synced_at ne "$PREV" --check sync_in_progress eq false --check last_error eq null --save F13.import-invalid-skipped/status
-  control-automation state sql "SELECT count(*) AS n FROM automation_git_sync_state WHERE slug IN ('qa-bad-yaml', 'qa-no-entry')" --check rows.0.n eq 0
-  control-automation state sql "SELECT count(*) AS n FROM automations WHERE name = 'qa no entry'" --check rows.0.n eq 0
+  control-automation state sql "SELECT count(*) AS n FROM automation_git_sync_state WHERE slug IN ('qa-bad-yaml', 'qa-no-entry', 'qa-keep-off')" --check rows.0.n eq 0
+  control-automation state sql "SELECT count(*) AS n FROM automations WHERE name IN ('qa no entry', 'qa keep off')" --check rows.0.n eq 0
   control-automation logs --service automation --grep "Skipping invalid automation directory 'qa-bad-yaml' from git: automation.yaml is not valid YAML" --expect-min 1
   control-automation logs --service automation --grep "Skipping invalid automation directory 'qa-no-entry' from git: automation.yaml missing required 'name' or 'entrypoint'" --expect-min 1
+  control-automation logs --service automation --grep "Skipping invalid automation directory 'qa-keep-off' from git: keep_alive cannot be false when destination is 'continue_conversation'" --expect-min 1
   control-automation api GET "/v1/$IMP" --expect 200 --check name eq 'qa from git'
   ```
 - **Update from git (`F13.import-update`).**

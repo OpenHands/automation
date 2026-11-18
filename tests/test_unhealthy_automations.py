@@ -1,5 +1,6 @@
 """Tests for unhealthy automation classification and auto-disable behavior."""
 
+import asyncio
 import uuid
 from datetime import timedelta
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
@@ -172,6 +174,13 @@ async def test_auto_disables_after_consecutive_permanent_failures(
         assert events[0].source == "consecutive_permanent_failures"
         assert events[0].run_id is not None
         assert str(events[0].run_id) == automation.disabled_detail["run_id"]
+        (change,) = await session.scalars(
+            select(AutomationChangeEvent).where(
+                AutomationChangeEvent.automation_id == automation.id,
+                AutomationChangeEvent.action == "disable",
+            )
+        )
+        assert change.actor_kind == "system"
 
 
 async def test_direct_disable_records_event_history(sqlite_session_factory):
@@ -206,6 +215,15 @@ async def test_direct_disable_records_event_history(sqlite_session_factory):
     )
 
     assert disabled is True
+    async with sqlite_session_factory() as session:
+        # The disable is a Core update, which the audit hook cannot see.
+        (change,) = await session.scalars(
+            select(AutomationChangeEvent).where(
+                AutomationChangeEvent.automation_id == automation_id,
+                AutomationChangeEvent.action == "disable",
+            )
+        )
+    assert change.actor_kind == "system"
 
     async with sqlite_session_factory() as session:
         events = (
@@ -533,6 +551,47 @@ async def test_re_enabling_clears_prior_failure_history(
         assert await maybe_disable_unhealthy_automation(session, automation.id) is False
         await session.refresh(automation)
         assert automation.enabled is True
+
+
+async def test_runs_from_the_same_second_as_the_disable_stay_before_the_boundary(
+    sqlite_session_factory,
+):
+    """Runs and disable events share one clock, so failures from just before a
+    disable never count again after a re-enable, even within one second."""
+
+    def _failed_run(automation: Automation) -> AutomationRun:
+        # No created_at: the column default sets it, as in production.
+        return AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.FAILED,
+            status_detail=_permanent_detail(),
+            completed_at=utcnow(),
+        )
+
+    # Start early in a second so all of it happens within that second: a
+    # whole-second disable time would then sort before the runs it follows.
+    while utcnow().microsecond > 300_000:
+        await asyncio.sleep(0.01)
+
+    async with sqlite_session_factory() as session:
+        automation = await _create_automation(session)
+        session.add_all([_failed_run(automation) for _ in range(3)])
+        await session.flush()
+        assert await maybe_disable_unhealthy_automation(
+            session, automation.id, threshold=3
+        )
+
+        automation.enabled = True
+        automation.disabled_reason = None
+        automation.disabled_detail = None
+        automation.disabled_at = None
+        session.add(_failed_run(automation))
+        await session.flush()
+
+        # One new failure, below the threshold of 3.
+        assert not await maybe_disable_unhealthy_automation(
+            session, automation.id, threshold=3
+        )
 
 
 # --- Opt-in behavior ---
