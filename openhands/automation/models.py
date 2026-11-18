@@ -18,7 +18,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     Uuid,
     text,
 )
@@ -178,7 +177,7 @@ class Automation(Base):
         JSON, nullable=True
     )
 
-    impact_metrics: Mapped[list[dict[str, Any]] | None] = mapped_column(
+    outcome_parsers: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON, nullable=True
     )
 
@@ -279,10 +278,10 @@ class Automation(Base):
     )
 
 
-class AutomationRunImpactValue(Base):
-    """One extracted impact metric value for one completed automation run."""
+class AutomationOutcomeValue(Base):
+    """One typed automation outcome value submitted by a run or agent."""
 
-    __tablename__ = "automation_run_impact_values"
+    __tablename__ = "automation_outcome_values"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
@@ -291,23 +290,20 @@ class AutomationRunImpactValue(Base):
         ForeignKey("automations.id", ondelete="CASCADE"),
         nullable=False,
     )
-    run_id: Mapped[uuid.UUID] = mapped_column(
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
-        ForeignKey("automation_runs.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
     )
-    metric_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    metric_label: Mapped[str] = mapped_column(String(200), nullable=False)
-    expression: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
     value_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    value_json: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     numeric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     text_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     boolean_value: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    extraction_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    run_completed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+    datetime_value: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
+    json_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -316,27 +312,31 @@ class AutomationRunImpactValue(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
-            "run_id", "metric_key", name="uq_automation_run_impact_run_metric"
-        ),
         Index(
-            "ix_automation_run_impact_automation_metric_completed",
+            "ix_automation_outcome_values_automation_key_created",
             "automation_id",
-            "metric_key",
-            "run_completed_at",
+            "key",
+            "created_at",
         ),
-        Index("ix_automation_run_impact_org_completed", "org_id", "run_completed_at"),
+        Index("ix_automation_outcome_values_org_created", "org_id", "created_at"),
         Index(
-            "ix_automation_run_impact_org_automation_completed",
+            "ix_automation_outcome_values_org_automation_created",
             "org_id",
             "automation_id",
-            "run_completed_at",
+            "created_at",
         ),
         Index(
-            "ix_automation_run_impact_numeric",
+            "ix_automation_outcome_values_type_created",
             "automation_id",
-            "metric_key",
-            "run_completed_at",
+            "key",
+            "value_type",
+            "created_at",
+        ),
+        Index(
+            "ix_automation_outcome_values_numeric",
+            "automation_id",
+            "key",
+            "created_at",
             "numeric_value",
             postgresql_where=(numeric_value.isnot(None)),
             sqlite_where=(numeric_value.isnot(None)),

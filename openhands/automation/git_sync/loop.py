@@ -65,10 +65,6 @@ from openhands.automation.git_sync.serializer import (
     is_generated_path,
     serialize_automation,
 )
-from openhands.automation.impact_metrics import (
-    ImpactMetricDefinition,
-    validate_impact_metrics,
-)
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncOrgConfig,
@@ -79,6 +75,10 @@ from openhands.automation.models import (
 )
 from openhands.automation.observability_associations import (
     validate_observability_associations,
+)
+from openhands.automation.outcome_values import (
+    OutcomeParserDefinition,
+    validate_outcome_parsers,
 )
 from openhands.automation.schemas import (
     Trigger,
@@ -538,17 +538,17 @@ async def _validate_and_resolve_fields(
     observability_associations = validate_observability_associations(
         fields.get("observability_associations")
     )
-    raw_impact_metrics = fields.get("impact_metrics")
-    impact_metrics = None
-    if raw_impact_metrics is not None:
-        if not isinstance(raw_impact_metrics, list):
-            raise ValueError("automation.yaml 'impact_metrics' must be a list")
-        impact_metrics = [
-            metric.model_dump()
-            for metric in validate_impact_metrics(
+    raw_outcome_parsers = fields.get("outcome_parsers")
+    outcome_parsers = None
+    if raw_outcome_parsers is not None:
+        if not isinstance(raw_outcome_parsers, list):
+            raise ValueError("automation.yaml 'outcome_parsers' must be a list")
+        outcome_parsers = [
+            parser.model_dump()
+            for parser in validate_outcome_parsers(
                 [
-                    ImpactMetricDefinition.model_validate(metric)
-                    for metric in raw_impact_metrics
+                    OutcomeParserDefinition.model_validate(parser)
+                    for parser in raw_outcome_parsers
                 ]
             )
             or []
@@ -633,7 +633,7 @@ async def _validate_and_resolve_fields(
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
         "observability_associations": observability_associations,
-        "impact_metrics": impact_metrics,
+        "outcome_parsers": outcome_parsers,
         "tags": tags,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,

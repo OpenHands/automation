@@ -32,6 +32,7 @@ from openhands.automation.middleware import (
     TelemetryContextMiddleware,
 )
 from openhands.automation.observability import init_observability
+from openhands.automation.outcome_router import router as outcome_router
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
@@ -317,6 +318,7 @@ app.include_router(usage_router, prefix=_base_path)
 app.include_router(git_sync_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)
+app.include_router(outcome_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 
 

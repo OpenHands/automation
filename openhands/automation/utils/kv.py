@@ -63,16 +63,17 @@ KV_TOKEN_EXPIRATION_HOURS = 24
 class KVTokenClaims:
     """Verified claims from a KV store JWT token."""
 
-    __slots__ = ("automation_id",)
+    __slots__ = ("automation_id", "run_id")
 
-    def __init__(self, automation_id: uuid.UUID):
+    def __init__(self, automation_id: uuid.UUID, run_id: uuid.UUID | None = None):
         self.automation_id = automation_id
+        self.run_id = run_id
 
 
 def create_kv_token(
     secret: str,
     automation_id: uuid.UUID,
-    run_id: uuid.UUID,
+    run_id: uuid.UUID | None = None,
 ) -> str:
     """Create a JWT token for KV store access.
 
@@ -82,7 +83,7 @@ def create_kv_token(
     Args:
         secret: The signing secret (AUTOMATION_KV_SECRET)
         automation_id: UUID of the automation
-        run_id: UUID of the current run (for audit)
+        run_id: optional UUID of the current run, used by run-scoped APIs
 
     Returns:
         Signed JWT token string
@@ -90,10 +91,11 @@ def create_kv_token(
     now = datetime.now(UTC)
     payload = {
         "automation_id": str(automation_id),
-        "run_id": str(run_id),
         "iat": now,
         "exp": now + timedelta(hours=KV_TOKEN_EXPIRATION_HOURS),
     }
+    if run_id is not None:
+        payload["run_id"] = str(run_id)
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
@@ -115,7 +117,9 @@ def verify_kv_token(secret: str, token: str) -> KVTokenClaims:
         automation_id_str = payload.get("automation_id")
         if not automation_id_str:
             raise KVTokenError("Token missing automation_id claim")
-        return KVTokenClaims(automation_id=uuid.UUID(automation_id_str))
+        run_id_str = payload.get("run_id")
+        run_id = uuid.UUID(run_id_str) if run_id_str else None
+        return KVTokenClaims(automation_id=uuid.UUID(automation_id_str), run_id=run_id)
     except jwt.ExpiredSignatureError:
         raise KVTokenError("Token has expired")
     except jwt.InvalidTokenError as e:

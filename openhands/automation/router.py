@@ -42,19 +42,14 @@ from openhands.automation.factory_router import (
     reject_factory_conflict,
 )
 from openhands.automation.git_sync import mark_git_sync_dirty
-from openhands.automation.impact_metrics import (
-    ImpactAggregation,
-    aggregate_numeric_values,
-    store_run_impact_values,
-)
 from openhands.automation.models import (
     Automation,
     AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationDraft,
+    AutomationOutcomeValue,
     AutomationRun,
     AutomationRunAsKind,
-    AutomationRunImpactValue,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
     AutomationVisibility,
@@ -64,6 +59,10 @@ from openhands.automation.observability import (
     automation_attributes,
     current_span_context,
     span,
+)
+from openhands.automation.outcome_values import (
+    OutcomeAggregation,
+    aggregate_outcome_values,
 )
 from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
@@ -100,10 +99,10 @@ from openhands.automation.schemas import (
     ChangeRunAsRequest,
     CreateAutomationRequest,
     EventTrigger,
-    ImpactAggregateBucket,
-    ImpactAggregateResponse,
-    ImpactValueResponse,
-    ImpactValuesResponse,
+    OutcomeAggregateBucket,
+    OutcomeAggregateResponse,
+    OutcomeValueResponse,
+    OutcomeValuesResponse,
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
@@ -336,8 +335,8 @@ async def create_automation(
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
-        impact_metrics=[metric.model_dump() for metric in body.impact_metrics]
-        if body.impact_metrics is not None
+        outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+        if body.outcome_parsers is not None
         else None,
         tags=body.tags,
         factory_id=body.factory_id,
@@ -445,8 +444,8 @@ async def create_automation_from_plugin_spec(
         agent_profile_id=runtime_fields["agent_profile_id"],
         trigger=trigger.model_dump(),
         observability_associations=body.observability_associations,
-        impact_metrics=[metric.model_dump() for metric in body.impact_metrics]
-        if body.impact_metrics is not None
+        outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+        if body.outcome_parsers is not None
         else None,
         tarball_path=runtime_fields["tarball_path"],
         setup_script_path=runtime_fields["setup_script_path"],
@@ -1726,120 +1725,124 @@ async def list_automation_runs(
     )
 
 
-@router.get("/{automation_id}/impact/values")
-async def list_automation_impact_values(
+@router.get("/{automation_id}/outcomes/values")
+async def list_automation_outcome_values(
     automation_id: uuid.UUID,
-    metric_key: str | None = Query(default=None, min_length=1, max_length=100),
+    key: str | None = Query(default=None, min_length=1, max_length=100),
+    run_id: uuid.UUID | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
-) -> ImpactValuesResponse:
+) -> OutcomeValuesResponse:
     await _get_org_automation(session, automation_id, user.org_id)
 
     conditions = [
-        AutomationRunImpactValue.automation_id == automation_id,
-        AutomationRunImpactValue.org_id == user.org_id,
+        AutomationOutcomeValue.automation_id == automation_id,
+        AutomationOutcomeValue.org_id == user.org_id,
     ]
-    if metric_key is not None:
-        conditions.append(AutomationRunImpactValue.metric_key == metric_key)
+    if key is not None:
+        conditions.append(AutomationOutcomeValue.key == key)
+    if run_id is not None:
+        conditions.append(AutomationOutcomeValue.run_id == run_id)
     if since is not None:
-        conditions.append(AutomationRunImpactValue.run_completed_at >= since)
+        conditions.append(AutomationOutcomeValue.created_at >= since)
     if until is not None:
-        conditions.append(AutomationRunImpactValue.run_completed_at <= until)
+        conditions.append(AutomationOutcomeValue.created_at <= until)
 
     total_result = await session.execute(
-        select(func.count()).select_from(AutomationRunImpactValue).where(*conditions)
+        select(func.count()).select_from(AutomationOutcomeValue).where(*conditions)
     )
     total = total_result.scalar_one()
     result = await session.execute(
-        select(AutomationRunImpactValue)
+        select(AutomationOutcomeValue)
         .where(*conditions)
         .order_by(
-            AutomationRunImpactValue.run_completed_at.desc(),
-            AutomationRunImpactValue.id.desc(),
+            AutomationOutcomeValue.created_at.desc(),
+            AutomationOutcomeValue.id.desc(),
         )
         .offset(offset)
         .limit(limit)
     )
-    return ImpactValuesResponse(
+    return OutcomeValuesResponse(
         values=[
-            ImpactValueResponse.model_validate(value) for value in result.scalars()
+            OutcomeValueResponse.model_validate(value) for value in result.scalars()
         ],
         total=total,
     )
 
 
-def _impact_bucket(completed_at: datetime, group_by: str) -> str:
+def _outcome_bucket(created_at: datetime, group_by: str) -> str:
     if group_by == "day":
-        return completed_at.date().isoformat()
+        return created_at.date().isoformat()
     if group_by == "week":
-        start = completed_at.date() - timedelta(days=completed_at.weekday())
+        start = created_at.date() - timedelta(days=created_at.weekday())
         return start.isoformat()
     if group_by == "month":
-        return f"{completed_at.year:04d}-{completed_at.month:02d}"
-    raise ValueError(f"Unsupported impact aggregate group_by: {group_by}")
+        return f"{created_at.year:04d}-{created_at.month:02d}"
+    raise ValueError(f"Unsupported outcome aggregate group_by: {group_by}")
 
 
-@router.get("/{automation_id}/impact/aggregate")
-async def aggregate_automation_impact_values(
+@router.get("/{automation_id}/outcomes/aggregate")
+async def aggregate_automation_outcome_values(
     automation_id: uuid.UUID,
-    metric_key: str = Query(..., min_length=1, max_length=100),
-    operation: ImpactAggregation = Query(...),
+    key: str = Query(..., min_length=1, max_length=100),
+    operation: OutcomeAggregation = Query(...),
     since: datetime | None = None,
     until: datetime | None = None,
     group_by: Literal["none", "day", "week", "month"] = "none",
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
-) -> ImpactAggregateResponse:
+) -> OutcomeAggregateResponse:
     await _get_org_automation(session, automation_id, user.org_id)
 
     conditions = [
-        AutomationRunImpactValue.automation_id == automation_id,
-        AutomationRunImpactValue.org_id == user.org_id,
-        AutomationRunImpactValue.metric_key == metric_key,
-        AutomationRunImpactValue.extraction_error.is_(None),
+        AutomationOutcomeValue.automation_id == automation_id,
+        AutomationOutcomeValue.org_id == user.org_id,
+        AutomationOutcomeValue.key == key,
     ]
-    if operation != "count":
-        conditions.append(AutomationRunImpactValue.numeric_value.is_not(None))
+    if operation in {"sum", "avg", "min", "max"}:
+        conditions.append(AutomationOutcomeValue.numeric_value.is_not(None))
+    elif operation in {"count_true", "count_false"}:
+        conditions.append(AutomationOutcomeValue.value_type == "boolean")
     if since is not None:
-        conditions.append(AutomationRunImpactValue.run_completed_at >= since)
+        conditions.append(AutomationOutcomeValue.created_at >= since)
     if until is not None:
-        conditions.append(AutomationRunImpactValue.run_completed_at <= until)
+        conditions.append(AutomationOutcomeValue.created_at <= until)
 
     result = await session.execute(
-        select(AutomationRunImpactValue)
+        select(AutomationOutcomeValue)
         .where(*conditions)
-        .order_by(AutomationRunImpactValue.run_completed_at.asc())
+        .order_by(AutomationOutcomeValue.created_at.asc())
     )
     values = list(result.scalars())
     if group_by == "none":
-        return ImpactAggregateResponse(
-            metric_key=metric_key,
+        return OutcomeAggregateResponse(
+            key=key,
             operation=operation,
-            value=aggregate_numeric_values(values, operation),
+            value=aggregate_outcome_values(values, operation),
             count=len(values),
             since=since,
             until=until,
         )
 
-    grouped: dict[str, list[AutomationRunImpactValue]] = {}
+    grouped: dict[str, list[AutomationOutcomeValue]] = {}
     for value in values:
-        grouped.setdefault(_impact_bucket(value.run_completed_at, group_by), []).append(
+        grouped.setdefault(_outcome_bucket(value.created_at, group_by), []).append(
             value
         )
-    return ImpactAggregateResponse(
-        metric_key=metric_key,
+    return OutcomeAggregateResponse(
+        key=key,
         operation=operation,
         group_by=group_by,
         since=since,
         until=until,
         buckets=[
-            ImpactAggregateBucket(
+            OutcomeAggregateBucket(
                 bucket=bucket,
-                value=aggregate_numeric_values(bucket_values, operation),
+                value=aggregate_outcome_values(bucket_values, operation),
                 count=len(bucket_values),
             )
             for bucket, bucket_values in sorted(grouped.items())
@@ -2035,19 +2038,6 @@ async def complete_run(
                 status.HTTP_409_CONFLICT,
                 detail=f"Run is {run.status.value}, expected RUNNING",
             )
-    if new_status == AutomationRunStatus.COMPLETED and finish_tool_response is not None:
-        try:
-            async with session.begin_nested():
-                await store_run_impact_values(
-                    session,
-                    automation=automation,
-                    run=run,
-                    finish_response=finish_tool_response,
-                    completed_at=now,
-                )
-                await session.flush()
-        except Exception:
-            logger.exception("Impact metric extraction failed for run %s", run_id)
     if new_status == AutomationRunStatus.FAILED:
         automation_disabled = await maybe_disable_unhealthy_automation(
             session,

@@ -140,7 +140,7 @@ def _automation_yaml_fields(
         else None,
         "trigger": automation.trigger,
         "observability_associations": automation.observability_associations,
-        "impact_metrics": automation.impact_metrics,
+        "outcome_parsers": automation.outcome_parsers,
         "setup_script_path": automation.setup_script_path,
         "entrypoint": automation.entrypoint,
         "timeout": automation.timeout,
