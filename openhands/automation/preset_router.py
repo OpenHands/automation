@@ -39,10 +39,6 @@ from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
-from openhands.automation.impact_metrics import (
-    ImpactMetricDefinition,
-    validate_impact_metrics,
-)
 from openhands.automation.models import (
     Automation,
     AutomationRunAsKind,
@@ -51,6 +47,10 @@ from openhands.automation.models import (
 )
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
+)
+from openhands.automation.outcome_values import (
+    OutcomeParserDefinition,
+    validate_outcome_parsers,
 )
 from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
@@ -230,9 +230,9 @@ class CreatePromptAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
-    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+    outcome_parsers: list[OutcomeParserDefinition] | None = Field(
         default=None,
-        description="Declarative per-run impact metric extraction rules.",
+        description="Declarative automation outcome parser rules.",
     )
     timeout: int | None = Field(
         default=None,
@@ -282,12 +282,12 @@ class CreatePromptAutomationRequest(BaseModel):
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
 
-    @field_validator("impact_metrics")
+    @field_validator("outcome_parsers")
     @classmethod
-    def validate_impact_metric_definitions(
-        cls, v: list[ImpactMetricDefinition] | None
-    ) -> list[ImpactMetricDefinition] | None:
-        return validate_impact_metrics(v)
+    def validate_outcome_parser_definitions(
+        cls, v: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(v)
 
     @field_validator("timeout")
     @classmethod
@@ -748,8 +748,8 @@ async def create_automation_from_prompt(
             agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
-            impact_metrics=[metric.model_dump() for metric in body.impact_metrics]
-            if body.impact_metrics is not None
+            outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+            if body.outcome_parsers is not None
             else None,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -900,9 +900,9 @@ class CreatePluginAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
-    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+    outcome_parsers: list[OutcomeParserDefinition] | None = Field(
         default=None,
-        description="Declarative per-run impact metric extraction rules.",
+        description="Declarative automation outcome parser rules.",
     )
     timeout: int | None = Field(
         default=None,
@@ -952,12 +952,12 @@ class CreatePluginAutomationRequest(BaseModel):
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
 
-    @field_validator("impact_metrics")
+    @field_validator("outcome_parsers")
     @classmethod
-    def validate_impact_metric_definitions(
-        cls, v: list[ImpactMetricDefinition] | None
-    ) -> list[ImpactMetricDefinition] | None:
-        return validate_impact_metrics(v)
+    def validate_outcome_parser_definitions(
+        cls, v: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(v)
 
     @field_validator("timeout")
     @classmethod
@@ -1315,8 +1315,8 @@ async def create_automation_from_plugin(
             agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
-            impact_metrics=[metric.model_dump() for metric in body.impact_metrics]
-            if body.impact_metrics is not None
+            outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+            if body.outcome_parsers is not None
             else None,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

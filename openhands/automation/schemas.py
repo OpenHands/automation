@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     Tag,
     ValidationInfo,
+    computed_field,
     field_validator,
     model_validator,
 )
@@ -21,14 +22,14 @@ from pydantic.alias_generators import to_camel
 
 from openhands.automation.acknowledgements import DEFAULT_ACKNOWLEDGEMENT
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.impact_metrics import (
-    ImpactAggregation,
-    ImpactMetricDefinition,
-    validate_impact_metrics,
-)
 from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
+)
+from openhands.automation.outcome_values import (
+    OutcomeAggregation,
+    OutcomeParserDefinition,
+    validate_outcome_parsers,
 )
 from openhands.automation.providers import (
     DEFAULT_VERIFIER,
@@ -589,9 +590,9 @@ class CreateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
-    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+    outcome_parsers: list[OutcomeParserDefinition] | None = Field(
         default=None,
-        description="Declarative per-run impact metric extraction rules.",
+        description="Declarative automation outcome parser rules.",
     )
     tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     tarball_path: str = Field(
@@ -683,12 +684,12 @@ class CreateAutomationRequest(BaseModel):
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
 
-    @field_validator("impact_metrics")
+    @field_validator("outcome_parsers")
     @classmethod
-    def validate_impact_metric_definitions(
-        cls, v: list[ImpactMetricDefinition] | None
-    ) -> list[ImpactMetricDefinition] | None:
-        return validate_impact_metrics(v)
+    def validate_outcome_parser_definitions(
+        cls, v: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(v)
 
     @field_validator("tags")
     @classmethod
@@ -795,9 +796,9 @@ class UpdateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
-    impact_metrics: list[ImpactMetricDefinition] | None = Field(
+    outcome_parsers: list[OutcomeParserDefinition] | None = Field(
         default=None,
-        description="Declarative per-run impact metric extraction rules.",
+        description="Declarative automation outcome parser rules.",
     )
     tags: list[str] | None = Field(
         default=None,
@@ -869,12 +870,12 @@ class UpdateAutomationRequest(BaseModel):
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
 
-    @field_validator("impact_metrics")
+    @field_validator("outcome_parsers")
     @classmethod
-    def validate_impact_metric_definitions(
-        cls, v: list[ImpactMetricDefinition] | None
-    ) -> list[ImpactMetricDefinition] | None:
-        return validate_impact_metrics(v)
+    def validate_outcome_parser_definitions(
+        cls, v: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(v)
 
     @field_validator("tags")
     @classmethod
@@ -1302,7 +1303,7 @@ class AutomationResponse(BaseModel):
     plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
-    impact_metrics: list[ImpactMetricDefinition] | None = None
+    outcome_parsers: list[OutcomeParserDefinition] | None = None
     tags: list[str] = Field(default_factory=list)
     tarball_path: str
     setup_script_path: str | None
@@ -1491,42 +1492,56 @@ class AutomationRunListResponse(BaseModel):
     status_counts: dict[RunStatus, int] = Field(default_factory=dict)
 
 
-class ImpactValueResponse(BaseModel):
-    run_id: uuid.UUID
-    metric_key: str
-    metric_label: str
-    expression: str
+class OutcomeValueResponse(BaseModel):
+    id: uuid.UUID
+    run_id: uuid.UUID | None = None
+    key: str
     value_type: str
-    value: Any = Field(validation_alias="value_json")
     numeric_value: float | None = None
     text_value: str | None = None
     boolean_value: bool | None = None
-    run_completed_at: UtcDatetime
-    extraction_error: str | None = None
+    datetime_value: UtcDatetime | None = None
+    json_value: Any | None = None
+    created_at: UtcDatetime
 
-    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    @computed_field
+    @property
+    def value(self) -> Any:
+        if self.value_type == "number":
+            return self.numeric_value
+        if self.value_type == "string":
+            return self.text_value
+        if self.value_type == "boolean":
+            return self.boolean_value
+        if self.value_type == "datetime":
+            return self.datetime_value
+        if self.value_type == "json":
+            return self.json_value
+        return None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
-class ImpactValuesResponse(BaseModel):
-    values: list[ImpactValueResponse]
+class OutcomeValuesResponse(BaseModel):
+    values: list[OutcomeValueResponse]
     total: int
 
 
-class ImpactAggregateBucket(BaseModel):
+class OutcomeAggregateBucket(BaseModel):
     bucket: str
     value: float | int | None
     count: int
 
 
-class ImpactAggregateResponse(BaseModel):
-    metric_key: str
-    operation: ImpactAggregation
+class OutcomeAggregateResponse(BaseModel):
+    key: str
+    operation: OutcomeAggregation
     value: float | int | None = None
     count: int | None = None
     since: UtcDatetime | None = None
     until: UtcDatetime | None = None
     group_by: str | None = None
-    buckets: list[ImpactAggregateBucket] | None = None
+    buckets: list[OutcomeAggregateBucket] | None = None
 
 
 class ChangeRunAsRequest(BaseModel):

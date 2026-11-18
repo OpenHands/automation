@@ -1273,10 +1273,15 @@ async def _execute_run(
     # disabled service-wide.
     kv_config = get_config().kv
     if kv_config.kv_secret:
-        env_vars["AUTOMATION_KV_TOKEN"] = create_kv_token(
+        scoped_token = create_kv_token(
             secret=kv_config.kv_secret,
             automation_id=automation.id,
             run_id=run.id,
+        )
+        env_vars["AUTOMATION_KV_TOKEN"] = scoped_token
+        env_vars["AUTOMATION_OUTCOME_TOKEN"] = scoped_token
+        env_vars["AUTOMATION_OUTCOME_URL"] = (
+            f"{settings.resolved_base_url.rstrip('/')}/v1/outcomes"
         )
 
     # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.
