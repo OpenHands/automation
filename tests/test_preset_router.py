@@ -5,14 +5,21 @@ import io
 import json
 import os
 import re
+import runpy
+import shutil
 import socket
 import subprocess
+import sys
 import tarfile
+import time
+import types
 import uuid
 import venv
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -369,6 +376,235 @@ class TestPresetAgentSettings:
         get_default_agent.assert_called_once_with(
             llm=llm, cli_mode=True, finish_tool_response_schema=dict
         )
+
+
+_PROFILE_ID = "6f1c2a1e-0000-4000-8000-000000000001"
+_ACP_SERVER_SETTINGS = ACPAgentSettings(acp_server="claude-code")
+_OPENHANDS_SERVER_SETTINGS = OpenHandsAgentSettings(
+    llm=LLM(model="openai/server-model", api_key="sk-server")
+)
+
+
+@dataclass
+class _PresetRun:
+    """What a preset's ``main.py`` asked of its agent server during one run."""
+
+    server_settings: AgentSettingsConfig
+    requests: list[str] = field(default_factory=list)
+    secrets_profiles: list[str | None] = field(default_factory=list)
+    default_agent_llms: list[LLM] = field(default_factory=list)
+    profile_requests: list[Any] = field(default_factory=list)
+    agents: list[AgentBase] = field(default_factory=list)
+    output: str = ""
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == "/api/settings":
+            return _settings_response(self.server_settings)
+        return httpx.Response(404)
+
+
+def _run_preset_main(
+    preset_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    server_settings: AgentSettingsConfig,
+    agent_profile_id: str | None = None,
+) -> _PresetRun:
+    """Run the preset's real ``main.py`` in local mode against a mocked agent server.
+
+    The agent server's ``GET /api/settings`` and the SDK's own ``get_llm()`` are
+    real; skills, secrets and the conversation itself are recorded instead.
+    ``get_default_agent`` comes from openhands-tools, which only the sandbox
+    installs, so a stand-in records the LLM it was given.
+    """
+    from openhands.sdk import Agent
+
+    run = _PresetRun(server_settings=server_settings)
+
+    script_dir = tmp_path / "automation"
+    script_dir.mkdir()
+    shutil.copy(PRESETS_DIR / preset_name / "sdk_main.py", script_dir / "main.py")
+    shutil.copy(PRESETS_DIR / "finish_tool_hook.py", script_dir)
+    (script_dir / "prompt.txt").write_text("Say hi.")
+    if preset_name == "plugin":
+        (script_dir / "plugins_config.json").write_text(
+            json.dumps([{"source": "github:acme/review"}])
+        )
+    monkeypatch.syspath_prepend(str(script_dir))
+    monkeypatch.delitem(sys.modules, "finish_tool_hook", raising=False)
+
+    def get_default_agent(llm, **kwargs):
+        run.default_agent_llms.append(llm)
+        return Agent(llm=llm, tools=[])
+
+    tools = types.ModuleType("openhands.tools")
+    tools_preset = types.ModuleType("openhands.tools.preset")
+    tools_preset.TaskOutcome = BaseModel  # type: ignore[attr-defined]
+    tools_default = types.ModuleType("openhands.tools.preset.default")
+    tools_default.get_default_agent = get_default_agent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openhands.tools", tools)
+    monkeypatch.setitem(sys.modules, "openhands.tools.preset", tools_preset)
+    monkeypatch.setitem(sys.modules, "openhands.tools.preset.default", tools_default)
+
+    class AgentServerWorkspace(RemoteWorkspace):
+        @property
+        def client(self) -> httpx.Client:
+            if self._client is None:
+                self._client = httpx.Client(
+                    base_url=self.host, transport=httpx.MockTransport(run.handle)
+                )
+            return self._client
+
+        def load_skills_from_agent_server(self, *args: Any, **kwargs: Any):
+            return [], AgentContext(skills=[], load_public_skills=False)
+
+        def get_secrets(self, names=None, *, agent_profile_id=None):
+            run.secrets_profiles.append(agent_profile_id)
+            return {}
+
+    class RecordedConversation:
+        def __init__(self, agent=None, **kwargs):
+            self.id = uuid.uuid4()
+            if agent is not None:
+                run.agents.append(agent)
+            self.conversation_stats = SimpleNamespace(
+                get_combined_metrics=lambda: SimpleNamespace(accumulated_cost=0.0)
+            )
+
+        @classmethod
+        def create(cls, workspace, request, callbacks=None):
+            run.profile_requests.append(request)
+            return cls()
+
+        def update_secrets(self, secrets):
+            pass
+
+        def send_message(self, message):
+            pass
+
+        def run(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "openhands.sdk.workspace.remote.base.RemoteWorkspace", AgentServerWorkspace
+    )
+    monkeypatch.setattr("openhands.sdk.Conversation", RecordedConversation)
+    monkeypatch.setattr("openhands.sdk.RemoteConversation", RecordedConversation)
+
+    for name in (
+        "AUTOMATION_AGENT_PROFILE_ID",
+        "AUTOMATION_CALLBACK_URL",
+        "AUTOMATION_CONVERSATION_ID",
+        "AUTOMATION_CONVERSATION_STARTED",
+        "AUTOMATION_EVENT_PAYLOAD",
+        "AUTOMATION_MODEL",
+        "AUTOMATION_PHASE_URL",
+        "SANDBOX_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AUTOMATION_RUN_MODE", "local")
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://agent-server.test")
+    monkeypatch.setenv("WORKSPACE_BASE", str(tmp_path))
+    if agent_profile_id:
+        monkeypatch.setenv("AUTOMATION_AGENT_PROFILE_ID", agent_profile_id)
+
+    # main.py waits two seconds for the event stream to settle after the run.
+    # Its sleeps advance a fake clock instead.
+    real_time = time.time
+    slept = [0.0]
+
+    def sleep(seconds: float) -> None:
+        slept[0] += seconds
+
+    monkeypatch.setattr(time, "time", lambda: real_time() + slept[0])
+    monkeypatch.setattr(time, "sleep", sleep)
+
+    runpy.run_path(str(script_dir / "main.py"), run_name="__main__")
+    run.output = capsys.readouterr().out
+    assert "ALL_OK" in run.output
+    return run
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+class TestPresetRunAgentSource:
+    """Which agent a local preset run gets: the selected profile, else the server's.
+
+    These run the preset's real ``main.py``, so they cover the order of the
+    branches, not only the helpers.
+    """
+
+    @pytest.mark.parametrize(
+        "server_settings",
+        [
+            pytest.param(_OPENHANDS_SERVER_SETTINGS, id="profile-on-openhands-server"),
+            pytest.param(_ACP_SERVER_SETTINGS, id="profile-on-acp-server"),
+        ],
+    )
+    def test_a_selected_profile_wins_over_the_servers_agent_kind(
+        self, preset_name, server_settings, tmp_path, monkeypatch, capsys
+    ):
+        """The agent server builds the agent from the profile, whatever its kind.
+
+        The runner never learns the profile's kind: the agent server resolves
+        the profile. So an ACP profile on an OpenHands server and an OpenHands
+        profile on an ACP server both come down to this: the conversation names
+        the profile, carries no agent of its own, and the server's agent
+        settings are never read.
+        """
+        run = _run_preset_main(
+            preset_name,
+            tmp_path,
+            monkeypatch,
+            capsys,
+            server_settings,
+            agent_profile_id=_PROFILE_ID,
+        )
+
+        [request] = run.profile_requests
+        assert request.agent_profile_id == uuid.UUID(_PROFILE_ID)
+        assert request.agent is None
+        assert request.agent_settings is None
+        assert run.agents == []
+        assert run.default_agent_llms == []
+        assert run.secrets_profiles == [_PROFILE_ID]
+        assert "GET /api/settings" not in run.requests
+        assert "=== AGENT SETTINGS ===" not in run.output
+
+    def test_without_a_profile_an_acp_server_runs_its_acp_agent(
+        self, preset_name, tmp_path, monkeypatch, capsys
+    ):
+        run = _run_preset_main(
+            preset_name, tmp_path, monkeypatch, capsys, _ACP_SERVER_SETTINGS
+        )
+
+        [agent] = run.agents
+        assert isinstance(agent, ACPAgent)
+        assert agent.acp_server == "claude-code"
+        assert run.profile_requests == []
+        assert run.default_agent_llms == []
+        assert run.secrets_profiles == [None]
+        assert "agent_kind: acp" in run.output
+        assert "skipped: ACP agent has no LLM" in run.output
+
+    def test_without_a_profile_an_openhands_server_runs_the_default_agent(
+        self, preset_name, tmp_path, monkeypatch, capsys
+    ):
+        run = _run_preset_main(
+            preset_name, tmp_path, monkeypatch, capsys, _OPENHANDS_SERVER_SETTINGS
+        )
+
+        [llm] = run.default_agent_llms
+        assert llm.model == "openai/server-model"
+        [agent] = run.agents
+        assert not isinstance(agent, ACPAgent)
+        assert run.profile_requests == []
+        assert run.secrets_profiles == [None]
+        assert "agent_kind: openhands" in run.output
 
 
 def _load_preset_repo_cloner(
