@@ -149,6 +149,7 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
         # PostgreSQL URL provided directly
         engine = create_async_engine(
             settings.db_url,
+            hide_parameters=True,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_recycle=settings.db_pool_recycle,
@@ -171,6 +172,7 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
     )
     engine = create_async_engine(
         url,
+        hide_parameters=True,
         connect_args=_build_asyncpg_connect_args(settings.db_ssl_mode),
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
@@ -198,6 +200,7 @@ def _create_sqlite_engine(db_url: str) -> EngineResult:
 
     engine = create_async_engine(
         db_url,
+        hide_parameters=True,
         # SQLite-specific settings
         connect_args={
             "check_same_thread": False,
@@ -247,6 +250,7 @@ async def _create_gcp_engine(settings: ServiceSettings) -> EngineResult:
 
     engine = create_async_engine(
         "postgresql+asyncpg://",
+        hide_parameters=True,
         async_creator=getconn,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
