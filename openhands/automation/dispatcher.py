@@ -47,6 +47,7 @@ from openhands.automation.exceptions import (
     ConversationStartError,
     ConversationStartUnavailable,
     DailySandboxLimitReachedError,
+    LicenseLimitReachedError,
     PermanentDispatchError,
     SandboxProvisioningError,
     TarballNotFoundError,
@@ -1142,6 +1143,38 @@ async def _execute_run(
             kind=RunStatusDetailKind.DAILY_SANDBOX_LIMIT,
             detail=str(exc),
             log_ctx=_log_ctx(),
+        )
+        return
+    except LicenseLimitReachedError as exc:
+        logger.warning(
+            "Run skipped — the install's license does not allow it: %s",
+            exc,
+            extra=_log_ctx(),
+        )
+        # Not transient: nothing changes until the install has a license.
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=RunStatusDetailKind.LICENSE_LIMIT,
+            detail=str(exc),
+            transient=False,
+            source="sandbox_api",
+            operation="get_execution_context",
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.SKIPPED,
+            status_detail=status_detail,
+        )
+        await capture_automation_event(
+            "automation_run_skipped",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "skip_reason": "license_limit",
+            },
         )
         return
     except SandboxProvisioningError as exc:

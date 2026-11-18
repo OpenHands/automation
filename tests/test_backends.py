@@ -24,6 +24,7 @@ from openhands.automation.backends.local import (
 from openhands.automation.config import clear_config_cache
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    LicenseLimitReachedError,
     SandboxProvisioningError,
 )
 
@@ -644,6 +645,53 @@ class TestCloudSandboxConcurrencyLimit:
 
         # No retry: the sandbox API was hit exactly once.
         assert client.post.await_count == 1
+
+
+class TestCloudSandboxLicenseLimit:
+    """Tests that `_create_sandbox` surfaces the refusal of an OpenHands
+    Enterprise install without a valid license as `LicenseLimitReachedError`."""
+
+    API = "https://app.all-hands.dev"
+
+    @staticmethod
+    def _backend() -> CloudSandboxBackend:
+        run = MagicMock()
+        run.sandbox_id = None
+        run.bash_command_id = None
+        return CloudSandboxBackend(api_url=TestCloudSandboxLicenseLimit.API, run=run)
+
+    @staticmethod
+    def _client(detail) -> MagicMock:
+        req = httpx.Request(
+            "POST", f"{TestCloudSandboxLicenseLimit.API}/api/v1/sandboxes"
+        )
+        client = MagicMock()
+        client.post = AsyncMock(
+            return_value=httpx.Response(402, request=req, json={"detail": detail})
+        )
+        return client
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_raises_and_does_not_retry(self):
+        """The 402 carries the reason to show, and a retry cannot succeed until
+        the install has a license."""
+        message = "Only the first Super Admin can start conversations."
+        client = self._client({"error": "LICENSE_LIMIT_REACHED", "message": message})
+
+        with pytest.raises(LicenseLimitReachedError) as exc_info:
+            await self._backend()._create_sandbox(client, {"Authorization": "Bearer x"})
+
+        assert str(exc_info.value) == message
+        assert client.post.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_keeps_another_402_an_http_error(self):
+        """Only the license code marks the refusal; any other 402 fails the
+        run as before."""
+        client = self._client("Payment required")
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await self._backend()._create_sandbox(client, {"Authorization": "Bearer x"})
 
 
 class TestCloudSandboxProvisioningFailure:

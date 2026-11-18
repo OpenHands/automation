@@ -33,6 +33,7 @@ class RunStatusDetailKind(StrEnum):
     CONCURRENCY_LIMIT = "concurrency_limit"
     DAILY_SANDBOX_LIMIT = "daily_sandbox_limit"
     DEFER_EXPIRED = "defer_expired"
+    LICENSE_LIMIT = "license_limit"
     BLOCKED = "blocked"
     AUTH = "auth"
     UNKNOWN = "unknown"
