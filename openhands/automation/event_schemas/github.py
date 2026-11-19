@@ -412,6 +412,131 @@ class WorkflowRunPayload(GitHubEvent):
 
 
 # =============================================================================
+# Check Events
+# =============================================================================
+
+
+class CheckSuite(BaseModel):
+    """GitHub check suite object: a group of check runs on a commit."""
+
+    id: int
+    head_branch: str | None = None  # None for a commit pushed to a fork
+    head_sha: str
+    status: str | None = None  # "queued", "in_progress", "completed"
+    conclusion: str | None = None  # "success", "failure", ...; None until completed
+    pull_requests: list[WorkflowRunPullRequest] = []
+
+    model_config = {"extra": "ignore"}
+
+
+class CheckSuitePayload(GitHubEvent):
+    """
+    GitHub check_suite event.
+
+    Triggered when every check run in a suite has completed. A commit gets a
+    suite from each app that checks it and from each GitHub Actions workflow
+    run, so one commit sends several of these events.
+
+    Event keys:
+    - check_suite.completed
+
+    Common JMESPath filters:
+    - check_suite.conclusion == 'failure'
+    - check_suite.app.slug == 'github-actions'
+    - check_suite.head_branch == 'main'
+    """
+
+    _event_type: ClassVar[str] = "check_suite"
+
+    action: str
+    check_suite: CheckSuite
+
+
+class CheckRunSuite(BaseModel):
+    """The check suite a check run belongs to, as nested in the run."""
+
+    head_branch: str | None = None
+
+    model_config = {"extra": "ignore"}
+
+
+class CheckRun(BaseModel):
+    """GitHub check run object: one check on a commit."""
+
+    id: int
+    name: str
+    head_sha: str
+    status: str  # "queued", "in_progress", "completed"
+    conclusion: str | None = None  # "success", "failure", ...; None until completed
+    html_url: str | None = None
+    check_suite: CheckRunSuite | None = None
+    pull_requests: list[WorkflowRunPullRequest] = []
+
+    model_config = {"extra": "ignore"}
+
+
+class CheckRunPayload(GitHubEvent):
+    """
+    GitHub check_run event.
+
+    Triggered when a single check on a commit is created or completes.
+
+    Event keys:
+    - check_run.created
+    - check_run.completed
+
+    Common JMESPath filters:
+    - check_run.conclusion == 'failure'
+    - check_run.name == 'build'
+    - check_run.check_suite.head_branch == 'main'
+    """
+
+    _event_type: ClassVar[str] = "check_run"
+
+    action: str
+    check_run: CheckRun
+
+
+# =============================================================================
+# Status Events
+# =============================================================================
+
+
+class StatusBranch(BaseModel):
+    """A branch that contains the commit a status was set on."""
+
+    name: str
+
+    model_config = {"extra": "ignore"}
+
+
+class StatusPayload(GitHubEvent):
+    """
+    GitHub status event.
+
+    Triggered when a commit status changes, which is how CI that does not use
+    checks reports a result.
+
+    Event key: "status" (no action field)
+
+    Common JMESPath filters:
+    - state == 'failure'
+    - context == 'ci/build'
+    - contains(branches[].name, 'main')
+    """
+
+    _event_type: ClassVar[str] = "status"
+
+    id: int
+    sha: str
+    state: str  # "pending", "success", "failure", "error"
+    context: str  # the status's name, e.g. "ci/build"
+    description: str | None = None
+    target_url: str | None = None
+    branches: list[StatusBranch] = []  # noqa: RUF012
+
+
+# =============================================================================
 # Event Registry
 # =============================================================================
 
@@ -425,6 +550,9 @@ GITHUB_PAYLOAD_CLASSES: dict[str, type[GitHubEvent]] = {
     "push": PushPayload,
     "release": ReleasePayload,
     "workflow_run": WorkflowRunPayload,
+    "check_suite": CheckSuitePayload,
+    "check_run": CheckRunPayload,
+    "status": StatusPayload,
 }
 
 
@@ -459,6 +587,14 @@ GITHUB_DETECTION_RULES: list[tuple[str, str]] = [
     ("workflow_run", "contains(keys(@), 'workflow_run')"),
     # Check run: has check_run key
     ("check_run", "contains(keys(@), 'check_run')"),
+    # Check suite: has check_suite key (a check run nests its suite)
+    ("check_suite", "contains(keys(@), 'check_suite')"),
+    # Status: no wrapper key, so its own sha, state AND context keys
+    (
+        "status",
+        "contains(keys(@), 'sha') && contains(keys(@), 'state')"
+        " && contains(keys(@), 'context')",
+    ),
 ]
 
 # Lazy-initialized detector (created on first use)
