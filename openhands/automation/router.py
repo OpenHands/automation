@@ -7,7 +7,7 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Coroutine
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -47,6 +47,7 @@ from openhands.automation.models import (
     AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationDraft,
+    AutomationOutcomeValue,
     AutomationRun,
     AutomationRunAsKind,
     AutomationRunStatus,
@@ -57,6 +58,10 @@ from openhands.automation.observability import (
     automation_attributes,
     current_span_context,
     span,
+)
+from openhands.automation.outcome_values import (
+    OutcomeAggregation,
+    aggregate_outcome_values,
 )
 from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
@@ -92,6 +97,10 @@ from openhands.automation.schemas import (
     ChangeRunAsRequest,
     CreateAutomationRequest,
     EventTrigger,
+    OutcomeAggregateBucket,
+    OutcomeAggregateResponse,
+    OutcomeValueResponse,
+    OutcomeValuesResponse,
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
@@ -322,6 +331,9 @@ async def create_automation(
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
+        outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+        if body.outcome_parsers is not None
+        else None,
         tags=body.tags,
         factory_id=body.factory_id,
         tarball_path=body.tarball_path,
@@ -427,6 +439,9 @@ async def create_automation_from_plugin_spec(
         agent_profile_id=runtime_fields["agent_profile_id"],
         trigger=trigger.model_dump(),
         observability_associations=body.observability_associations,
+        outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+        if body.outcome_parsers is not None
+        else None,
         tarball_path=runtime_fields["tarball_path"],
         setup_script_path=runtime_fields["setup_script_path"],
         entrypoint=runtime_fields["entrypoint"],
@@ -1691,6 +1706,131 @@ async def list_automation_runs(
     )
 
 
+@router.get("/{automation_id}/outcomes/values")
+async def list_automation_outcome_values(
+    automation_id: uuid.UUID,
+    key: str | None = Query(default=None, min_length=1, max_length=100),
+    run_id: uuid.UUID | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> OutcomeValuesResponse:
+    await _get_org_automation(session, automation_id, user.org_id)
+
+    conditions = [
+        AutomationOutcomeValue.automation_id == automation_id,
+        AutomationOutcomeValue.org_id == user.org_id,
+    ]
+    if key is not None:
+        conditions.append(AutomationOutcomeValue.key == key)
+    if run_id is not None:
+        conditions.append(AutomationOutcomeValue.run_id == run_id)
+    if since is not None:
+        conditions.append(AutomationOutcomeValue.created_at >= since)
+    if until is not None:
+        conditions.append(AutomationOutcomeValue.created_at <= until)
+
+    total_result = await session.execute(
+        select(func.count()).select_from(AutomationOutcomeValue).where(*conditions)
+    )
+    total = total_result.scalar_one()
+    result = await session.execute(
+        select(AutomationOutcomeValue)
+        .where(*conditions)
+        .order_by(
+            AutomationOutcomeValue.created_at.desc(),
+            AutomationOutcomeValue.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+    return OutcomeValuesResponse(
+        values=[
+            OutcomeValueResponse.model_validate(value) for value in result.scalars()
+        ],
+        total=total,
+    )
+
+
+def _outcome_bucket(created_at: datetime, group_by: str) -> str:
+    if group_by == "day":
+        return created_at.date().isoformat()
+    if group_by == "week":
+        start = created_at.date() - timedelta(days=created_at.weekday())
+        return start.isoformat()
+    if group_by == "month":
+        return f"{created_at.year:04d}-{created_at.month:02d}"
+    raise ValueError(f"Unsupported outcome aggregate group_by: {group_by}")
+
+
+@router.get("/{automation_id}/outcomes/aggregate")
+async def aggregate_automation_outcome_values(
+    automation_id: uuid.UUID,
+    key: str = Query(..., min_length=1, max_length=100),
+    operation: OutcomeAggregation = Query(...),
+    since: datetime | None = None,
+    until: datetime | None = None,
+    group_by: Literal["none", "day", "week", "month"] = "none",
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> OutcomeAggregateResponse:
+    await _get_org_automation(session, automation_id, user.org_id)
+
+    conditions = [
+        AutomationOutcomeValue.automation_id == automation_id,
+        AutomationOutcomeValue.org_id == user.org_id,
+        AutomationOutcomeValue.key == key,
+    ]
+    if operation in {"sum", "avg", "min", "max"}:
+        conditions.append(AutomationOutcomeValue.numeric_value.is_not(None))
+    elif operation in {"count_true", "count_false"}:
+        conditions.append(AutomationOutcomeValue.value_type == "boolean")
+    if since is not None:
+        conditions.append(AutomationOutcomeValue.created_at >= since)
+    if until is not None:
+        conditions.append(AutomationOutcomeValue.created_at <= until)
+
+    result = await session.execute(
+        select(AutomationOutcomeValue)
+        .where(*conditions)
+        .order_by(AutomationOutcomeValue.created_at.asc())
+    )
+    values = list(result.scalars())
+    if group_by == "none":
+        return OutcomeAggregateResponse(
+            key=key,
+            operation=operation,
+            value=aggregate_outcome_values(values, operation),
+            count=len(values),
+            since=since,
+            until=until,
+        )
+
+    grouped: dict[str, list[AutomationOutcomeValue]] = {}
+    for value in values:
+        grouped.setdefault(_outcome_bucket(value.created_at, group_by), []).append(
+            value
+        )
+    return OutcomeAggregateResponse(
+        key=key,
+        operation=operation,
+        group_by=group_by,
+        since=since,
+        until=until,
+        buckets=[
+            OutcomeAggregateBucket(
+                bucket=bucket,
+                value=aggregate_outcome_values(bucket_values, operation),
+                count=len(bucket_values),
+            )
+            for bucket, bucket_values in sorted(grouped.items())
+        ],
+    )
+
+
 @router.get("/{automation_id}/changes")
 async def list_automation_changes(
     automation_id: uuid.UUID,
@@ -1825,6 +1965,7 @@ async def complete_run(
         # Task outcomes and blocking factors are agent/user-level result metadata;
         # only SDK callback errors and system dispatch errors feed auto-disablement.
         values["status_detail"] = None
+    finish_tool_response: Any | None = None
     if body.conversation_id:
         finish_tool_response = await fetch_latest_finish_tool_response_for_run(
             run, body.conversation_id

@@ -127,6 +127,7 @@ class KVAuthContext:
 
     automation_id: uuid.UUID
     auth_method: str  # "kv_token" | "user"
+    run_id: uuid.UUID | None = None
 
 
 async def _try_kv_token_auth(
@@ -296,6 +297,7 @@ async def get_kv_auth_context(
             return KVAuthContext(
                 automation_id=claims.automation_id,
                 auth_method="kv_token",
+                run_id=claims.run_id,
             )
 
     # --- Path 2: User auth ---

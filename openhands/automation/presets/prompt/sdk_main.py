@@ -73,6 +73,9 @@ Common env vars:
   AUTOMATION_ORG_ID          - owner org ID for observability context (optional)
   AUTOMATION_TRIGGER_SOURCE  - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
+  AUTOMATION_OUTCOME_URL     - outcome submission endpoint (optional)
+  AUTOMATION_OUTCOME_SCHEMA  - JSON Schema for outcome submissions (optional)
+  AUTOMATION_KV_TOKEN        - run-scoped JWT for KV and outcome APIs (optional)
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
   AUTOMATION_CONVERSATION_ID - the conversation to use (optional)
   AUTOMATION_CONVERSATION_STARTED - "app_server" when the service already started
@@ -85,6 +88,9 @@ Common env vars:
 Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
   AUTOMATION_SESSION_URL     - direct URL to this conversation in Agent Canvas
                                (Cloud mode only; built from conversation.id)
+  AUTOMATION_OUTCOME_URL     - outcome submission endpoint when configured
+  AUTOMATION_OUTCOME_SCHEMA  - JSON Schema for outcome submissions when configured
+  AUTOMATION_KV_TOKEN        - run-scoped JWT for KV and outcome APIs when configured
 
 """
 
@@ -135,6 +141,22 @@ def _attaches_to_started_conversation(environ) -> bool:
         and environ.get("AUTOMATION_CONVERSATION_STARTED") == "app_server"
     )
 
+
+
+def _outcome_context_section(environ=os.environ) -> str | None:
+    if not environ.get("AUTOMATION_OUTCOME_URL") or not environ.get(
+        "AUTOMATION_KV_TOKEN"
+    ):
+        return None
+    return """## Outcome Reporting API
+
+This automation can record structured outcome values for analytics. When you have
+final outcome data to report, use terminal commands with the injected secrets
+`$AUTOMATION_OUTCOME_URL` and `$AUTOMATION_KV_TOKEN`. POST JSON in this
+shape: `{"payload": {...}}` with `Authorization: Bearer $AUTOMATION_KV_TOKEN`.
+If `$AUTOMATION_OUTCOME_SCHEMA` is set, use it as the request schema. The
+service stores values selected by this automation's `outcome_parsers`; if no
+parsers are configured, it accepts a flat JSON object."""
 
 def _repo_instructions_section(skills) -> str | None:
     """Always-on instructions from the cloned repositories, as a prompt section.
@@ -672,6 +694,9 @@ More activity arrived on the same subject while this run was queued:
 
 {follow_ups}""")
 
+    if outcome_section := _outcome_context_section():
+        context_sections.append(outcome_section)
+
     # Prepend context sections to the user prompt
     if context_sections:
         context_block = "\n\n".join(context_sections)
@@ -845,6 +870,19 @@ More activity arrived on the same subject while this run was queued:
         session_url = f"{api_url}/canvas/conversations/{conversation.id}"
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
+
+    outcome_env = {
+        key: value
+        for key in (
+            "AUTOMATION_OUTCOME_URL",
+            "AUTOMATION_KV_TOKEN",
+            "AUTOMATION_OUTCOME_SCHEMA",
+        )
+        if (value := os.environ.get(key))
+    }
+    if "AUTOMATION_OUTCOME_URL" in outcome_env and "AUTOMATION_KV_TOKEN" in outcome_env:
+        conversation.update_secrets(outcome_env)
+        print("  outcome API: available")
 
     report_phase("Agent is working on the task")
     threading.Thread(target=_phase_poster, name="phase-poster", daemon=True).start()

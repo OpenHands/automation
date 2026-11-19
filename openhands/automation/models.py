@@ -162,6 +162,10 @@ class Automation(Base):
         JSON, nullable=True
     )
 
+    outcome_parsers: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
     # User-facing labels for grouping and filtering, normalized by tags.py.
     # Never NULL, so the tag facet query can expand every row.
     tags: Mapped[list[str]] = mapped_column(
@@ -256,6 +260,72 @@ class Automation(Base):
         "AutomationDisableEvent",
         back_populates="automation",
         cascade="all, delete-orphan",
+    )
+
+
+class AutomationOutcomeValue(Base):
+    """One typed automation outcome value submitted by a run or agent."""
+
+    __tablename__ = "automation_outcome_values"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    numeric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    text_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    boolean_value: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    datetime_value: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    json_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_automation_outcome_values_automation_key_created",
+            "automation_id",
+            "key",
+            "created_at",
+        ),
+        Index("ix_automation_outcome_values_org_created", "org_id", "created_at"),
+        Index(
+            "ix_automation_outcome_values_org_automation_created",
+            "org_id",
+            "automation_id",
+            "created_at",
+        ),
+        Index(
+            "ix_automation_outcome_values_type_created",
+            "automation_id",
+            "key",
+            "value_type",
+            "created_at",
+        ),
+        Index(
+            "ix_automation_outcome_values_numeric",
+            "automation_id",
+            "key",
+            "created_at",
+            "numeric_value",
+            postgresql_where=(numeric_value.isnot(None)),
+            sqlite_where=(numeric_value.isnot(None)),
+        ),
     )
 
 

@@ -158,6 +158,73 @@ class TestObservabilityAssociationValidation:
             )
 
 
+class TestOutcomeParserValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "Outcome validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_valid_parser_definition(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {
+                **base_payload,
+                "outcome_parsers": [
+                    {
+                        "key": "code_reviews.created",
+                        "expression": "metrics.code_reviews_created || `0`",
+                        "value_type": "number",
+                    }
+                ],
+            }
+        )
+
+        assert request.outcome_parsers is not None
+        assert request.outcome_parsers[0].key == "code_reviews.created"
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_duplicate_keys(self, request_cls, base_payload):
+        parser = {
+            "key": "reviews",
+            "expression": "metrics.reviews",
+            "value_type": "number",
+        }
+
+        with pytest.raises(ValidationError, match="outcome parser keys must be unique"):
+            request_cls.model_validate(
+                {**base_payload, "outcome_parsers": [parser, {**parser}]}
+            )
+
+    def test_rejects_invalid_parser_expression(self):
+        with pytest.raises(ValidationError, match="Invalid JMESPath expression"):
+            CreateAutomationRequest.model_validate(
+                {
+                    **self._CREATE_PAYLOAD,
+                    "outcome_parsers": [
+                        {
+                            "key": "reviews",
+                            "expression": "unknown_func(metrics.reviews)",
+                            "value_type": "number",
+                        }
+                    ],
+                }
+            )
+
+
 class TestAutomationDescriptionValidation:
     _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
         "name": "Description validation",
