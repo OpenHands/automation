@@ -131,6 +131,31 @@ def github_workflow_run_payload() -> dict:
 
 
 @pytest.fixture
+def github_status_payload() -> dict:
+    """Sample GitHub status event payload for a failed commit status."""
+    return {
+        "event_type": "status",
+        "payload": {
+            "id": 9216538,
+            "sha": "abc123",
+            "name": "org/test-repo",
+            "state": "failure",
+            "context": "ci/build",
+            "description": "Build failed",
+            "target_url": "https://ci.example.com/builds/7",
+            "branches": [{"name": "feature/test"}],
+            "repository": {
+                "id": 123,
+                "name": "test-repo",
+                "full_name": "org/test-repo",
+                "private": False,
+            },
+            "sender": {"id": 1, "login": "testuser"},
+        },
+    }
+
+
+@pytest.fixture
 def azure_devops_pr_payload() -> dict:
     """Sample OpenHands-forwarded Azure DevOps pull request event payload."""
     return {
@@ -241,6 +266,9 @@ async def test_requested_github_event_types_returns_supported_event_families(
         "push",
         "release",
         "workflow_run",
+        "check_suite",
+        "check_run",
+        "status",
     ]
     assert data["event_detection_rules"][0] == {
         "event_type": "pull_request_review",
@@ -523,6 +551,50 @@ async def test_receive_github_workflow_run_failure_creates_run(
     assert response.status_code == 200
     data = response.json()
     assert data["received"] is True
+    assert data["matched"] == 1
+    assert len(data["runs_created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_github_status_failure_creates_run(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    github_status_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """A forwarded failed commit status reaches a CI-gate automation."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Send failed CI back to development",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "github",
+            "on": "status",
+            "filter": "state == 'failure'",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+    signature, body = sign_payload(github_status_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/github",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
     assert data["matched"] == 1
     assert len(data["runs_created"]) == 1
 

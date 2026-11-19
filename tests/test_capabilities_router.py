@@ -179,12 +179,15 @@ class TestGetCapabilities:
             "jira_dc",
         ]
         assert body["eventTypes"] == [
+            "check_run.*",
+            "check_suite.*",
             "issue_comment.*",
             "issues.*",
             "pull_request.*",
             "pull_request_review.*",
             "push",
             "release.*",
+            "status",
             "workflow_run.*",
         ]
         by_source = body["eventTypesBySource"]
@@ -438,6 +441,7 @@ class TestValidateDraft:
             ),
             pytest.param("pull_request.*", [], id="wildcard-over-supported-types"),
             pytest.param("workflow_run.completed", [], id="workflow-run-completed"),
+            pytest.param("status", [], id="type-without-an-action"),
         ],
     )
     async def test_event_types_are_checked_against_what_the_deployment_parses(
