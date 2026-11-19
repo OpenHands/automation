@@ -975,7 +975,10 @@ class TestExecuteRunStartsTheConversation:
 
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert "AUTOMATION_OUTCOME_TOKEN" not in env_vars
-        assert env_vars["AUTOMATION_OUTCOME_URL"] == "http://localhost:8000/v1/outcomes"
+        assert (
+            env_vars["AUTOMATION_OUTCOME_URL"]
+            == "http://localhost:8000/api/automation/v1/outcomes"
+        )
         assert env_vars["AUTOMATION_KV_TOKEN"].count(".") == 2
         schema = json.loads(env_vars["AUTOMATION_OUTCOME_SCHEMA"])
         outcome_values = schema["properties"]["payload"]["x-openhands-outcome-values"]
