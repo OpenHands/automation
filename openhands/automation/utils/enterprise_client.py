@@ -109,20 +109,29 @@ async def notify_factory_deleted(
     url = config.openhands_api_base_url.rstrip("/") + FACTORY_DELETED_PATH.format(
         org_id=org_id, factory_id=factory_id
     )
+    # Not just httpx.HTTPError: a closed client raises RuntimeError and a
+    # malformed base URL raises httpx.InvalidURL, and this must never raise.
     try:
         response = await client.post(
             url, headers={"X-Service-API-Key": config.service_key}
         )
-    except httpx.HTTPError as exc:
+    except Exception as exc:
+        # str(exc) can omit the host, so log the URL. It holds only ids; the key
+        # is a header and never appears in an httpx exception.
         logger.warning(
-            "Deleted-factory notification for %s failed: %s",
+            "Deleted-factory notification for %s (org %s) to %s failed: %s: %s",
             factory_id,
+            org_id,
+            url,
             type(exc).__name__,
+            exc,
         )
         return
     if response.status_code != 204:
         logger.warning(
-            "Deleted-factory notification for %s returned HTTP %s",
+            "Deleted-factory notification for %s (org %s) to %s returned HTTP %s",
             factory_id,
+            org_id,
+            url,
             response.status_code,
         )

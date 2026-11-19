@@ -9,12 +9,13 @@ issue is authoritative.
 import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
 import jwt
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from openhands.automation.config import Settings
@@ -121,6 +122,15 @@ def test_claims_are_exactly_the_contract_and_expire_after_24_hours():
     assert claims["exp"] - claims["iat"] == 24 * 60 * 60
 
 
+def test_the_lifetime_is_a_parameter():
+    claims = jwt.decode(
+        _token(expires_in=timedelta(minutes=45)),
+        options={"verify_signature": False, "verify_exp": False},
+    )
+
+    assert claims["exp"] - claims["iat"] == 45 * 60
+
+
 def test_automation_name_is_truncated_to_256_characters():
     claims = jwt.decode(
         _token(automation_name="n" * 1000),
@@ -194,6 +204,30 @@ async def test_a_factory_run_gets_a_token_naming_its_factory(
     assert claims["run_id"] == str(runs[0].id)
     assert claims["automation_name"] == "Stored tarball"
     assert claims["exp"] - claims["iat"] == 24 * 60 * 60
+
+
+async def test_the_token_lifetime_follows_the_configured_setting(
+    async_session_factory, mock_client
+):
+    env = await _dispatch(
+        async_session_factory,
+        _settings(factory_token_ttl_seconds=3600),
+        mock_client,
+        build_tarball(SCRIPT_FILES),
+        factory_id=FACTORY_ID,
+    )
+
+    claims = jwt.decode(
+        env["AUTOMATION_FACTORY_TOKEN"],
+        options={"verify_signature": False, "verify_exp": False},
+    )
+    assert claims["exp"] - claims["iat"] == 3600
+
+
+@pytest.mark.parametrize("ttl", [0, -1])
+def test_a_non_positive_token_lifetime_is_refused(ttl):
+    with pytest.raises(ValidationError):
+        _settings(factory_token_ttl_seconds=ttl)
 
 
 async def test_a_run_without_a_factory_gets_no_token_and_starts(

@@ -1343,6 +1343,7 @@ async def _execute_run(
             automation_id=automation.id,
             automation_name=automation.name,
             run_id=run.id,
+            expires_in=timedelta(seconds=settings.factory_token_ttl_seconds),
         )
 
     # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.

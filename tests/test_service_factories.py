@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.app import app
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import Automation, Factory
+from openhands.automation.utils.enterprise_client import notify_factory_deleted
 
 
 BASE = "/api/automation/v1"
@@ -242,7 +243,36 @@ async def test_an_unreachable_enterprise_does_not_undo_the_delete(
 
     assert response.status_code == 204, response.text
     assert (await async_client.get(f"{BASE}/factories/{factory.id}")).status_code == 404
-    assert f"Deleted-factory notification for {factory.id} failed" in caplog.text
+    assert f"Deleted-factory notification for {factory.id}" in caplog.text
+    assert f"(org {ORG_ID})" in caplog.text
+    assert f"{ENTERPRISE_URL}/api/service/orgs/{ORG_ID}" in caplog.text
+    assert "ConnectError: refused" in caplog.text
+    assert SERVICE_KEY not in caplog.text
+
+
+async def test_a_closed_client_is_logged_not_raised(service_key, monkeypatch, caplog):
+    monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", ENTERPRISE_URL)
+    clear_config_cache()
+    client = httpx.AsyncClient()
+    await client.aclose()
+    caplog.set_level(logging.WARNING)
+
+    await notify_factory_deleted(client, ORG_ID, uuid.uuid4())
+
+    assert "RuntimeError" in caplog.text
+
+
+async def test_a_malformed_base_url_is_logged_not_raised(
+    service_key, monkeypatch, caplog
+):
+    monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", "http://[::1")
+    clear_config_cache()
+    caplog.set_level(logging.WARNING)
+
+    async with httpx.AsyncClient() as client:
+        await notify_factory_deleted(client, ORG_ID, uuid.uuid4())
+
+    assert "InvalidURL" in caplog.text
 
 
 async def test_nothing_is_sent_in_local_mode(

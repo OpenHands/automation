@@ -20,7 +20,7 @@ import jwt
 
 FACTORY_TOKEN_AUDIENCE = "factory"
 FACTORY_TOKEN_HKDF_INFO = b"openhands-factory-run-token-v1"
-FACTORY_TOKEN_EXPIRATION = timedelta(hours=24)
+DEFAULT_FACTORY_TOKEN_EXPIRATION = timedelta(hours=24)
 MAX_AUTOMATION_NAME_LENGTH = 256
 
 _SIGNING_KEY_LENGTH = 32
@@ -55,6 +55,7 @@ def create_factory_token(
     automation_name: str,
     run_id: uuid.UUID,
     issued_at: datetime | None = None,
+    expires_in: timedelta = DEFAULT_FACTORY_TOKEN_EXPIRATION,
 ) -> str:
     """Sign a factory run token.
 
@@ -70,7 +71,7 @@ def create_factory_token(
         "automation_name": automation_name[:MAX_AUTOMATION_NAME_LENGTH],
         "run_id": str(run_id),
         "iat": int(issued_at.timestamp()),
-        "exp": int((issued_at + FACTORY_TOKEN_EXPIRATION).timestamp()),
+        "exp": int((issued_at + expires_in).timestamp()),
     }
     return jwt.encode(
         payload, derive_factory_token_signing_key(service_key), algorithm="HS256"

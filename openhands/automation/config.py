@@ -598,6 +598,9 @@ class ServiceSettings(BaseSettings):
 
         # Auth
         AUTOMATION_SERVICE_KEY: Service key for SaaS API (required in cloud mode)
+        AUTOMATION_FACTORY_TOKEN_TTL_SECONDS: Lifetime of the factory run token
+            (default: 86400, the shared contract's 24 hours). Keep it above the
+            longest possible run, or the token expires mid-run.
         AUTOMATION_WEBHOOK_SECRET: Webhook signature secret (optional)
         AUTOMATION_OPENHANDS_API_BASE_URL: OpenHands API URL (default: https://app.all-hands.dev)
 
@@ -734,6 +737,10 @@ class ServiceSettings(BaseSettings):
     # API keys (called by the dispatcher before each automation run).
     # Required in cloud mode, not needed in local mode.
     service_key: str = ""
+
+    # Lifetime of AUTOMATION_FACTORY_TOKEN. Enterprise checks only `exp`, so
+    # this can change without a contract change.
+    factory_token_ttl_seconds: int = Field(default=24 * 60 * 60, gt=0)
 
     # Public base URL where this service is reachable (without /api/automation).
     # Example: https://app.all-hands.dev or https://domain/acmecorp
