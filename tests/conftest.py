@@ -2,14 +2,20 @@
 
 import logging
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.postgres import PostgresContainer
 
 
@@ -25,8 +31,15 @@ from openhands.automation.auth import (  # noqa: E402
     create_http_client,
 )
 from openhands.automation.config import Settings  # noqa: E402
-from openhands.automation.db import get_session  # noqa: E402
+from openhands.automation.db import (  # noqa: E402
+    _create_sqlite_engine,
+    get_session,
+    set_sqlite_mode,
+    using_sqlite,
+)
 from openhands.automation.models import Base  # noqa: E402
+from openhands.automation.storage import get_file_store  # noqa: E402
+from openhands.automation.storage.local import LocalFileStore  # noqa: E402
 from openhands.automation.utils.change_events import bind_request  # noqa: E402
 
 
@@ -73,6 +86,75 @@ async def async_engine(postgres_container):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+
+
+async def _dual_db_engine(
+    request: pytest.FixtureRequest, tmp_path: Path, *, production_sqlite: bool
+) -> AsyncIterator[AsyncEngine]:
+    previous_sqlite_mode = using_sqlite()
+    set_sqlite_mode(request.param == "sqlite")
+    if request.param == "sqlite":
+        url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+        engine = (
+            _create_sqlite_engine(url).engine
+            if production_sqlite
+            else create_async_engine(url)
+        )
+    else:
+        container = request.getfixturevalue("postgres_container")
+        engine = create_async_engine(
+            container.get_connection_url().replace(
+                "postgresql+psycopg2://", "postgresql+asyncpg://"
+            )
+        )
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        yield engine
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.drop_all)
+    finally:
+        await engine.dispose()
+        set_sqlite_mode(previous_sqlite_mode)
+
+
+@pytest.fixture(params=["postgresql", "sqlite"])
+async def dual_db_engine(request, tmp_path: Path) -> AsyncIterator[AsyncEngine]:
+    """An engine with the schema created, once for PostgreSQL and once for SQLite.
+
+    Tests that request it run on both supported databases. A module that wants its
+    API fixtures on this engine overrides ``async_engine`` to return it.
+
+    Do not request this fixture together with ``dual_db_production_engine``. Each is
+    parametrized on its own, so the test runs four times, and in two of those runs the
+    seed data goes to one database while the app reads the other. On PostgreSQL,
+    teardown can also hang if one session still holds a transaction open.
+    """
+    async for engine in _dual_db_engine(request, tmp_path, production_sqlite=False):
+        yield engine
+
+
+@pytest.fixture(params=["postgresql", "sqlite"])
+async def dual_db_production_engine(
+    request, tmp_path: Path
+) -> AsyncIterator[AsyncEngine]:
+    """Like ``dual_db_engine``, but SQLite gets the production engine settings.
+
+    Those are foreign keys, WAL and a busy timeout. Use it for tests that need
+    concurrent sessions to behave as they do in production. Do not request it together
+    with ``dual_db_engine`` (see the warning there).
+    """
+    async for engine in _dual_db_engine(request, tmp_path, production_sqlite=True):
+        yield engine
+
+
+@pytest.fixture
+def local_file_store(tmp_path: Path):
+    """Back the app's file store with a temporary directory."""
+    store = LocalFileStore(str(tmp_path / "storage"))
+    app.dependency_overrides[get_file_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_file_store, None)
 
 
 @pytest.fixture
