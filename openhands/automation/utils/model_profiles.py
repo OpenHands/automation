@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # profile created a moment ago is found. Personal profiles make the list
 # per member, not per organization.
 _known_profiles: TTLCache[tuple[uuid.UUID, uuid.UUID], dict[str, str | None]] = (
-    TTLCache(maxsize=1024, ttl=60)
+    TTLCache[tuple[uuid.UUID, uuid.UUID], dict[str, str | None]](maxsize=1024, ttl=60)
 )
 
 
