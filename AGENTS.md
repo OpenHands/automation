@@ -70,6 +70,7 @@ automation/
 │       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
 │       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
 │       ├── schemas.py          # Pydantic request/response schemas
+│       ├── service_router.py   # Service-key routes for Enterprise (factory lookup)
 │       ├── subjects.py         # Maps an external subject to a conversation id
 │       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
 │       ├── trigger_matcher.py  # Trigger matching for event-based automations
@@ -225,6 +226,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
+| `AUTOMATION_FACTORY_TOKEN` | Dispatcher, cloud mode only, when the automation belongs to a factory and the service key is set | Run token naming the run's factory, for services that hold the service key (see Factory references from other services). Absent in local mode, for an automation with no factory, and without a service key; the run starts anyway |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
@@ -322,6 +324,50 @@ NULL`). Zero factories is a valid state; there is no default factory.
   local to an install. The `PATCH` rule above is enforced at the API only. Git
   sync, plugin refs and external tarball URLs are trusted as the source of an
   automation's code, so whoever controls them controls what runs in a factory.
+
+### Factory references from other services
+
+Other services keep a factory's id as a plain reference with no foreign key,
+because their data lives in other databases. This service supplies the three
+things such a holder needs. The first consumer is worklogs (append-only logs
+scoped to a factory), which the OpenHands server stores and serves
+(OpenHands/enterprise#1297); nothing here is specific to them.
+
+- **Run token** (`utils/factory_token.py`): the dispatcher injects
+  `AUTOMATION_FACTORY_TOKEN` next to `AUTOMATION_KV_TOKEN`. It is an HS256 JWT
+  signed with a key derived from `AUTOMATION_SERVICE_KEY` by HKDF-SHA256 (zero
+  salt, 32 bytes, info `openhands-factory-run-token-v1`); the raw service key
+  never signs. Claims: `aud` `factory`, `org_id`, `factory_id`,
+  `automation_id`, `automation_name` (at most 256 characters), `run_id`, `iat`,
+  `exp` (24 hours by default; `AUTOMATION_FACTORY_TOKEN_TTL_SECONDS` changes it
+  and Enterprise reads only `exp`; keep it above the longest possible run). The
+  token is never stored, logged or put in `AUTOMATION_EVENT_PAYLOAD`. A run
+  keeps the factory named in its token until it expires, even if its automation
+  is moved to another factory mid-run, and even if the factory is deleted:
+  deleting a factory only needs no live members, so a RUNNING run of a
+  soft-deleted or moved automation can still write under the old id after the
+  `deleted` notification, until the receiver's orphan purge runs. A run
+  sends it as a Bearer token to a route of a service that accepts it, which
+  decides what the factory may do (Enterprise's worklog routes are the first).
+  The token carries the authority of the automation's code: whoever controls
+  what a factory member runs can use it. `PATCH` of a member needs
+  `manage_automations` (see Factories), but git sync, plugin refs and external
+  tarball URLs are trusted as the source of that code. A draft's hidden
+  test-run automation cannot be in a factory, so it never gets a token.
+  Only a service that holds the service key can verify it. The tests in
+  `tests/test_factory_token.py` commit the contract test vector that
+  Enterprise's tests also commit; if the two differ, the enterprise issue is
+  authoritative.
+- **Factory lookup**: `GET /v1/service/factories?org_id=&id=...` (up to 100
+  ids), authenticated with `X-Service-API-Key` like `usage_router`. It tells a
+  service that stores a factory id whether the factory exists.
+- **Delete notification**: so a service can remove its data for a deleted
+  factory. After a factory delete commits, `POST
+  {openhands_api_base_url}/api/service/orgs/{org_id}/factories/{factory_id}/deleted`
+  (`notify_factory_deleted`). Worklogs are the only consumer today. Any answer
+  but 204, or any failure to send, is a warning naming the org, the factory
+  and the URL; it never blocks the delete. Skipped in local mode. Enterprise's
+  maintenance task repairs a missed notification, so there is no retry queue.
 
 ## Preset-Based Automation Creation
 

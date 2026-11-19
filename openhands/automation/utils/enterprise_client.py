@@ -80,3 +80,58 @@ async def get_org_member(
         return OrgMemberInfo.model_validate(response.json())
     except (ValueError, ValidationError) as exc:
         raise EnterpriseClientError("Unexpected membership response") from exc
+
+
+# ``{org_id}`` and ``{factory_id}`` are filled in by ``notify_factory_deleted``.
+FACTORY_DELETED_PATH = "/api/service/orgs/{org_id}/factories/{factory_id}/deleted"
+
+
+async def notify_factory_deleted(
+    client: httpx.AsyncClient, org_id: uuid.UUID, factory_id: uuid.UUID
+) -> None:
+    """Tell the OpenHands server a factory was deleted, so it can remove what it
+    keeps for that factory.
+
+    Called after the delete commits. It never raises: a missed notification
+    must not undo or block the delete, and Enterprise's maintenance task repairs
+    one. Skipped in local mode, which has no OpenHands server.
+    """
+    config = get_config().service
+    if config.is_local_mode:
+        return
+    if not config.service_key:
+        logger.warning(
+            "Not notifying Enterprise of deleted factory %s: no service key",
+            factory_id,
+        )
+        return
+
+    url = config.openhands_api_base_url.rstrip("/") + FACTORY_DELETED_PATH.format(
+        org_id=org_id, factory_id=factory_id
+    )
+    # Not just httpx.HTTPError: a closed client raises RuntimeError and a
+    # malformed base URL raises httpx.InvalidURL, and this must never raise.
+    try:
+        response = await client.post(
+            url, headers={"X-Service-API-Key": config.service_key}
+        )
+    except Exception as exc:
+        # str(exc) can omit the host, so log the URL. It holds only ids; the key
+        # is a header and never appears in an httpx exception.
+        logger.warning(
+            "Deleted-factory notification for %s (org %s) to %s failed: %s: %s",
+            factory_id,
+            org_id,
+            url,
+            type(exc).__name__,
+            exc,
+        )
+        return
+    if response.status_code != 204:
+        logger.warning(
+            "Deleted-factory notification for %s (org %s) to %s returned HTTP %s",
+            factory_id,
+            org_id,
+            url,
+            response.status_code,
+        )

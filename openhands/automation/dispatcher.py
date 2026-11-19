@@ -84,6 +84,7 @@ from openhands.automation.utils.app_server_repos import (
     RepositorySplit,
     split_repositories,
 )
+from openhands.automation.utils.factory_token import create_factory_token
 from openhands.automation.utils.finish_plugin import (
     finish_plugin_dir,
     finish_plugin_files,
@@ -1329,6 +1330,20 @@ async def _execute_run(
             secret=kv_config.kv_secret,
             automation_id=automation.id,
             run_id=run.id,
+        )
+
+    # A run of a factory's automation gets a token naming its factory. Local
+    # mode has no OpenHands server to verify the token, and without the service
+    # key there is nothing to sign it with. The run starts either way.
+    if automation.factory_id and settings.service_key and not settings.is_local_mode:
+        env_vars["AUTOMATION_FACTORY_TOKEN"] = create_factory_token(
+            settings.service_key,
+            org_id=automation.org_id,
+            factory_id=automation.factory_id,
+            automation_id=automation.id,
+            automation_name=automation.name,
+            run_id=run.id,
+            expires_in=timedelta(seconds=settings.factory_token_ttl_seconds),
         )
 
     # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.

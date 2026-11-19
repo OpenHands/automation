@@ -8,11 +8,16 @@ factories themselves.
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+    require_permission,
+)
 from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.models import Automation, Factory
 from openhands.automation.schemas import (
@@ -21,6 +26,7 @@ from openhands.automation.schemas import (
     FactoryResponse,
     FactoryUpdate,
 )
+from openhands.automation.utils.enterprise_client import notify_factory_deleted
 
 
 router = APIRouter(prefix="/v1/factories", tags=["Factories"])
@@ -240,13 +246,17 @@ async def rename_factory(
 @router.delete("/{factory_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_factory(
     factory_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
+    client: httpx.AsyncClient = Depends(get_http_client),
 ) -> None:
     """Delete a factory that no live automation belongs to.
 
     Soft-deleted automations that still reference it are detached in the same
-    transaction.
+    transaction. After it commits, the OpenHands server is told so it can remove
+    what it keeps for the factory; that notification never blocks or undoes the
+    delete.
     """
     factory = await _get_org_factory(session, user.org_id, factory_id, lock="update")
 
@@ -284,3 +294,5 @@ async def delete_factory(
                 "remove them from it first"
             ),
         )
+    await session.commit()
+    background_tasks.add_task(notify_factory_deleted, client, user.org_id, factory_id)
