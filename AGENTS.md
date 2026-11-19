@@ -661,3 +661,15 @@ To bump the `openhands-sdk` / `openhands-workspace` pins by hand instead:
 2. Run `uv lock` to regenerate `uv.lock`.
 3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —
    release-please handles the version bump and release.
+
+## SDK 1.63 dependency compatibility
+
+- Keep LiteLLM `>=1.108.3,<1.109` with SDK/workspace 1.63: LiteLLM 1.109
+  removed `litellm.llms.openai.chat.gpt_5_transformation`, which SDK imports
+  during startup. Keep the security floor `filelock>=4.2.1` when resolving.
+- SDK 1.63 requires Pydantic >=2.14.3. Its TypeAdapter uses TypeForm; use
+  pyright >=1.1.414 rather than ignoring Trigger argument errors or forcing
+  an incompatible Pydantic downgrade. Explicit TTLCache constructor generics
+  keep cachetools inference consistent with that checker.
+- All-files pre-commit launches multiple pyright processes. On memory-constrained
+  hosts, run whole-project `uv run pyright` once and lint checks sequentially.

@@ -24,9 +24,13 @@ dependencies = [
   "cloud-sql-python-connector[asyncpg]>=1.16",
   "croniter>=2",
   "fastapi>=0.121",
+  # CVE-2026-112940: keep the fixed filelock release with SDK upgrades.
+  "filelock>=4.2.1",
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
   "jmespath>=1.0",
+  # SDK 1.63 imports gpt_5_transformation, removed in LiteLLM 1.109.
+  "litellm>=1.108.3,<1.109",
   "openhands-sdk==1.63.0",
   "openhands-workspace==1.63.0",
   "pg8000>=1.31",
@@ -66,7 +70,8 @@ packages = ["openhands"]
 [dependency-groups]
 dev = [
     "pre-commit>=4.3.0",
-    "pyright[nodejs]>=1.1.405",
+    # Pydantic 2.14 uses TypeForm in TypeAdapter signatures.
+    "pyright[nodejs]>=1.1.414",
     "pytest>=8.4.1",
     "pytest-cov>=5.0.0",
     "ruff>=0.12.10",
