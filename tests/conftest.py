@@ -92,8 +92,8 @@ async def _dual_db_engine(
     request: pytest.FixtureRequest, tmp_path: Path, *, production_sqlite: bool
 ) -> AsyncIterator[AsyncEngine]:
     previous_sqlite_mode = using_sqlite()
+    set_sqlite_mode(request.param == "sqlite")
     if request.param == "sqlite":
-        set_sqlite_mode(True)
         url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
         engine = (
             _create_sqlite_engine(url).engine
@@ -124,6 +124,11 @@ async def dual_db_engine(request, tmp_path: Path) -> AsyncIterator[AsyncEngine]:
 
     Tests that request it run on both supported databases. A module that wants its
     API fixtures on this engine overrides ``async_engine`` to return it.
+
+    Do not request this fixture together with ``dual_db_production_engine``. Each is
+    parametrized on its own, so the test runs four times, and in two of those runs the
+    seed data goes to one database while the app reads the other. On PostgreSQL,
+    teardown can also hang if one session still holds a transaction open.
     """
     async for engine in _dual_db_engine(request, tmp_path, production_sqlite=False):
         yield engine
@@ -136,7 +141,8 @@ async def dual_db_production_engine(
     """Like ``dual_db_engine``, but SQLite gets the production engine settings.
 
     Those are foreign keys, WAL and a busy timeout. Use it for tests that need
-    concurrent sessions to behave as they do in production.
+    concurrent sessions to behave as they do in production. Do not request it together
+    with ``dual_db_engine`` (see the warning there).
     """
     async for engine in _dual_db_engine(request, tmp_path, production_sqlite=True):
         yield engine
