@@ -220,6 +220,7 @@ class TestGetCapabilities:
         assert "repoUpdate" in body["features"]
         assert "pluginConfigUpdate" in body["features"]
         assert "serviceAccountRunAs" in body["features"]
+        assert "automationVisibility" in body["features"]
         # The list follows the pinned SDK's providers, so an SDK bump that adds
         # one (Azure DevOps in 1.58.0) is advertised without a change here.
         assert body["repoProviders"] == sorted(p.value for p in GitProvider)

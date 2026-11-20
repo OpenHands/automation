@@ -5,14 +5,14 @@ SQLite, the ``json``/``jsonb`` operators on PostgreSQL. The column is NOT NULL
 with a ``[]`` default, so expanding it never meets a JSON null.
 """
 
-import uuid
-
 from sqlalchemy import ColumnElement, cast, exists, func, literal, select, true
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.db import using_sqlite
 from openhands.automation.models import Automation
+from openhands.automation.utils.visibility import visible_to
 
 
 def has_tag(tag: str) -> ColumnElement[bool]:
@@ -24,9 +24,10 @@ def has_tag(tag: str) -> ColumnElement[bool]:
 
 
 async def count_org_tags(
-    session: AsyncSession, org_id: uuid.UUID
+    session: AsyncSession, user: AuthenticatedUser
 ) -> list[tuple[str, int]]:
-    """Each tag on the org's live automations with how many carry it.
+    """Each tag on the org's live automations that ``user`` may see, with how
+    many carry it.
 
     Most-used first, then alphabetical, so the order is stable across requests.
     """
@@ -40,7 +41,7 @@ async def count_org_tags(
         select(tag, count)
         .select_from(Automation)
         .join(elements, true())
-        .where(Automation.org_id == org_id, Automation.deleted_at.is_(None))
+        .where(visible_to(user), Automation.deleted_at.is_(None))
         .group_by(tag)
         .order_by(count.desc(), tag.asc())
     )

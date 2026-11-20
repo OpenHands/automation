@@ -23,6 +23,7 @@ from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
+    AutomationVisibility,
     TarballUpload,
     UploadStatus,
 )
@@ -724,6 +725,156 @@ class TestServiceOwnedAutomations:
         )
 
         assert response.status_code == 422
+
+    async def test_patch_private_visibility_returns_422(
+        self, async_client, async_session
+    ):
+        automation = await self._sa_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"visibility": "private"}
+        )
+
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.visibility == AutomationVisibility.ORGANIZATION
+
+
+@pytest.mark.usefixtures("local_file_store")
+class TestAutomationVisibility:
+    """Who can see a private automation: the person it runs as, and managers.
+
+    ``readonly_client`` is a member with ``view_automations`` only;
+    ``async_client`` holds ``manage_automations``. Both act as TEST_USER_ID, so
+    a teammate's automation runs as ``_TEAMMATE_ID``.
+    """
+
+    _TEAMMATE_ID = uuid.UUID("99999999-9999-9999-9999-999999999999")
+    _SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    def _body(self, **extra) -> dict:
+        return {
+            "name": "Daily digest",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            **extra,
+        }
+
+    async def _automation(
+        self, async_session, user_id, visibility=AutomationVisibility.PRIVATE
+    ) -> Automation:
+        automation = Automation(
+            user_id=user_id,
+            org_id=TEST_ORG_ID,
+            name=f"{visibility.value} automation",
+            visibility=visibility,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    @pytest.mark.parametrize(
+        ("requested", "stored"),
+        [({}, "organization"), ({"visibility": "private"}, "private")],
+        ids=["default", "private"],
+    )
+    async def test_create_stores_the_requested_visibility(
+        self, readonly_client, requested, stored
+    ):
+        response = await readonly_client.post(
+            "/api/automation/v1", json=self._body(**requested)
+        )
+
+        assert response.status_code == 201
+        assert response.json()["visibility"] == stored
+
+    async def test_create_private_for_a_service_account_returns_422(
+        self, async_client, async_session
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=self._body(visibility="private", run_as_user_id=str(self._SA_ID)),
+        )
+
+        assert response.status_code == 422
+        assert await async_session.scalar(select(func.count(Automation.id))) == 0
+
+    async def test_list_leaves_out_a_teammates_private_automation(
+        self, readonly_client, async_session
+    ):
+        await self._automation(async_session, self._TEAMMATE_ID)
+        shared = await self._automation(
+            async_session, self._TEAMMATE_ID, AutomationVisibility.ORGANIZATION
+        )
+
+        response = await readonly_client.get("/api/automation/v1")
+
+        assert response.json()["total"] == 1
+        assert [a["id"] for a in response.json()["automations"]] == [str(shared.id)]
+
+    @pytest.mark.parametrize(
+        ("method", "suffix", "body"),
+        [
+            ("GET", "", None),
+            ("PATCH", "", {"name": "Renamed"}),
+            ("DELETE", "", None),
+            ("POST", "/dispatch", None),
+            ("POST", "/run-as", {"to": "self"}),
+            ("GET", "/runs", None),
+            ("GET", "/changes", None),
+            ("GET", "/tarball", None),
+        ],
+    )
+    async def test_a_teammates_private_automation_is_not_found(
+        self, readonly_client, async_session, method, suffix, body
+    ):
+        private = await self._automation(async_session, self._TEAMMATE_ID)
+
+        response = await readonly_client.request(
+            method, f"/api/automation/v1/{private.id}{suffix}", json=body
+        )
+
+        assert response.status_code == 404
+        await async_session.refresh(private)
+        assert private.name == "private automation"
+        assert private.deleted_at is None
+
+    async def test_member_sees_their_own_private_automation(
+        self, readonly_client, async_session
+    ):
+        private = await self._automation(async_session, TEST_USER_ID)
+
+        response = await readonly_client.get(f"/api/automation/v1/{private.id}")
+
+        assert response.status_code == 200
+        assert response.json()["visibility"] == "private"
+
+    async def test_manager_sees_a_teammates_private_automation(
+        self, async_client, async_session
+    ):
+        private = await self._automation(async_session, self._TEAMMATE_ID)
+
+        response = await async_client.get("/api/automation/v1")
+
+        assert [a["id"] for a in response.json()["automations"]] == [str(private.id)]
+
+    async def test_owner_can_make_their_automation_private(
+        self, readonly_client, async_session
+    ):
+        automation = await self._automation(
+            async_session, TEST_USER_ID, AutomationVisibility.ORGANIZATION
+        )
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"visibility": "private"}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["visibility"] == "private"
 
 
 class TestCreateAutomation:
@@ -2242,7 +2393,8 @@ class TestUpdateAutomation:
         assert fetched.json()["description"] is None
 
     @pytest.mark.parametrize(
-        "field", ["name", "entrypoint", "tarball_path", "trigger", "enabled"]
+        "field",
+        ["name", "entrypoint", "tarball_path", "trigger", "enabled", "visibility"],
     )
     async def test_update_automation_null_on_required_field_is_422(
         self, async_client, async_session, field
@@ -6101,6 +6253,19 @@ class TestChangeRunAs:
         assert change.actor_user_id == TEST_USER_ID
         assert "user_id" in change.changed_fields
         assert str(self.SA_ID) not in repr(change.changed_fields)
+
+    async def test_run_as_change_to_sa_makes_a_private_automation_visible(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(
+            async_session, TEST_USER_ID, visibility=AutomationVisibility.PRIVATE
+        )
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        assert response.json()["visibility"] == "organization"
 
     async def test_run_as_change_by_manager_moves_another_members_automation(
         self, async_client, enterprise_api, async_session

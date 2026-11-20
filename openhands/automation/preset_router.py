@@ -28,7 +28,14 @@ from fastapi import (
     Response,
     status,
 )
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import (
@@ -47,6 +54,7 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationRunAsKind,
+    AutomationVisibility,
     TarballUpload,
     UploadStatus,
 )
@@ -63,12 +71,14 @@ from openhands.automation.plugin_specs import (
 from openhands.automation.schemas import (
     FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
+    VISIBILITY_DESCRIPTION,
     AutomationResponse,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
     continue_conversation_keep_alive,
     normalize_automation_state_enabled,
+    reject_private_service_account,
     reject_public_draft_state,
 )
 from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
@@ -191,6 +201,9 @@ class CreatePromptAutomationRequest(BaseModel):
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
+    visibility: AutomationVisibility = Field(
+        default=AutomationVisibility.ORGANIZATION, description=VISIBILITY_DESCRIPTION
+    )
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
         description=(
@@ -292,6 +305,13 @@ class CreatePromptAutomationRequest(BaseModel):
     @classmethod
     def validate_public_state(cls, v: Any) -> Any:
         return reject_public_draft_state(v)
+
+    @field_validator("visibility")
+    @classmethod
+    def validate_visibility(
+        cls, v: AutomationVisibility, info: ValidationInfo
+    ) -> AutomationVisibility:
+        return reject_private_service_account(v, info)
 
     @model_validator(mode="before")
     @classmethod
@@ -736,6 +756,7 @@ async def create_automation_from_prompt(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
             created_by_user_id=user.user_id,
+            visibility=body.visibility,
             org_id=user.org_id,
             name=body.name,
             description=body.description,
@@ -831,6 +852,9 @@ class CreatePluginAutomationRequest(BaseModel):
 
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
+    visibility: AutomationVisibility = Field(
+        default=AutomationVisibility.ORGANIZATION, description=VISIBILITY_DESCRIPTION
     )
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
@@ -954,6 +978,13 @@ class CreatePluginAutomationRequest(BaseModel):
     @classmethod
     def validate_public_state(cls, v: Any) -> Any:
         return reject_public_draft_state(v)
+
+    @field_validator("visibility")
+    @classmethod
+    def validate_visibility(
+        cls, v: AutomationVisibility, info: ValidationInfo
+    ) -> AutomationVisibility:
+        return reject_private_service_account(v, info)
 
     @model_validator(mode="before")
     @classmethod
@@ -1295,6 +1326,7 @@ async def create_automation_from_plugin(
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
             created_by_user_id=user.user_id,
+            visibility=body.visibility,
             org_id=user.org_id,
             name=body.name,
             description=body.description,

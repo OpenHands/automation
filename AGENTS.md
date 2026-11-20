@@ -109,6 +109,7 @@ automation/
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)
 │           ├── time.py         # UTC time helpers
+│           ├── visibility.py   # Which automations a user may see (private vs organization)
 │           └── ...             # agent_server, kv, log_context, templates, webhook, ...
 ├── containers/
 │   └── Dockerfile          # Container image definition
@@ -282,6 +283,27 @@ def upgrade() -> None:
 ```
 
 - **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher — check `using_sqlite()` to skip on SQLite
+
+## Automation Visibility
+
+`automations.visibility` is `organization` (default) or `private`. A private
+automation is seen only by whoever may modify it (`_assert_can_manage`):
+holders of `manage_automations`, and the person it runs as.
+
+- `visible_to(user)` (`utils/visibility.py`) is the one filter. Every read of
+  an automation for a user goes through it: the list, `_get_org_automation`
+  (so a hidden automation is a 404 on every `/v1/{id}` route), the tag counts,
+  the KV store's user path, and a draft's `source_automation_id`.
+- Only an automation that runs as a person can be private. The create schemas
+  refuse `private` together with `run_as_user_id` (422), `PATCH` refuses it on
+  an automation that runs as a service account, and `POST /v1/{id}/run-as` to a
+  service account resets it to `organization`.
+- A draft whose body says `private` is hidden the same way
+  (`_draft_visible_to`), and its hidden test-run automation is kept as private
+  as the draft.
+- Not covered: a factory's `automation_count` includes private automations,
+  Git Sync exports them (see Git Sync), and the app server still lets org
+  members open a run's conversation by its link.
 
 ## Factories
 
@@ -573,6 +595,9 @@ exactly one org, the deterministic local org from `auth.py`'s
   can enable an automation that runs as a service account, or change its plugin
   refs, and the automation then runs with the service account's API key. The
   `manage_automations` check covers the API only.
+- Known limit: Git Sync ignores `visibility`. A private automation is exported
+  to the org's repository like any other, and an automation imported from the
+  repository is visible to the organization.
 - **Encryption**: set the org's encryption key (or, in local mode,
   `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
   SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're

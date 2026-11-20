@@ -15,6 +15,7 @@ from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
+    AutomationVisibility,
     CustomWebhook,
     TarballUpload,
     UploadStatus,
@@ -777,6 +778,94 @@ async def test_member_cannot_change_another_users_draft(readonly_client, async_s
     assert draft.deleted_at is None
 
 
+PROMPT_DRAFT = {
+    "name": "Daily digest",
+    "prompt": "Summarize open PRs.",
+    "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+}
+
+
+def _teammates_draft(**body) -> AutomationDraft:
+    return AutomationDraft(
+        user_id=OTHER_USER_ID,
+        org_id=TEST_ORG_ID,
+        endpoint="/v1/preset/prompt",
+        name="Teammate's draft",
+        draft_body={"name": "Teammate's draft", **body},
+    )
+
+
+async def test_member_does_not_see_another_users_private_draft(
+    readonly_client, async_session
+):
+    shared = _teammates_draft()
+    private = _teammates_draft(visibility="private")
+    async_session.add_all([shared, private])
+    await async_session.commit()
+
+    listed = await readonly_client.get("/api/automation/v1/drafts")
+    fetched = await readonly_client.get(f"/api/automation/v1/drafts/{private.id}")
+
+    assert listed.json()["total"] == 1
+    assert [draft["id"] for draft in listed.json()["drafts"]] == [str(shared.id)]
+    assert fetched.status_code == 404
+
+
+async def test_manager_sees_another_users_private_draft(async_client, async_session):
+    private = _teammates_draft(visibility="private")
+    async_session.add(private)
+    await async_session.commit()
+
+    response = await async_client.get("/api/automation/v1/drafts")
+
+    assert [draft["id"] for draft in response.json()["drafts"]] == [str(private.id)]
+
+
+async def test_private_draft_test_run_automation_is_private(
+    readonly_client, async_session, draft_file_store
+):
+    created = await readonly_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {**PROMPT_DRAFT, "visibility": "private"},
+        },
+    )
+
+    dispatched = await readonly_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert dispatched.status_code == 201, dispatched.text
+    automation = await async_session.get(
+        Automation, uuid.UUID(dispatched.json()["automation_id"])
+    )
+    assert automation is not None
+    assert automation.visibility == AutomationVisibility.PRIVATE
+
+
+async def test_making_a_tested_draft_private_hides_its_test_run_automation(
+    readonly_client, async_session, draft_file_store
+):
+    created = await readonly_client.post(
+        "/api/automation/v1/drafts",
+        json={"endpoint": "/v1/preset/prompt", "draft": PROMPT_DRAFT},
+    )
+    path = f"/api/automation/v1/drafts/{created.json()['id']}"
+    dispatched = await readonly_client.post(f"{path}/dispatch")
+
+    updated = await readonly_client.patch(
+        path, json={"draft": {**PROMPT_DRAFT, "visibility": "private"}}
+    )
+
+    assert updated.status_code == 200, updated.text
+    automation = await async_session.get(
+        Automation, uuid.UUID(dispatched.json()["automation_id"])
+    )
+    assert automation is not None
+    assert automation.visibility == AutomationVisibility.PRIVATE
+
+
 SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
 
 
@@ -996,6 +1085,14 @@ async def test_sa_draft_with_non_sa_run_as_is_not_dispatchable(
     assert [e["code"] for e in created.json()["validation_errors"]] == [
         "run_as_user_id_422"
     ]
+
+
+async def test_private_sa_draft_is_not_dispatchable(async_client):
+    created = await _create_sa_prompt_draft(async_client, visibility="private")
+
+    assert created.status_code == 201
+    assert created.json()["dispatchable"] is False
+    assert [e["field"] for e in created.json()["validation_errors"]] == ["visibility"]
 
 
 def _profile_draft(profile_id: str, **extra: object) -> dict:
