@@ -20,7 +20,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import (
@@ -34,7 +34,7 @@ from openhands.automation.capabilities_router import (
     _schema_errors,
     factory_id_errors,
 )
-from openhands.automation.db import get_session
+from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.draft_schemas import (
     FINAL_DRAFT_MODELS,
     DraftModel,
@@ -45,6 +45,7 @@ from openhands.automation.models import (
     Automation,
     AutomationDraft,
     AutomationState,
+    AutomationVisibility,
     TarballUpload,
     UploadStatus,
 )
@@ -106,6 +107,7 @@ from openhands.automation.utils.tarball_validation import (
     validate_tarball_path,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.utils.visibility import visible_to
 from openhands.automation.webhook_policy import trigger_webhook_validation_errors
 
 
@@ -120,12 +122,12 @@ _require_view_automations = require_permission("view_automations")
 
 
 async def _assert_org_automation_exists(
-    session: AsyncSession, automation_id: uuid.UUID, org_id: uuid.UUID
+    session: AsyncSession, automation_id: uuid.UUID, user: AuthenticatedUser
 ) -> None:
     result = await session.execute(
         select(Automation.id).where(
             Automation.id == automation_id,
-            Automation.org_id == org_id,
+            visible_to(user),
             Automation.deleted_at.is_(None),
         )
     )
@@ -133,13 +135,41 @@ async def _assert_org_automation_exists(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Automation not found")
 
 
+def _draft_visible_to(user: AuthenticatedUser) -> ColumnElement[bool]:
+    """Filter for the drafts of the user's org that the user may see.
+
+    The draft of a private automation is hidden like the automation itself
+    (``visible_to``): from everyone but its creator and holders of
+    ``manage_automations``.
+
+    JSON extraction mirrors ``find_existing_template_automation``. A draft
+    that does not set ``visibility`` yields NULL on both databases and is not
+    private.
+    """
+    in_org = AutomationDraft.org_id == user.org_id
+    if "manage_automations" in user.permissions:
+        return in_org
+    if using_sqlite():
+        visibility = func.json_extract(AutomationDraft.draft_body, "$.visibility")
+    else:
+        visibility = AutomationDraft.draft_body.op("->>")("visibility")
+    return and_(
+        in_org,
+        or_(
+            AutomationDraft.user_id == user.user_id,
+            visibility.is_(None),
+            visibility != literal(AutomationVisibility.PRIVATE.value),
+        ),
+    )
+
+
 async def _get_org_draft(
-    session: AsyncSession, draft_id: uuid.UUID, org_id: uuid.UUID
+    session: AsyncSession, draft_id: uuid.UUID, user: AuthenticatedUser
 ) -> AutomationDraft:
     result = await session.execute(
         select(AutomationDraft).where(
             AutomationDraft.id == draft_id,
-            AutomationDraft.org_id == org_id,
+            _draft_visible_to(user),
             AutomationDraft.deleted_at.is_(None),
         )
     )
@@ -164,6 +194,17 @@ def _draft_run_as_user_id(draft: AutomationDraft) -> uuid.UUID:
     """The user the draft's automation runs as: its service account, if any."""
     run_as = draft.draft_body.get("run_as_user_id")
     return uuid.UUID(run_as) if run_as else draft.user_id
+
+
+def _draft_visibility(draft: AutomationDraft) -> AutomationVisibility:
+    """The visibility the draft's automation is stored with: private only when
+    the draft asks for it and runs as a person."""
+    body = draft.draft_body
+    if body.get("visibility") == AutomationVisibility.PRIVATE and not body.get(
+        "run_as_user_id"
+    ):
+        return AutomationVisibility.PRIVATE
+    return AutomationVisibility.ORGANIZATION
 
 
 async def _get_live_materialized_draft_automation(
@@ -606,6 +647,8 @@ async def _materialize_draft(
             "disabled_reason": None,
             "disabled_detail": None,
             "disabled_at": None,
+            # A private automation's test run is as hidden as the automation.
+            "visibility": parsed.visibility,
         }
     )
     if automation is None:
@@ -638,9 +681,7 @@ async def create_draft(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
     if body.source_automation_id is not None:
-        await _assert_org_automation_exists(
-            session, body.source_automation_id, user.org_id
-        )
+        await _assert_org_automation_exists(session, body.source_automation_id, user)
     draft_body = _normalize_draft_body_or_422(body.endpoint, body.draft)
     draft = AutomationDraft(
         user_id=user.user_id,
@@ -666,7 +707,7 @@ async def list_drafts(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftListResponse:
     base_query = select(AutomationDraft).where(
-        AutomationDraft.org_id == user.org_id,
+        _draft_visible_to(user),
         AutomationDraft.deleted_at.is_(None),
     )
     total = (
@@ -691,7 +732,7 @@ async def get_draft(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
-    draft = await _get_org_draft(session, draft_id, user.org_id)
+    draft = await _get_org_draft(session, draft_id, user)
     return AutomationDraftResponse.model_validate(draft)
 
 
@@ -703,7 +744,7 @@ async def update_draft(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
-    draft = await _get_org_draft(session, draft_id, user.org_id)
+    draft = await _get_org_draft(session, draft_id, user)
     _assert_draft_creator(draft, user)
     endpoint = cast(DraftEndpoint, body.endpoint or draft.endpoint)
     draft_body = body.draft if body.draft is not None else draft.draft_body
@@ -724,6 +765,14 @@ async def update_draft(
             reason="Automation draft run-as identity changed",
         )
         draft.materialized_automation_id = None
+    if body.draft is not None:
+        # The next test run copies the whole draft; until then, keep its last
+        # test run's automation as hidden as the draft now says.
+        materialized = await _get_live_materialized_draft_automation(
+            session, draft, _draft_run_as_user_id(draft)
+        )
+        if materialized is not None:
+            materialized.visibility = _draft_visibility(draft)
     if body.name is not None or body.draft is not None:
         draft.name = _draft_name(body.name, draft_body)
     await _refresh_validation(draft, request, user, session)
@@ -738,7 +787,7 @@ async def delete_draft(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
-    draft = await _get_org_draft(session, draft_id, user.org_id)
+    draft = await _get_org_draft(session, draft_id, user)
     _assert_draft_creator(draft, user)
     deleted_at = utcnow()
     draft.deleted_at = deleted_at
@@ -763,7 +812,7 @@ async def dispatch_draft(
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationRunResponse:
     del background_tasks
-    draft = await _get_org_draft(session, draft_id, user.org_id)
+    draft = await _get_org_draft(session, draft_id, user)
     _assert_draft_creator(draft, user)
     validated = await _refresh_validation(draft, request, user, session)
     if validated is None:

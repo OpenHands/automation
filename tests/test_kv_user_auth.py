@@ -32,6 +32,7 @@ from openhands.automation.models import (
     Automation,
     AutomationKV,
     AutomationRunAsKind,
+    AutomationVisibility,
     Base,
 )
 from openhands.automation.utils.kv import (
@@ -435,6 +436,23 @@ class TestUserAuthPermissions:
 
         assert resp.status_code == 200
         assert resp.json()["value"] == 42
+
+    async def test_member_cannot_read_a_teammates_private_automation(
+        self, kv_user_client, test_automation, sqlite_session
+    ):
+        """A private automation's KV data is as hidden as the automation."""
+        teammate = await sqlite_session.get(Automation, TEAMMATE_AUTOMATION_ID)
+        teammate.visibility = AutomationVisibility.PRIVATE
+        seed_keys(sqlite_session, {"cursor": 42}, TEAMMATE_AUTOMATION_ID)
+        await sqlite_session.commit()
+
+        resp = await kv_user_client.get(
+            f"{_KV}/cursor",
+            params={"automation_id": str(TEAMMATE_AUTOMATION_ID)},
+            headers={"Authorization": "Bearer test-api-key"},
+        )
+
+        assert resp.status_code == 404
 
     @pytest.mark.parametrize(
         ("method", "path", "body"),

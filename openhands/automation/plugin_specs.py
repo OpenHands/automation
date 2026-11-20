@@ -27,21 +27,25 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
+from openhands.automation.models import AutomationVisibility
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
     FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
+    VISIBILITY_DESCRIPTION,
     CronTrigger,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
     normalize_automation_state_enabled,
+    reject_private_service_account,
     reject_public_draft_state,
     validate_command_string,
 )
@@ -418,6 +422,9 @@ class CreatePluginSpecAutomationRequest(BaseModel):
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
+    visibility: AutomationVisibility = Field(
+        default=AutomationVisibility.ORGANIZATION, description=VISIBILITY_DESCRIPTION
+    )
     name: str = Field(..., min_length=1, max_length=500)
     factory_id: uuid.UUID | None = Field(
         default=None, description=FACTORY_ID_DESCRIPTION
@@ -449,6 +456,13 @@ class CreatePluginSpecAutomationRequest(BaseModel):
     @classmethod
     def validate_public_state(cls, value: Any) -> Any:
         return reject_public_draft_state(value)
+
+    @field_validator("visibility")
+    @classmethod
+    def validate_visibility(
+        cls, value: AutomationVisibility, info: ValidationInfo
+    ) -> AutomationVisibility:
+        return reject_private_service_account(value, info)
 
     @field_validator("observability_associations")
     @classmethod

@@ -65,6 +65,14 @@ class AutomationRunAsKind(StrEnum):
     SERVICE = "service"
 
 
+class AutomationVisibility(StrEnum):
+    """Who in the organization can see an automation."""
+
+    ORGANIZATION = "organization"
+    # Only the person it runs as, and holders of ``manage_automations``.
+    PRIVATE = "private"
+
+
 class AutomationChangeActorKind(StrEnum):
     """Who made a recorded change to an automation."""
 
@@ -124,6 +132,13 @@ class Automation(Base):
         Uuid,
         nullable=False,
         default=lambda ctx: ctx.get_current_parameters()["user_id"],
+    )
+    # Always ORGANIZATION for an automation that runs as a service account.
+    visibility: Mapped[AutomationVisibility] = mapped_column(
+        Enum(AutomationVisibility, native_enum=False, length=16),
+        nullable=False,
+        default=AutomationVisibility.ORGANIZATION,
+        server_default=AutomationVisibility.ORGANIZATION.name,  # member names
     )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)

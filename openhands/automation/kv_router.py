@@ -94,6 +94,7 @@ from openhands.automation.kv_schemas import (
 from openhands.automation.models import Automation, AutomationKV, AutomationKVMeta
 from openhands.automation.router import _assert_can_manage
 from openhands.automation.utils.kv import KVTokenClaims, KVTokenError, verify_kv_token
+from openhands.automation.utils.visibility import visible_to
 
 
 logger = logging.getLogger(__name__)
@@ -191,24 +192,23 @@ async def _verify_automation_access(
 ) -> None:
     """Verify that the user may read, or also write, the automation's KV data.
 
-    Every request needs ``view_automations`` and an automation in the user's
-    org: a member who can see the automation can inspect its state.  A write
-    must also pass ``_assert_can_manage``, the rule for modifying the
-    automation itself.  A run needs neither: it uses its KV token.
+    Every request needs ``view_automations`` and an automation the user may
+    see (``visible_to``): a member who can see the automation can inspect its
+    state.  A write must also pass ``_assert_can_manage``, the rule for
+    modifying the automation itself.  A run needs neither: it uses its KV token.
     """
     if "view_automations" not in user.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Requires view_automations permission",
         )
+    # An automation of another org, or one hidden from the user, is a 404
+    # rather than a 403: don't leak existence.
     result = await session.execute(
-        select(Automation).where(Automation.id == automation_id)
+        select(Automation).where(Automation.id == automation_id, visible_to(user))
     )
     automation = result.scalars().first()
     if automation is None:
-        raise _automation_not_found()
-    if automation.org_id != user.org_id:
-        # Don't leak existence — return 404 rather than 403
         raise _automation_not_found()
     if write:
         await _assert_can_manage(automation, user)
