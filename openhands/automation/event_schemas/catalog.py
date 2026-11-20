@@ -9,11 +9,18 @@ any event key.
 import fnmatch
 
 from openhands.automation.event_schemas import github
-from openhands.automation.event_schemas.azure_devops import AZURE_DEVOPS_EVENT_TYPES
+from openhands.automation.event_schemas.azure_devops import (
+    AZURE_DEVOPS_EVENT_TYPES,
+    AZURE_DEVOPS_EVENT_TYPE_LABELS,
+)
 from openhands.automation.event_schemas.bitbucket_data_center import (
     BITBUCKET_DATA_CENTER_EVENT_TYPES,
+    BITBUCKET_DATA_CENTER_EVENT_TYPE_LABELS,
 )
-from openhands.automation.event_schemas.jira_dc import JIRA_DC_EVENT_TYPES
+from openhands.automation.event_schemas.jira_dc import (
+    JIRA_DC_EVENT_TYPES,
+    JIRA_DC_EVENT_TYPE_LABELS,
+)
 
 
 # Sources whose payload names its own event type in one top-level field, so the
@@ -50,6 +57,27 @@ def supported_event_patterns(source: str) -> list[str] | None:
     if source == "github":
         return github.get_supported_event_patterns()
     return supported_event_types(source)
+
+
+def event_labels(source: str) -> dict[str, str] | None:
+    """Display names for a source's event key patterns, or None without a catalog.
+
+    Keys match ``supported_event_patterns`` exactly, so a setup UI can pair a
+    human-readable name with each option it offers. A source missing a label
+    for one of its patterns is a catalog bug and raises here, where the
+    pattern list and the label map drift apart.
+    """
+    if source == "github":
+        return github.get_event_labels()
+    keyed = _KEYED_CATALOGS.get(source)
+    if keyed is None:
+        return None
+    labels = {
+        "azure_devops": AZURE_DEVOPS_EVENT_TYPE_LABELS,
+        "bitbucket_data_center": BITBUCKET_DATA_CENTER_EVENT_TYPE_LABELS,
+        "jira_dc": JIRA_DC_EVENT_TYPE_LABELS,
+    }[source]
+    return {event_type: labels[event_type] for event_type in keyed[1]}
 
 
 def event_detection_rules(source: str) -> list[dict[str, str]]:

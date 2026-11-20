@@ -20,6 +20,16 @@ AZURE_DEVOPS_EVENT_TYPES: tuple[str, ...] = (
     "workitem.commented",
 )
 
+# Human-readable names a setup UI can show for each event key, keyed the same
+# way as the tuple above.
+AZURE_DEVOPS_EVENT_TYPE_LABELS: dict[str, str] = {
+    "git.pullrequest.created": "Pull request created",
+    "git.pullrequest.merged": "Pull request merged",
+    "git.pullrequest.updated": "Pull request updated",
+    "ms.vss-code.git-pullrequest-comment-event": "Pull request comment added",
+    "workitem.commented": "Work item commented on",
+}
+
 
 class AzureDevOpsEvent(WebhookEvent):
     """Azure DevOps Service Hook event.
