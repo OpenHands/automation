@@ -5,20 +5,28 @@ import io
 import json
 import os
 import re
+import runpy
+import shutil
 import socket
 import subprocess
+import sys
 import tarfile
+import time
+import types
 import uuid
 import venv
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from pydantic import ValidationError
+import tenacity
+from pydantic import BaseModel, ValidationError
 
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
@@ -31,8 +39,18 @@ from openhands.automation.preset_router import (
     _resolve_experiment_variant_models,
 )
 from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
+from openhands.sdk.agent import ACPAgent, AgentBase
+from openhands.sdk.context import AgentContext
+from openhands.sdk.llm import LLM
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
+from openhands.sdk.settings import (
+    ACPAgentSettings,
+    AgentSettingsConfig,
+    OpenHandsAgentSettings,
+)
+from openhands.sdk.skills import Skill
+from openhands.sdk.workspace import RemoteWorkspace
 from openhands.workspace import RepoSource
 
 
@@ -106,6 +124,487 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
         namespace,
     )
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
+
+
+_AGENT_HELPER_NAMES = (
+    "_is_retryable_error",
+    "_fetch_agent_settings",
+    "_merge_agent_context",
+    "_resolve_agent",
+)
+
+
+def _load_preset_agent_helpers(
+    preset_name: str, *, get_default_agent: Callable[..., Any] | None = None
+) -> dict[str, Any]:
+    """Load the preset's agent-settings helpers, bound to the real SDK types.
+
+    ``get_default_agent`` comes from openhands-tools, which only the sandbox
+    installs, so tests that reach it pass a stand-in.
+    """
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_nodes = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in _AGENT_HELPER_NAMES
+    ]
+    assert {node.name for node in function_nodes} == set(_AGENT_HELPER_NAMES)
+    namespace: dict[str, Any] = {
+        "ACPAgentSettings": ACPAgentSettings,
+        "AgentBase": AgentBase,
+        "AgentContext": AgentContext,
+        "AgentSettingsConfig": AgentSettingsConfig,
+        "BaseModel": BaseModel,
+        "LLM": LLM,
+        "RemoteWorkspace": RemoteWorkspace,
+        "get_default_agent": get_default_agent,
+        "httpx": httpx,
+        "tenacity": tenacity,
+    }
+    helpers = ast.Module(body=[*function_nodes], type_ignores=[])
+    ast.fix_missing_locations(helpers)
+    exec(compile(helpers, str(source_path), "exec"), namespace)
+    return namespace
+
+
+def _settings_response(agent_settings: Any) -> httpx.Response:
+    """The agent server's ``GET /api/settings`` reply for these agent settings."""
+    return httpx.Response(
+        200,
+        json={
+            "agent_settings": agent_settings.model_dump(
+                mode="json", context={"expose_secrets": "plaintext"}
+            ),
+            "conversation_settings": {},
+            "llm_api_key_is_set": False,
+        },
+    )
+
+
+def _workspace_replying(
+    *replies: httpx.Response | Exception,
+) -> tuple[RemoteWorkspace, list[httpx.Request]]:
+    """A workspace whose agent server answers each request with the next reply."""
+    requests: list[httpx.Request] = []
+    pending = iter(replies)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        reply = next(pending)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    workspace = RemoteWorkspace(host="http://agent-server.test", working_dir="/tmp")
+    workspace._client = httpx.Client(
+        base_url=workspace.host, transport=httpx.MockTransport(handler)
+    )
+    return workspace, requests
+
+
+@pytest.fixture
+def retry_waits(monkeypatch) -> list[float]:
+    """Record the waits between retry attempts instead of sleeping through them."""
+    waits: list[float] = []
+    monkeypatch.setattr("tenacity.nap.time.sleep", waits.append)
+    return waits
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+class TestPresetAgentSettings:
+    """The presets pick the agent from the server's ``agent_kind``.
+
+    The helpers are loaded from the preset source and run against the real SDK
+    settings models and ``RemoteWorkspace``, so an SDK change that breaks the
+    ACP path fails here instead of inside a sandbox.
+    """
+
+    def test_fetch_returns_the_servers_acp_settings(self, preset_name):
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, requests = _workspace_replying(
+            _settings_response(ACPAgentSettings(acp_server="claude-code"))
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        assert isinstance(settings, ACPAgentSettings)
+        assert settings.acp_server == "claude-code"
+        assert [request.url.path for request in requests] == ["/api/settings"]
+
+    def test_fetch_retries_transient_errors(self, preset_name, retry_waits):
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, requests = _workspace_replying(
+            httpx.Response(503),
+            httpx.ConnectError("connection refused"),
+            _settings_response(ACPAgentSettings(acp_server="claude-code")),
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        assert isinstance(settings, ACPAgentSettings)
+        assert len(requests) == 3
+        assert retry_waits == [1, 2]
+
+    def test_fetch_makes_as_many_attempts_as_get_llm(self, preset_name, retry_waits):
+        """A flaky server gets the same number of attempts ``main`` gave it."""
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, settings_requests = _workspace_replying(
+            *(httpx.Response(503) for _ in range(10))
+        )
+        llm_workspace, llm_requests = _workspace_replying(
+            *(httpx.Response(503) for _ in range(10))
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+        with pytest.raises(httpx.HTTPStatusError):
+            llm_workspace.get_llm()
+
+        assert settings is None
+        assert len(settings_requests) == len(llm_requests) == 3
+
+    def test_fetch_gives_up_at_once_without_a_settings_endpoint(
+        self, preset_name, retry_waits, capsys
+    ):
+        """Agent servers that predate ``GET /api/settings`` keep the default path."""
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, requests = _workspace_replying(httpx.Response(404))
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        assert settings is None
+        assert len(requests) == 1
+        assert retry_waits == []
+        assert "agent settings unavailable (HTTP 404)" in capsys.readouterr().out
+
+    def test_fetch_does_not_print_rejected_plaintext_settings(
+        self, preset_name, capsys
+    ):
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, _ = _workspace_replying(
+            httpx.Response(
+                200,
+                json={
+                    "agent_settings": {
+                        "agent_kind": "openhands",
+                        "llm": {"model": "gpt", "api_key": {"value": "sk-plaintext"}},
+                    },
+                    "conversation_settings": {},
+                    "llm_api_key_is_set": True,
+                },
+            )
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        output = capsys.readouterr().out
+        assert settings is None
+        assert "agent settings unavailable (ValidationError)" in output
+        assert "sk-plaintext" not in output
+
+    def test_merge_agent_context_keeps_acp_secrets(self, preset_name):
+        helpers = _load_preset_agent_helpers(preset_name)
+        settings = ACPAgentSettings(
+            acp_server="claude-code",
+            agent_context=AgentContext(secrets={"ANTHROPIC_API_KEY": "sk-test"}),
+        )
+        skill = Skill(name="repo-guide", content="Follow the repository guide.")
+        skills_context = AgentContext(skills=[skill], load_public_skills=False)
+
+        merged = helpers["_merge_agent_context"](settings, skills_context)
+
+        assert merged.secrets == {"ANTHROPIC_API_KEY": "sk-test"}
+        assert merged.skills == [skill]
+        assert merged.load_public_skills is False
+        merged.validate_acp_compatibility()
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            pytest.param(OpenHandsAgentSettings(), id="openhands"),
+            pytest.param(ACPAgentSettings(acp_server="claude-code"), id="acp-bare"),
+            pytest.param(None, id="unavailable"),
+        ],
+    )
+    def test_merge_agent_context_uses_the_skills_context_otherwise(
+        self, preset_name, settings
+    ):
+        helpers = _load_preset_agent_helpers(preset_name)
+        skills_context = AgentContext(skills=[], load_public_skills=True)
+
+        merged = helpers["_merge_agent_context"](settings, skills_context)
+
+        assert merged is skills_context
+
+    def test_resolve_agent_builds_the_configured_acp_agent(self, preset_name):
+        get_default_agent = MagicMock()
+        helpers = _load_preset_agent_helpers(
+            preset_name, get_default_agent=get_default_agent
+        )
+        settings = ACPAgentSettings(acp_server="claude-code")
+
+        agent = helpers["_resolve_agent"](
+            settings, llm=None, cli_mode=True, finish_tool_response_schema=dict
+        )
+
+        assert isinstance(agent, ACPAgent)
+        assert agent.acp_server == "claude-code"
+        assert agent.acp_command == settings.resolve_acp_command()
+        get_default_agent.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            pytest.param(OpenHandsAgentSettings(), id="openhands"),
+            pytest.param(None, id="unavailable"),
+        ],
+    )
+    def test_resolve_agent_uses_the_default_agent_otherwise(
+        self, preset_name, settings
+    ):
+        get_default_agent = MagicMock()
+        helpers = _load_preset_agent_helpers(
+            preset_name, get_default_agent=get_default_agent
+        )
+        llm = object()
+
+        agent = helpers["_resolve_agent"](
+            settings, llm=llm, cli_mode=True, finish_tool_response_schema=dict
+        )
+
+        assert agent is get_default_agent.return_value
+        get_default_agent.assert_called_once_with(
+            llm=llm, cli_mode=True, finish_tool_response_schema=dict
+        )
+
+
+_PROFILE_ID = "6f1c2a1e-0000-4000-8000-000000000001"
+_ACP_SERVER_SETTINGS = ACPAgentSettings(acp_server="claude-code")
+_OPENHANDS_SERVER_SETTINGS = OpenHandsAgentSettings(
+    llm=LLM(model="openai/server-model", api_key="sk-server")
+)
+
+
+@dataclass
+class _PresetRun:
+    """What a preset's ``main.py`` asked of its agent server during one run."""
+
+    server_settings: AgentSettingsConfig
+    requests: list[str] = field(default_factory=list)
+    secrets_profiles: list[str | None] = field(default_factory=list)
+    default_agent_llms: list[LLM] = field(default_factory=list)
+    profile_requests: list[Any] = field(default_factory=list)
+    agents: list[AgentBase] = field(default_factory=list)
+    output: str = ""
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == "/api/settings":
+            return _settings_response(self.server_settings)
+        return httpx.Response(404)
+
+
+def _run_preset_main(
+    preset_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    server_settings: AgentSettingsConfig,
+    agent_profile_id: str | None = None,
+) -> _PresetRun:
+    """Run the preset's real ``main.py`` in local mode against a mocked agent server.
+
+    The agent server's ``GET /api/settings`` and the SDK's own ``get_llm()`` are
+    real; skills, secrets and the conversation itself are recorded instead.
+    ``get_default_agent`` comes from openhands-tools, which only the sandbox
+    installs, so a stand-in records the LLM it was given.
+    """
+    from openhands.sdk import Agent
+
+    run = _PresetRun(server_settings=server_settings)
+
+    script_dir = tmp_path / "automation"
+    script_dir.mkdir()
+    shutil.copy(PRESETS_DIR / preset_name / "sdk_main.py", script_dir / "main.py")
+    shutil.copy(PRESETS_DIR / "finish_tool_hook.py", script_dir)
+    (script_dir / "prompt.txt").write_text("Say hi.")
+    if preset_name == "plugin":
+        (script_dir / "plugins_config.json").write_text(
+            json.dumps([{"source": "github:acme/review"}])
+        )
+    monkeypatch.syspath_prepend(str(script_dir))
+    monkeypatch.delitem(sys.modules, "finish_tool_hook", raising=False)
+
+    def get_default_agent(llm, **kwargs):
+        run.default_agent_llms.append(llm)
+        return Agent(llm=llm, tools=[])
+
+    tools = types.ModuleType("openhands.tools")
+    tools_preset = types.ModuleType("openhands.tools.preset")
+    tools_preset.TaskOutcome = BaseModel  # type: ignore[attr-defined]
+    tools_default = types.ModuleType("openhands.tools.preset.default")
+    tools_default.get_default_agent = get_default_agent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openhands.tools", tools)
+    monkeypatch.setitem(sys.modules, "openhands.tools.preset", tools_preset)
+    monkeypatch.setitem(sys.modules, "openhands.tools.preset.default", tools_default)
+
+    class AgentServerWorkspace(RemoteWorkspace):
+        @property
+        def client(self) -> httpx.Client:
+            if self._client is None:
+                self._client = httpx.Client(
+                    base_url=self.host, transport=httpx.MockTransport(run.handle)
+                )
+            return self._client
+
+        def load_skills_from_agent_server(self, *args: Any, **kwargs: Any):
+            return [], AgentContext(skills=[], load_public_skills=False)
+
+        def get_secrets(self, names=None, *, agent_profile_id=None):
+            run.secrets_profiles.append(agent_profile_id)
+            return {}
+
+    class RecordedConversation:
+        def __init__(self, agent=None, **kwargs):
+            self.id = uuid.uuid4()
+            if agent is not None:
+                run.agents.append(agent)
+            self.conversation_stats = SimpleNamespace(
+                get_combined_metrics=lambda: SimpleNamespace(accumulated_cost=0.0)
+            )
+
+        @classmethod
+        def create(cls, workspace, request, callbacks=None):
+            run.profile_requests.append(request)
+            return cls()
+
+        def update_secrets(self, secrets):
+            pass
+
+        def send_message(self, message):
+            pass
+
+        def run(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "openhands.sdk.workspace.remote.base.RemoteWorkspace", AgentServerWorkspace
+    )
+    monkeypatch.setattr("openhands.sdk.Conversation", RecordedConversation)
+    monkeypatch.setattr("openhands.sdk.RemoteConversation", RecordedConversation)
+
+    for name in (
+        "AUTOMATION_AGENT_PROFILE_ID",
+        "AUTOMATION_CALLBACK_URL",
+        "AUTOMATION_CONVERSATION_ID",
+        "AUTOMATION_CONVERSATION_STARTED",
+        "AUTOMATION_EVENT_PAYLOAD",
+        "AUTOMATION_MODEL",
+        "AUTOMATION_PHASE_URL",
+        "SANDBOX_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AUTOMATION_RUN_MODE", "local")
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://agent-server.test")
+    monkeypatch.setenv("WORKSPACE_BASE", str(tmp_path))
+    if agent_profile_id:
+        monkeypatch.setenv("AUTOMATION_AGENT_PROFILE_ID", agent_profile_id)
+
+    # main.py waits two seconds for the event stream to settle after the run.
+    # Its sleeps advance a fake clock instead.
+    real_time = time.time
+    slept = [0.0]
+
+    def sleep(seconds: float) -> None:
+        slept[0] += seconds
+
+    monkeypatch.setattr(time, "time", lambda: real_time() + slept[0])
+    monkeypatch.setattr(time, "sleep", sleep)
+
+    runpy.run_path(str(script_dir / "main.py"), run_name="__main__")
+    run.output = capsys.readouterr().out
+    assert "ALL_OK" in run.output
+    return run
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+class TestPresetRunAgentSource:
+    """Which agent a local preset run gets: the selected profile, else the server's.
+
+    These run the preset's real ``main.py``, so they cover the order of the
+    branches, not only the helpers.
+    """
+
+    @pytest.mark.parametrize(
+        "server_settings",
+        [
+            pytest.param(_OPENHANDS_SERVER_SETTINGS, id="profile-on-openhands-server"),
+            pytest.param(_ACP_SERVER_SETTINGS, id="profile-on-acp-server"),
+        ],
+    )
+    def test_a_selected_profile_wins_over_the_servers_agent_kind(
+        self, preset_name, server_settings, tmp_path, monkeypatch, capsys
+    ):
+        """The agent server builds the agent from the profile, whatever its kind.
+
+        The runner never learns the profile's kind: the agent server resolves
+        the profile. So an ACP profile on an OpenHands server and an OpenHands
+        profile on an ACP server both come down to this: the conversation names
+        the profile, carries no agent of its own, and the server's agent
+        settings are never read.
+        """
+        run = _run_preset_main(
+            preset_name,
+            tmp_path,
+            monkeypatch,
+            capsys,
+            server_settings,
+            agent_profile_id=_PROFILE_ID,
+        )
+
+        [request] = run.profile_requests
+        assert request.agent_profile_id == uuid.UUID(_PROFILE_ID)
+        assert request.agent is None
+        assert request.agent_settings is None
+        assert run.agents == []
+        assert run.default_agent_llms == []
+        assert run.secrets_profiles == [_PROFILE_ID]
+        assert "GET /api/settings" not in run.requests
+        assert "=== AGENT SETTINGS ===" not in run.output
+
+    def test_without_a_profile_an_acp_server_runs_its_acp_agent(
+        self, preset_name, tmp_path, monkeypatch, capsys
+    ):
+        run = _run_preset_main(
+            preset_name, tmp_path, monkeypatch, capsys, _ACP_SERVER_SETTINGS
+        )
+
+        [agent] = run.agents
+        assert isinstance(agent, ACPAgent)
+        assert agent.acp_server == "claude-code"
+        assert run.profile_requests == []
+        assert run.default_agent_llms == []
+        assert run.secrets_profiles == [None]
+        assert "agent_kind: acp" in run.output
+        assert "skipped: ACP agent has no LLM" in run.output
+
+    def test_without_a_profile_an_openhands_server_runs_the_default_agent(
+        self, preset_name, tmp_path, monkeypatch, capsys
+    ):
+        run = _run_preset_main(
+            preset_name, tmp_path, monkeypatch, capsys, _OPENHANDS_SERVER_SETTINGS
+        )
+
+        [llm] = run.default_agent_llms
+        assert llm.model == "openai/server-model"
+        [agent] = run.agents
+        assert not isinstance(agent, ACPAgent)
+        assert run.profile_requests == []
+        assert run.secrets_profiles == [None]
+        assert "agent_kind: openhands" in run.output
 
 
 def _load_preset_repo_cloner(
@@ -1380,6 +1879,9 @@ class TestGenerateTarball:
             assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
 
     def test_generate_tarball_setup_sh_executable(self):
         """setup.sh in tarball has executable permissions."""
@@ -2547,6 +3049,10 @@ class TestGeneratePluginTarball:
             assert "PluginSource.model_validate" in main_content
             assert '"plugins": plugin_sources' in main_content
             assert "Conversation(**conversation_kwargs)" in main_content
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
+            assert "get_default_agent" in main_content
 
     def test_generate_plugin_tarball_setup_sh_executable(self):
         """setup.sh in plugin tarball has executable permissions."""
