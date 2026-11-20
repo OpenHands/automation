@@ -31,8 +31,8 @@ dependencies = [
   "jmespath>=1.0",
   # SDK 1.63 imports gpt_5_transformation, removed in LiteLLM 1.109.
   "litellm>=1.108.3,<1.109",
-  "openhands-sdk==1.63.0",
-  "openhands-workspace==1.63.0",
+  "openhands-sdk==1.63.1",
+  "openhands-workspace==1.63.1",
   "pg8000>=1.31",
   "prometheus-client>=0.19",
   "pydantic>=2",
