@@ -498,7 +498,7 @@ async def _capture_automation_event(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     settings = get_config().service
-    if not settings.posthog_api_key:
+    if not settings.posthog_enabled or not settings.posthog_api_key:
         return
 
     context = (
