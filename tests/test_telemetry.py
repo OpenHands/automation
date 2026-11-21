@@ -533,6 +533,26 @@ async def test_capture_is_disabled_without_posthog_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_capture_is_disabled_when_posthog_is_turned_off(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    monkeypatch.setenv("AUTOMATION_POSTHOG_ENABLED", "false")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    await telemetry.capture_automation_event(
+        "automation_created",
+        automation=_automation(),
+    )
+
+    assert _MockAsyncClient.posts == []
+
+
+@pytest.mark.asyncio
 async def test_local_capture_requires_stored_telemetry_consent(monkeypatch):
     monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
     monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
