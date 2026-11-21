@@ -57,6 +57,7 @@ _CONFIG_OVERRIDE_FIELDS: Final[dict[str, str]] = {
     "enabled": "git_sync_enabled",
     "interval_seconds": "git_sync_interval_seconds",
     "git_timeout_seconds": "git_sync_git_timeout_seconds",
+    "keep_activation_local": "git_sync_keep_activation_local",
     "repo_url": "git_sync_repo_url",
     "branch": "git_sync_branch",
     "path": "git_sync_path",
@@ -97,6 +98,7 @@ async def _build_status_response(
         encryption_enabled=bool(git_settings.git_sync_encryption_key),
         interval_seconds=await resolve_effective_sync_interval_seconds(session, org_id),
         git_timeout_seconds=git_settings.git_sync_git_timeout_seconds,
+        keep_activation_local=git_settings.git_sync_keep_activation_local,
         last_synced_commit=(
             org_config.last_synced_commit if org_config is not None else None
         ),

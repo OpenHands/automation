@@ -1222,7 +1222,15 @@ async def update_automation(
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
-    await mark_git_sync_dirty(session, auto)
+    await mark_git_sync_dirty(
+        session,
+        auto,
+        # Nothing but an on/off switch: `enabled`/`state` and the disable
+        # bookkeeping derived from them above.
+        activation_only=not repos_requested
+        and update_data.keys()
+        <= {"enabled", "state", "disabled_reason", "disabled_detail", "disabled_at"},
+    )
     updated_fields = sorted(
         update_data.keys() | ({"repos"} if repos_requested else set())
     )

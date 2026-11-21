@@ -210,7 +210,7 @@ async def poll_and_schedule(
             if was_enabled and not automation.enabled:
                 # _is_automation_due_safely can disable an automation as a side
                 # effect, which git sync needs to hear about too.
-                await mark_git_sync_dirty(session, automation)
+                await mark_git_sync_dirty(session, automation, activation_only=True)
 
         for automation in due_automations:
             try:
