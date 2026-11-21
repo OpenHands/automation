@@ -202,12 +202,17 @@ async def apply_git_sync_config_override(
     org's synced automations dirty. The export only rewrites dirty ones, so
     otherwise the repo kept each file in whatever form it was last written --
     readable after a key was set -- until that automation happened to change.
+
+    Turning `git_sync_keep_activation_local` off marks them dirty too: the
+    statuses that stayed local while it was on were never exported, so the
+    repo is brought back in line with them rather than left to overwrite them
+    the next time one of those files is edited in git.
     """
     row = await get_or_create_org_config(session, org_id)
     overrides = _decode_overrides(row)
     before = {key: overrides.get(key) for key in _AUTH_BACKOFF_RESET_FIELDS}
     base = base_git_sync_settings()
-    key_before = _merge(base, overrides).git_sync_encryption_key
+    effective_before = _merge(base, overrides)
     for key, value in updates.items():
         if value is None:
             overrides.pop(key, None)
@@ -215,7 +220,14 @@ async def apply_git_sync_config_override(
             overrides[key] = value
     if any(overrides.get(key) != before[key] for key in _AUTH_BACKOFF_RESET_FIELDS):
         row.consecutive_auth_failures = 0
-    if _merge(base, overrides).git_sync_encryption_key != key_before:
+    effective = _merge(base, overrides)
+    if (
+        effective.git_sync_encryption_key != effective_before.git_sync_encryption_key
+        or (
+            effective_before.git_sync_keep_activation_local
+            and not effective.git_sync_keep_activation_local
+        )
+    ):
         await session.execute(
             update(AutomationGitSyncState)
             .where(AutomationGitSyncState.org_id == org_id)

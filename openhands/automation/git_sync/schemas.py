@@ -21,6 +21,7 @@ class GitSyncStatusResponse(BaseModel):
     encryption_enabled: bool
     interval_seconds: int
     git_timeout_seconds: float
+    keep_activation_local: bool
     last_synced_commit: str | None
     last_synced_at: UtcDatetime | None
     last_error: str | None
@@ -69,6 +70,10 @@ class GitSyncConfigUpdateRequest(BaseModel):
     `git_timeout_seconds` bounds each git command of a cycle (clone, fetch,
     push); `null` reverts to `AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS`.
 
+    `keep_activation_local` keeps each automation's ACTIVE/INACTIVE status out
+    of the repo, in both directions; `null` reverts to
+    `AUTOMATION_GIT_SYNC_KEEP_ACTIVATION_LOCAL`.
+
     String fields are stripped, and a blank is treated as `null`. The UI sends
     `""` for a cleared text field, and storing that would wedge sync: both
     `git checkout -B ""` and `git add -A -- ""` are fatal.
@@ -79,6 +84,7 @@ class GitSyncConfigUpdateRequest(BaseModel):
     git_timeout_seconds: float | None = Field(
         default=None, ge=MIN_GIT_TIMEOUT_SECONDS, le=MAX_GIT_TIMEOUT_SECONDS
     )
+    keep_activation_local: bool | None = None
     repo_url: str | None = None
     branch: str | None = None
     path: str | None = None

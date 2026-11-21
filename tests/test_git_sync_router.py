@@ -300,6 +300,95 @@ class TestGitSyncGitTimeout:
         assert response.status_code == 422
 
 
+class TestKeepActivationLocal:
+    """`keep_activation_local` keeps on/off changes out of what is left to sync."""
+
+    @pytest.fixture
+    async def synced_automation(self, async_session) -> Automation:
+        """An automation of the caller's org with nothing left to export."""
+        automation = Automation(
+            user_id=uuid.uuid4(),
+            org_id=ORG_ID,
+            name="synced",
+            trigger={"type": "cron", "schedule": "0 9 * * 1"},
+            tarball_path="https://example.com/a.tar.gz",
+            entrypoint="python main.py",
+            enabled=True,
+        )
+        async_session.add(automation)
+        await async_session.flush()
+        async_session.add(
+            AutomationGitSyncState(
+                automation_id=automation.id, org_id=ORG_ID, slug="synced", dirty=False
+            )
+        )
+        await async_session.commit()
+        return automation
+
+    async def _pending_changes(self, async_client) -> int:
+        response = await async_client.get("/api/automation/v1/git-sync/status")
+        return response.json()["dirty_count"]
+
+    async def test_is_off_by_default(self, async_client):
+        response = await async_client.get("/api/automation/v1/git-sync/status")
+
+        assert response.json()["keep_activation_local"] is False
+
+    async def test_set_and_cleared_via_config(self, async_client):
+        # Act
+        put = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"keep_activation_local": True}
+        )
+        status = await async_client.get("/api/automation/v1/git-sync/status")
+        cleared = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"keep_activation_local": None}
+        )
+
+        # Assert
+        assert put.status_code == 200
+        assert put.json()["keep_activation_local"] is True
+        assert status.json()["keep_activation_local"] is True
+        assert cleared.json()["keep_activation_local"] is False
+
+    @pytest.mark.parametrize(("keep_local", "pending"), [(True, 0), (False, 1)])
+    async def test_turning_an_automation_off_is_pending_only_while_activation_syncs(
+        self, async_client, synced_automation, keep_local, pending
+    ):
+        # Arrange
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"keep_activation_local": keep_local},
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{synced_automation.id}", json={"enabled": False}
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+        assert await self._pending_changes(async_client) == pending
+
+    async def test_editing_an_automation_is_still_pending(
+        self, async_client, synced_automation
+    ):
+        # Arrange
+        await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"keep_activation_local": True}
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{synced_automation.id}",
+            json={"description": "Runs every Monday."},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert await self._pending_changes(async_client) == 1
+
+
 class TestTriggerGitSync:
     async def test_returns_503_when_disabled(self, async_client):
         response = await async_client.post("/api/automation/v1/git-sync/sync")

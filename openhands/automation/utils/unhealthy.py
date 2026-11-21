@@ -265,7 +265,7 @@ async def _apply_disable(
 
     automation = await session.get(Automation, automation_id)
     if automation is not None:
-        await mark_git_sync_dirty(session, automation)
+        await mark_git_sync_dirty(session, automation, activation_only=True)
         # The Core update above is invisible to the audit hook.
         record_core_disable(session, automation)
 
