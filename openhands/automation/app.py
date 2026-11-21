@@ -338,13 +338,22 @@ async def readiness():
     """
     try:
         async with app.state.engine.connect():
-            return {"status": "ready"}
+            pass
     except Exception as e:
-        logger.error("Readiness check failed: %s", e, exc_info=True)
+        failure = (type(e), str(e))
+        # No await between comparing and updating the last probe result.
+        if failure != getattr(app.state, "readiness_failure", None):
+            app.state.readiness_failure = failure
+            logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(
             status_code=503,
             content={"status": "not_ready", "error": "database unavailable"},
         )
+
+    if getattr(app.state, "readiness_failure", None) is not None:
+        app.state.readiness_failure = None
+        logger.info("Readiness check recovered")
+    return {"status": "ready"}
 
 
 @app.get("/sdk-version")

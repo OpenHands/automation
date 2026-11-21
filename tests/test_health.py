@@ -1,6 +1,7 @@
 """Tests for health check endpoints."""
 
 import importlib.metadata
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -11,8 +12,9 @@ from openhands.automation.app import app
 
 
 @pytest.fixture
-async def health_client():
+async def health_client(monkeypatch):
     """Create an async client for endpoints that do not require a real DB."""
+    monkeypatch.setattr(app.state, "readiness_failure", None, raising=False)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -34,8 +36,16 @@ class _ReadyEngine:
 
 
 class _UnavailableEngine:
+    def __init__(
+        self,
+        error_type: type[Exception] = Exception,
+        message: str = "DB connection failed",
+    ):
+        self.error_type = error_type
+        self.message = message
+
     def connect(self):
-        raise Exception("DB connection failed")
+        raise self.error_type(self.message)
 
 
 class TestHealthEndpoints:
@@ -76,6 +86,73 @@ class TestHealthEndpoints:
             assert "error" in data
         finally:
             app.state.engine = original_engine
+
+    async def test_ready_endpoint_deduplicates_tracebacks(
+        self, health_client, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(app.state, "engine", _UnavailableEngine(), raising=False)
+
+        with caplog.at_level(logging.ERROR, logger="automation.app"):
+            for path in ("/ready", "/api/automation/ready", "/ready"):
+                response = await health_client.get(path)
+                assert response.status_code == 503
+                assert response.json() == {
+                    "status": "not_ready",
+                    "error": "database unavailable",
+                }
+
+        errors = [
+            record
+            for record in caplog.records
+            if record.name == "automation.app" and record.levelno == logging.ERROR
+        ]
+        assert len(errors) == 1
+        assert errors[0].exc_info is not None
+        assert errors[0].exc_info[2] is not None
+
+    async def test_ready_endpoint_logs_failure_changes_and_recovery(
+        self, health_client, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(app.state, "engine", _UnavailableEngine(), raising=False)
+        with caplog.at_level(logging.INFO, logger="automation.app"):
+            failures = (
+                (Exception, "DB connection failed"),
+                (Exception, "DB connection timed out"),
+                (TimeoutError, "DB connection timed out"),
+            )
+            for error_type, message in failures:
+                app.state.engine = _UnavailableEngine(error_type, message)
+                response = await health_client.get("/ready")
+                assert response.status_code == 503
+
+            app.state.engine = _ReadyEngine()
+            for path in ("/ready", "/api/automation/ready"):
+                response = await health_client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ready"}
+
+            app.state.engine = _UnavailableEngine(*failures[-1])
+            response = await health_client.get("/api/automation/ready")
+            assert response.status_code == 503
+
+        records = [
+            record for record in caplog.records if record.name == "automation.app"
+        ]
+        assert [record.levelno for record in records] == [
+            logging.ERROR,
+            logging.ERROR,
+            logging.ERROR,
+            logging.INFO,
+            logging.ERROR,
+        ]
+        assert records[3].getMessage() == "Readiness check recovered"
+        for record, (error_type, message) in zip(
+            (*records[:3], records[4]), (*failures, failures[-1]), strict=True
+        ):
+            assert record.exc_info is not None
+            assert record.exc_info[0] is error_type
+            assert record.exc_info[2] is not None
+            assert record.getMessage() == f"Readiness check failed: {message}"
 
 
 class TestSdkVersionEndpoint:
