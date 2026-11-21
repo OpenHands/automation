@@ -7,6 +7,7 @@ the source of truth for anything not yet pushed.
 
 import asyncio
 import hashlib
+import json
 import logging
 import shutil
 import tarfile
@@ -39,6 +40,7 @@ from openhands.automation.git_sync.client import (
     ensure_repo,
     last_commit_author,
     pull,
+    redact_url_credentials,
 )
 from openhands.automation.git_sync.config_override import (
     base_git_sync_settings,
@@ -115,6 +117,8 @@ _IDLE_POLL_SECONDS: Final[int] = 15
 # handful of git commands each bounded by git_sync_git_timeout_seconds.
 _SYNC_LEASE_MIN_SECONDS: Final[int] = 300
 _SYNC_LEASE_TIMEOUT_MULTIPLIER: Final[int] = 5
+# Keep the first few identical transient failures fully diagnosable.
+_TRANSIENT_FAILURE_TRACEBACK_LIMIT: Final[int] = 3
 
 _TRIGGER_ADAPTER: Final[TypeAdapter[Trigger]] = TypeAdapter(Trigger)
 
@@ -1250,6 +1254,8 @@ async def run_sync_cycle(
     org_id: uuid.UUID,
     git_settings: GitSyncSettings,
     service_settings: ServiceSettings,
+    *,
+    log_transient_failures: bool = False,
 ) -> SyncCycleResult:
     """Run one full pull -> import -> export -> push cycle for one org.
 
@@ -1258,6 +1264,10 @@ async def run_sync_cycle(
     on one and a manual trigger on another -- from cloning and pushing the
     same repo at once. `skipped` means another cycle holds the lease; it picks
     up everything this one would have.
+
+    The periodic loop opts into transient failure logging here so it can use
+    the count committed by this cycle while it still owns the lease. Manual
+    triggers handle their own logging.
     """
     started_at = utcnow()
     if not await _acquire_sync_lease(
@@ -1269,9 +1279,11 @@ async def run_sync_cycle(
             session_factory, org_id, git_settings, service_settings
         )
     except Exception as e:
+        message = str(e)
+        transient_count = 0
         async with session_factory() as session:
             org_config = await get_or_create_org_config(session, org_id)
-            org_config.last_error = str(e)[:2000]
+            org_config.last_error = message[:2000]
             org_config.last_error_at = utcnow()
             # Only auth failures, which won't clear on the next tick, build the
             # streak behind `_is_due`'s backoff and `_cycle`'s quiet logging. A
@@ -1283,10 +1295,49 @@ async def run_sync_cycle(
                 ) + 1
             else:
                 org_config.consecutive_auth_failures = 0
+            fingerprint = None
+            if isinstance(e, GitSyncError) and not isinstance(e, GitAuthError):
+                fingerprint = _transient_failure_fingerprint(git_settings, e, message)
+                transient_count = (
+                    org_config.consecutive_transient_failures + 1
+                    if org_config.transient_failure_fingerprint == fingerprint
+                    else 1
+                )
+            org_config.transient_failure_fingerprint = fingerprint
+            org_config.consecutive_transient_failures = transient_count
             await session.commit()
+        if log_transient_failures and transient_count:
+            if transient_count <= _TRANSIENT_FAILURE_TRACEBACK_LIMIT:
+                logger.exception("Git sync cycle failed for org %s", org_id)
+            else:
+                repo = redact_url_credentials(git_settings.git_sync_repo_url)
+                repo = repo.split("?", 1)[0].split("#", 1)[0]
+                logger.warning(
+                    "Git sync for org %s, repo %s keeps failing (%d consecutive); "
+                    "see Git Sync status for the latest error",
+                    org_id,
+                    repo,
+                    transient_count,
+                )
         raise
     finally:
         await _release_sync_lease(session_factory, org_id, started_at)
+
+
+def _transient_failure_fingerprint(
+    git_settings: GitSyncSettings, error: GitSyncError, message: str
+) -> str:
+    # Include the repo even when the error (e.g. a fetch timeout) doesn't
+    # mention it. Use the full message, independent of the status truncation.
+    error_type = type(error)
+    identity = (
+        redact_url_credentials(git_settings.git_sync_repo_url.strip()),
+        git_settings.git_sync_branch.strip(),
+        git_settings.git_sync_path,
+        f"{error_type.__module__}.{error_type.__qualname__}",
+        " ".join(message.split()),
+    )
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
 async def _run_sync_cycle_leased(
@@ -1395,6 +1446,7 @@ async def _run_sync_cycle_leased(
     new_head = pushed or head
     async with session_factory() as session:
         org_config = await get_or_create_org_config(session, org_id)
+        recovered = org_config.consecutive_transient_failures > 0
         if new_head:
             org_config.last_synced_commit = new_head
         org_config.last_run_at = utcnow()
@@ -1406,8 +1458,12 @@ async def _run_sync_cycle_leased(
         # interval again, which is what makes recovery automatic once a token
         # or repo is fixed -- no manual re-enable.
         org_config.consecutive_auth_failures = 0
+        org_config.transient_failure_fingerprint = None
+        org_config.consecutive_transient_failures = 0
         await session.commit()
 
+    if recovered:
+        logger.info("Git sync recovered for org %s after transient failures", org_id)
     return result
 
 
@@ -1559,7 +1615,11 @@ async def git_sync_loop(
         for org_id, effective, prior_auth_failures in due:
             try:
                 result = await run_sync_cycle(
-                    session_factory, org_id, effective, service_settings
+                    session_factory,
+                    org_id,
+                    effective,
+                    service_settings,
+                    log_transient_failures=True,
                 )
             except GitAuthError:
                 # Auth failures are persistent (revoked token, repo gone). Log
@@ -1579,7 +1639,7 @@ async def git_sync_loop(
                     logger.exception("Git sync cycle failed for org %s (auth)", org_id)
                 continue
             except GitSyncError:
-                logger.exception("Git sync cycle failed for org %s", org_id)
+                # Logged using the persisted streak while the lease was held.
                 continue
             except Exception:
                 logger.exception(
