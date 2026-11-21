@@ -19,6 +19,7 @@ from pydantic import (
 )
 from pydantic.alias_generators import to_camel
 
+from openhands.automation.acknowledgements import DEFAULT_ACKNOWLEDGEMENT
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
@@ -515,6 +516,12 @@ RUN_AS_USER_ID_DESCRIPTION = (
 )
 
 
+FACTORY_ID_DESCRIPTION = (
+    "Factory to create the automation in. Requires manage_automations "
+    "(members get 403); an unknown or other-org factory returns 404."
+)
+
+
 CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR = (
     "keep_alive cannot be false when destination is "
     "'continue_conversation': deleting the sandbox would destroy "
@@ -584,6 +591,9 @@ class CreateAutomationRequest(BaseModel):
         ),
     )
     tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
+    factory_id: uuid.UUID | None = Field(
+        default=None, description=FACTORY_ID_DESCRIPTION
+    )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -782,6 +792,15 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
     )
+    factory_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Factory this automation belongs to. Null removes it from its "
+            "factory; omit to leave it unchanged. Changing it requires "
+            "manage_automations, even for the automation's creator; resending "
+            "the current value is not a change."
+        ),
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -871,7 +890,7 @@ class WebhookConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    secret: str
+    secret: str = Field(repr=False)
     is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
@@ -880,6 +899,9 @@ class WebhookConfig(BaseModel):
     # source does not identify its deliveries. Built-in providers take it from
     # their descriptor; a custom webhook takes it from its row.
     event_id_header: str | None = None
+    event_id_expr: str | None = None
+    admission_expr: str | None = None
+    acknowledgement: str = DEFAULT_ACKNOWLEDGEMENT
     # A custom webhook registered under a source name that is now built in.
     # It keeps precedence for its org, so built-in deliveries are ignored.
     shadows_builtin: bool = False
@@ -893,6 +915,13 @@ class EventResponse(BaseModel):
     runs_created: list[str]  # List of run IDs created
     # Conversations continued instead of starting a run.
     conversations_continued: list[str] = Field(default_factory=list)
+
+
+class TeamsMessageResponse(BaseModel):
+    """Fixed acknowledgement shown in the invoking Teams channel."""
+
+    type: Literal["message"] = "message"
+    text: str
 
 
 class EventDetectionRule(BaseModel):
@@ -993,7 +1022,13 @@ class CustomWebhookCreate(BaseModel):
             "reads the webhook-id and webhook-timestamp headers. 'slack_v0' is "
             "the Slack Events API scheme and also reads "
             "X-Slack-Request-Timestamp. The timestamped schemes reject "
-            "deliveries outside a 5-minute replay window."
+            "deliveries outside a 5-minute replay window. A slack_v0 webhook "
+            "answers Slack's URL verification handshake automatically. "
+            "'teams_hmac_sha256' "
+            "verifies a Teams-issued base64 token over the raw activity body; "
+            "it requires Authorization, teams_message acknowledgement, "
+            "admission_expr and event_id_expr. Teams replay protection is "
+            "retention-bound deduplication, without a timestamp freshness check."
         ),
     )
     event_id_header: str | None = Field(
@@ -1002,17 +1037,41 @@ class CustomWebhookCreate(BaseModel):
         description=(
             "Optional HTTP header name carrying the provider's own delivery id, "
             "used to drop redelivered events (e.g. 'X-GitHub-Delivery'). "
-            "Omit it for a source that does not identify its deliveries: its "
+            "Use either this header or event_id_expr. With neither configured, "
             "events are recorded and routed, but never deduplicated."
         ),
+    )
+    event_id_expr: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description=(
+            "JMESPath delivery ID from the verified body; excludes event_id_header"
+        ),
+    )
+    admission_expr: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Source admission policy evaluated before storing or routing an event"
+        ),
+    )
+    acknowledgement: str | None = Field(
+        default=None,
+        max_length=50,
+        description="Named fixed response profile; unset preserves EventResponse",
     )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
         max_length=255,
+        repr=False,
+        json_schema_extra={"writeOnly": True},
         description=(
-            "Optional signing secret. If not provided, one will be generated. "
-            "Use this when the external service provides a fixed secret."
+            "Signing secret; required for Teams and write-only when supplied. "
+            "Other schemes generate one if omitted. Use this when the "
+            "external service provides a fixed secret."
         ),
     )
 
@@ -1066,6 +1125,17 @@ class CustomWebhookCreate(BaseModel):
             return v
         return _validate_header_name(v)
 
+    @field_validator("event_id_expr", "admission_expr")
+    @classmethod
+    def validate_payload_expression(cls, v: str | None) -> str | None:
+        if v is not None:
+            from openhands.automation.filter_eval import validate_payload_expression
+
+            valid, _ = validate_payload_expression(v)
+            if not valid or not v.strip():
+                raise ValueError("Invalid JMESPath expression")
+        return v
+
 
 class CustomWebhookUpdate(BaseModel):
     """Request schema for updating a custom webhook."""
@@ -1077,7 +1147,23 @@ class CustomWebhookUpdate(BaseModel):
     signature_header: str | None = Field(default=None, max_length=100)
     signature_scheme: str | None = Field(default=None, max_length=50)
     event_id_header: str | None = Field(default=None, max_length=100)
+    event_id_expr: str | None = Field(default=None, min_length=1, max_length=500)
+    admission_expr: str | None = Field(default=None, min_length=1, max_length=2000)
+    acknowledgement: str | None = Field(default=None, max_length=50)
+    webhook_secret: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=255,
+        repr=False,
+        json_schema_extra={"writeOnly": True},
+        description="Write-only replacement for a Teams-issued token",
+    )
     enabled: bool | None = None
+
+    @field_validator("event_id_expr", "admission_expr")
+    @classmethod
+    def validate_payload_expression(cls, v: str | None) -> str | None:
+        return CustomWebhookCreate.validate_payload_expression(v)
 
     @field_validator("name", "event_key_expr", "signature_header", "enabled")
     @classmethod
@@ -1136,6 +1222,9 @@ class CustomWebhookResponse(BaseModel):
     signature_header: str
     signature_scheme: str
     event_id_header: str | None = None
+    event_id_expr: str | None = None
+    admission_expr: str | None = None
+    acknowledgement: str = DEFAULT_ACKNOWLEDGEMENT
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -1210,6 +1299,7 @@ class AutomationResponse(BaseModel):
     trigger: dict
     observability_associations: dict[str, str] | None = None
     tags: list[str] = Field(default_factory=list)
+    factory_id: uuid.UUID | None = None
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1236,6 +1326,52 @@ class AutomationResponse(BaseModel):
 class AutomationListResponse(BaseModel):
     automations: list[AutomationResponse]
     total: int
+
+
+class FactoryCreate(BaseModel):
+    """Request to create a factory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+
+class FactoryUpdate(FactoryCreate):
+    """Request to rename a factory."""
+
+
+class FactoryResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    automation_count: int = Field(
+        ..., description="Live (not soft-deleted) automations in this factory"
+    )
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class FactoryListResponse(BaseModel):
+    factories: list[FactoryResponse]
+    total: int
+
+
+class FactoryLookupItem(BaseModel):
+    id: uuid.UUID
+    org_id: uuid.UUID
+
+
+class FactoryLookupResponse(BaseModel):
+    """The factory ids that exist, for Enterprise's service-key lookup."""
+
+    factories: list[FactoryLookupItem]
 
 
 class AutomationTagCount(BaseModel):

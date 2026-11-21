@@ -7,6 +7,7 @@ Neither endpoint writes.
 """
 
 import logging
+import uuid
 from zoneinfo import available_timezones
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -26,8 +27,9 @@ from openhands.automation.event_schemas.catalog import (
     pattern_can_match,
     supported_event_patterns,
 )
+from openhands.automation.factory_router import authorize_factory_change
 from openhands.automation.filter_eval import FilterFunctions
-from openhands.automation.providers import builtin_sources
+from openhands.automation.providers import builtin_sources, get_provider
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
@@ -43,6 +45,7 @@ from openhands.automation.schemas import (
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
 from openhands.automation.utils.event_sources import (
+    EventSourceDelivery,
     configured_stream_sources,
     custom_event_sources,
     get_event_source_delivery,
@@ -52,6 +55,7 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_combination,
     validate_model_profile_for_user,
 )
+from openhands.automation.webhook_policy import trigger_webhook_validation_errors
 from openhands.workspace import GitProvider
 
 
@@ -69,6 +73,8 @@ _STATIC_FEATURES = (
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",
+    # Factories can be created, and automations created in or moved into one.
+    "factories",
     "mcpTools",
     "presetPlugin",
     "presetPrompt",
@@ -113,9 +119,17 @@ async def get_capabilities(
             repo_providers=[],
         )
 
+    custom_sources = await custom_event_sources(user.org_id, session)
     webhook_sources = {
         *(builtin_sources() if config.service.webhook_secret else []),
-        *await custom_event_sources(user.org_id, session),
+        *custom_sources,
+    }
+    # An org's own webhook under a now built-in name keeps its own event keys,
+    # so the built-in catalog does not describe what it delivers.
+    own_keys = {
+        source
+        for source in custom_sources
+        if (provider := get_provider(source)) and provider.custom_webhook_precedence
     }
     event_sources = sorted({*webhook_sources, *configured_stream_sources(user.org_id)})
 
@@ -147,7 +161,8 @@ async def get_capabilities(
         event_types_by_source={
             source: patterns
             for source in event_sources
-            if (patterns := supported_event_patterns(source)) is not None
+            if source not in own_keys
+            and (patterns := supported_event_patterns(source)) is not None
         },
         triggers=TriggerCapabilities(
             cron=CronCapabilities(
@@ -228,10 +243,17 @@ async def validate_draft(
     except HTTPException as e:
         errors.append(_agent_profile_error(e))
 
+    errors.extend(await factory_id_errors(draft.factory_id, user, session))
+
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
+        errors.extend(
+            await trigger_webhook_validation_errors(
+                user.org_id, trigger.model_dump(), session
+            )
+        )
         delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
         if delivery is None:
             errors.append(
@@ -245,8 +267,7 @@ async def validate_draft(
                 )
             )
         else:
-            if not delivery.custom_shadows_builtin:
-                errors.extend(_event_type_errors(trigger))
+            errors.extend(_event_type_errors(trigger, delivery))
             parse = (
                 parse_custom_event if delivery.custom_shadows_builtin else parse_event
             )
@@ -280,6 +301,26 @@ async def validate_draft(
     )
 
 
+async def factory_id_errors(
+    factory_id: uuid.UUID | None, user: AuthenticatedUser, session: AsyncSession
+) -> list[DraftValidationError]:
+    """The problems creating the draft in ``factory_id`` would hit: the same
+    checks the create endpoints make, reported before the real create fails."""
+    if factory_id is None:
+        return []
+    try:
+        await authorize_factory_change(session, user, factory_id)
+    except HTTPException as e:
+        return [
+            DraftValidationError(
+                field="factory_id",
+                code=f"factory_id_{e.status_code}",
+                message=str(e.detail),
+            )
+        ]
+    return []
+
+
 def _agent_profile_error(error: HTTPException) -> DraftValidationError:
     return DraftValidationError(
         field="agent_profile_id",
@@ -310,12 +351,17 @@ def _cron_errors(trigger: CronTrigger) -> list[DraftValidationError]:
     ]
 
 
-def _event_type_errors(trigger: EventTrigger) -> list[DraftValidationError]:
+def _event_type_errors(
+    trigger: EventTrigger, delivery: EventSourceDelivery
+) -> list[DraftValidationError]:
     """Reject event keys this deployment cannot parse.
 
     Only sources publishing a known catalog can be checked. A custom webhook's
-    event keys are whatever its own expression extracts, so anything matches.
+    event keys are whatever its own expression extracts, so anything matches,
+    including an org's own webhook under a now built-in source name.
     """
+    if delivery.custom_shadows_builtin:
+        return []
     label = SOURCE_LABELS.get(trigger.source, trigger.source)
     return [
         DraftValidationError(

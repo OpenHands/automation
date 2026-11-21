@@ -32,6 +32,7 @@ from openhands.automation.capabilities_router import (
     _cron_errors,
     _event_type_errors,
     _schema_errors,
+    factory_id_errors,
 )
 from openhands.automation.db import get_session
 from openhands.automation.draft_schemas import (
@@ -105,6 +106,7 @@ from openhands.automation.utils.tarball_validation import (
     validate_tarball_path,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.webhook_policy import trigger_webhook_validation_errors
 
 
 logger = logging.getLogger(__name__)
@@ -303,6 +305,8 @@ async def _validate_draft_body(
             )
         )
 
+    errors.extend(await factory_id_errors(draft.factory_id, user, session))
+
     if isinstance(draft, CreatePluginAutomationRequest):
         try:
             default_model = resolve_model_profile_for_user(draft.model, user)
@@ -339,6 +343,11 @@ async def _validate_draft_body(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
+        errors.extend(
+            await trigger_webhook_validation_errors(
+                user.org_id, trigger.model_dump(), session
+            )
+        )
         delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
         if delivery is None:
             errors.append(
@@ -352,7 +361,7 @@ async def _validate_draft_body(
                 )
             )
         else:
-            errors.extend(_event_type_errors(trigger))
+            errors.extend(_event_type_errors(trigger, delivery))
 
     return draft, run_as, errors
 

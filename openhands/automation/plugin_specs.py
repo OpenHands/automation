@@ -35,6 +35,7 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
+    FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
     CronTrigger,
     PublicAutomationState,
@@ -418,6 +419,9 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
     name: str = Field(..., min_length=1, max_length=500)
+    factory_id: uuid.UUID | None = Field(
+        default=None, description=FACTORY_ID_DESCRIPTION
+    )
     plugin: AutomationPluginSource
     config: dict[str, Any] = Field(default_factory=dict)
     trigger: Trigger | None = None

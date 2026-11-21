@@ -6,25 +6,19 @@ query expand the JSON column with different functions on each.
 """
 
 import uuid
-from collections.abc import AsyncIterator
-from pathlib import Path
 
 import pytest
 import yaml
 from httpx import AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from openhands.automation.app import app
-from openhands.automation.db import set_sqlite_mode, using_sqlite
 from openhands.automation.git_sync.loop import _create_automation_from_git, _Owner
 from openhands.automation.git_sync.serializer import (
     deserialize_automation,
     serialize_automation,
 )
-from openhands.automation.models import Automation, Base
-from openhands.automation.storage import get_file_store
-from openhands.automation.storage.local import LocalFileStore
+from openhands.automation.models import Automation
 from openhands.automation.tags import MAX_TAGS, normalize_tags
 from openhands.automation.utils import utcnow
 
@@ -36,37 +30,12 @@ OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 BASE = "/api/automation/v1"
 
 
-@pytest.fixture(params=["postgresql", "sqlite"])
-async def async_engine(request, tmp_path: Path) -> AsyncIterator[AsyncEngine]:
-    """Run each API test against both supported databases."""
-    previous_sqlite_mode = using_sqlite()
-    if request.param == "sqlite":
-        set_sqlite_mode(True)
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/tags.db")
-    else:
-        container = request.getfixturevalue("postgres_container")
-        engine = create_async_engine(
-            container.get_connection_url().replace(
-                "postgresql+psycopg2://", "postgresql+asyncpg://"
-            )
-        )
-    try:
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
-        yield engine
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.drop_all)
-    finally:
-        await engine.dispose()
-        set_sqlite_mode(previous_sqlite_mode)
+@pytest.fixture
+async def async_engine(dual_db_engine: AsyncEngine) -> AsyncEngine:
+    return dual_db_engine
 
 
-@pytest.fixture(autouse=True)
-def file_store(tmp_path: Path):
-    store = LocalFileStore(str(tmp_path / "storage"))
-    app.dependency_overrides[get_file_store] = lambda: store
-    yield store
-    app.dependency_overrides.pop(get_file_store, None)
+pytestmark = pytest.mark.usefixtures("local_file_store")
 
 
 def _raw_body(name: str, **extra) -> dict:

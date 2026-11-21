@@ -58,7 +58,7 @@ def _get_auth_cache() -> TTLCache[str, "AuthenticatedUser"]:
     global _auth_cache
     if _auth_cache is None:
         http_config = get_config().http
-        _auth_cache = TTLCache(
+        _auth_cache = TTLCache[str, AuthenticatedUser](
             maxsize=http_config.auth_cache_size,
             ttl=http_config.auth_cache_ttl,
         )

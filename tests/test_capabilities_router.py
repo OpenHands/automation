@@ -20,6 +20,7 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 CAPABILITIES_URL = "/api/automation/v1/capabilities"
 VALIDATE_URL = "/api/automation/v1/validate"
+DRAFTS_URL = "/api/automation/v1/drafts"
 
 CRON_DRAFT = {
     "name": "PR reviewer",
@@ -114,6 +115,19 @@ def comment_event(body: str) -> dict:
     }
 
 
+def add_custom_gitlab_webhook(session) -> None:
+    """An org webhook registered as `gitlab` before GitLab was built in."""
+    session.add(
+        CustomWebhook(
+            org_id=TEST_ORG_ID,
+            name="GitLab",
+            source="gitlab",
+            webhook_secret="gitlab-secret",
+            event_key_expr="object_kind",
+        )
+    )
+
+
 def addressed_errors(body: dict) -> list[tuple[str | None, str]]:
     """The field and code of every reported error, in order."""
     return [(error["field"], error["code"]) for error in body["errors"]]
@@ -180,12 +194,15 @@ class TestGetCapabilities:
             "jira_dc",
         ]
         assert body["eventTypes"] == [
+            "check_run.*",
+            "check_suite.*",
             "issue_comment.*",
             "issues.*",
             "pull_request.*",
             "pull_request_review.*",
             "push",
             "release.*",
+            "status",
             "workflow_run.*",
         ]
         by_source = body["eventTypesBySource"]
@@ -221,6 +238,7 @@ class TestGetCapabilities:
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
+        assert "factories" in body["features"]
         assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
         assert "pluginConfigUpdate" in body["features"]
@@ -233,6 +251,20 @@ class TestGetCapabilities:
         # one must be a value RepoSource accepts.
         for name in body["repoProviders"]:
             assert RepoSource(url="https://example.com/org/repo", provider=name)
+
+    async def test_an_orgs_own_gitlab_webhook_is_not_offered_the_builtin_catalog(
+        self, async_client, async_session, configured_deployment
+    ):
+        """Its keys come from its own expression, as for any custom source."""
+        add_custom_gitlab_webhook(async_session)
+        await async_session.commit()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        body = response.json()
+        assert "gitlab" in body["eventSources"]
+        assert "gitlab" not in body["eventTypesBySource"]
+        assert "github" in body["eventTypesBySource"]
 
     async def test_advertises_the_configured_timeout_ceiling(
         self, async_client, ready_deployment, monkeypatch
@@ -446,6 +478,7 @@ class TestValidateDraft:
             ),
             pytest.param("pull_request.*", [], id="wildcard-over-supported-types"),
             pytest.param("workflow_run.completed", [], id="workflow-run-completed"),
+            pytest.param("status", [], id="type-without-an-action"),
         ],
     )
     async def test_event_types_are_checked_against_what_the_deployment_parses(
@@ -530,15 +563,7 @@ class TestValidateDraft:
         self, async_client, async_session, configured_deployment
     ):
         """A custom webhook registered as `gitlab` before it was built in."""
-        async_session.add(
-            CustomWebhook(
-                org_id=TEST_ORG_ID,
-                name="GitLab",
-                source="gitlab",
-                webhook_secret="gitlab-secret",
-                event_key_expr="object_kind",
-            )
-        )
+        add_custom_gitlab_webhook(async_session)
         await async_session.commit()
         draft = with_trigger(EVENT_DRAFT, source="gitlab", on="merge_request")
         draft["trigger"].pop("filter")
@@ -557,6 +582,24 @@ class TestValidateDraft:
         body = response.json()
         assert addressed_errors(body) == []
         assert body["sampleEventMatched"] is True
+
+    async def test_validate_and_drafts_agree_for_an_orgs_own_gitlab_webhook(
+        self, async_client, async_session, configured_deployment
+    ):
+        """`push` is outside the built-in catalog but the org's webhook delivers it."""
+        add_custom_gitlab_webhook(async_session)
+        await async_session.commit()
+        draft = with_trigger(EVENT_DRAFT, source="gitlab", on="push")
+        draft["trigger"].pop("filter")
+
+        validated = await async_client.post(VALIDATE_URL, json=preflight(draft))
+        saved = await async_client.post(
+            DRAFTS_URL, json={"endpoint": "/v1/preset/prompt", "draft": draft}
+        )
+
+        assert addressed_errors(validated.json()) == []
+        assert saved.status_code == 201
+        assert saved.json()["dispatchable"] is True
 
     async def test_event_trigger_for_an_undeliverable_source_is_rejected(
         self, async_client, monkeypatch

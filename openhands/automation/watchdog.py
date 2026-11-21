@@ -248,6 +248,7 @@ async def _verify_and_mark_run(
         verification = await backend.verify_run(run_id)
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
+        error_detail = f"Timed out: verification failed: {e}"
         stmt = (
             update(AutomationRun)
             .where(
@@ -257,7 +258,7 @@ async def _verify_and_mark_run(
             .values(
                 status=AutomationRunStatus.FAILED,
                 completed_at=now,
-                error_detail=f"Timed out: verification failed: {e}",
+                error_detail=error_detail,
                 status_detail=run_status_detail_from_exception(
                     e,
                     phase=RunStatusPhase.VERIFICATION,
@@ -269,6 +270,10 @@ async def _verify_and_mark_run(
         )
         result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
         if result.rowcount > 0:
+            # The UPDATE above bypasses the ORM object; sync it so telemetry
+            # derives run_status/failure_kind from the persisted values.
+            run.status = AutomationRunStatus.FAILED
+            run.error_detail = error_detail
             await capture_automation_event(
                 "automation_run_failed",
                 automation=_loaded_automation(run),
@@ -289,6 +294,7 @@ async def _verify_and_mark_run(
         VerificationOutcome.FAILED,
     ):
         exit_code = verification.exit_code
+        error_detail: str | None = None
 
         # Command completed successfully; the callback was missed.
         if verification.outcome == VerificationOutcome.COMPLETED:
@@ -386,6 +392,13 @@ async def _verify_and_mark_run(
 
         result = await session.execute(stmt)  # type: ignore[assignment]
         if result.rowcount > 0:
+            run.status = (
+                AutomationRunStatus.COMPLETED
+                if exit_code == 0
+                else AutomationRunStatus.FAILED
+            )
+            if exit_code != 0:
+                run.error_detail = error_detail
             await capture_automation_event(
                 "automation_run_completed"
                 if exit_code == 0
@@ -539,6 +552,8 @@ async def _verify_and_mark_run(
     )
     result = await session.execute(stmt)  # type: ignore[assignment]
     if result.rowcount > 0:
+        run.status = AutomationRunStatus.FAILED
+        run.error_detail = f"Timed out: {error_msg}"
         await capture_automation_event(
             "automation_run_failed",
             automation=_loaded_automation(run),

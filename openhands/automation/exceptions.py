@@ -51,6 +51,19 @@ class DailySandboxLimitReachedError(Exception):
     pass
 
 
+class LicenseLimitReachedError(Exception):
+    """The install's license does not let this run start.
+
+    An OpenHands Enterprise install without a valid license limits who can
+    start conversations and how many, and refuses the run's sandbox. This is
+    not a fault in the automation, and runs work again once the install has a
+    license, so the run is marked SKIPPED (not FAILED) and the automation is
+    left enabled.
+    """
+
+    pass
+
+
 class SandboxProvisioningError(Exception):
     """A sandbox never became ready, so no automation code ran in it.
 

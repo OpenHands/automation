@@ -56,6 +56,7 @@ automation/
 │       ├── draft_router.py     # Saved setup draft CRUD and test dispatch routes
 │       ├── draft_schemas.py    # Draft body validation and normalization
 │       ├── event_router.py     # Receives webhook events, triggers automations
+│       ├── factory_router.py   # Factory CRUD (named groups of automations)
 │       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
 │       ├── filter_eval.py      # JMESPath-based filter evaluation for event matching
@@ -69,6 +70,7 @@ automation/
 │       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
 │       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
 │       ├── schemas.py          # Pydantic request/response schemas
+│       ├── service_router.py   # Service-key routes for Enterprise (factory lookup)
 │       ├── subjects.py         # Maps an external subject to a conversation id
 │       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
 │       ├── trigger_matcher.py  # Trigger matching for event-based automations
@@ -224,6 +226,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
+| `AUTOMATION_FACTORY_TOKEN` | Dispatcher, cloud mode only, when the automation belongs to a factory and the service key is set | Run token naming the run's factory, for services that hold the service key (see Factory references from other services). Absent in local mode, for an automation with no factory, and without a service key; the run starts anyway |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
@@ -279,6 +282,92 @@ def upgrade() -> None:
 ```
 
 - **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher — check `using_sqlite()` to skip on SQLite
+
+## Factories
+
+A factory is a named group of automations: `factories` (`id`, `org_id`, `name`,
+timestamps) plus a nullable `automations.factory_id` (`ON DELETE SET
+NULL`). Zero factories is a valid state; there is no default factory.
+
+- Factories are addressed by id (`/v1/factories/{id}`), like automations. Names
+  need not be unique and there is no slug. A rename changes only `name`.
+- `id` is never reused. Other services keep it as a plain reference with no
+  foreign key, because their data lives in other databases.
+- Read routes need `view_automations`; creating, renaming and deleting a
+  factory, and *changing* an automation's factory, need `manage_automations`.
+  `authorize_factory_change` is the one check (403 without the permission, 404
+  for an unknown or other-org factory): `POST /v1`, `/v1/plugin-spec`,
+  `/v1/preset/prompt` and `/v1/preset/plugin` run it when `factory_id` is set,
+  `PATCH /v1/{id}` only when the value differs from the stored one (resending
+  it or `null` on an automation with no factory is not a change), and the draft
+  validators report it as a `factory_id_403`/`factory_id_404` error. Drafts store
+  `factory_id`, but their hidden test-run automation never gets it.
+- Membership gives an automation access to its factory's data, so the creator
+  exception of `_assert_can_manage` stops at the factory: any `PATCH` of an
+  automation that is in a factory needs `manage_automations`. A draft's hidden
+  test-run automation cannot be put in a factory (`PATCH` returns 409).
+- Re-enabling an installed template (`template` on a create endpoint) returns
+  the existing automation unchanged; if the request names a `factory_id` the
+  automation is not in, it is `409` rather than silently ignored. Move it with
+  `PATCH`.
+- Deleting a factory returns `409` while a live automation belongs to it.
+  Otherwise one transaction detaches its soft-deleted automations (through the
+  ORM, so the change audit records it) and removes the row with a single
+  conditional `DELETE ... WHERE NOT EXISTS (live member)`.
+- Assigning takes `lock_factory_for_assignment` right before the write, not
+  before the slow lookups: `FOR KEY SHARE` on PostgreSQL (conflicts with the
+  delete's `FOR UPDATE`, not with a rename), a no-op write on SQLite to take its
+  write lock. The delete-versus-assign race is tested with per-request sessions
+  (`race_client` in `tests/test_factories.py`); the shared-session `async_client`
+  cannot show it.
+- Git sync neither writes nor reads `factory_id`: a factory's id is
+  local to an install. The `PATCH` rule above is enforced at the API only. Git
+  sync, plugin refs and external tarball URLs are trusted as the source of an
+  automation's code, so whoever controls them controls what runs in a factory.
+
+### Factory references from other services
+
+Other services keep a factory's id as a plain reference with no foreign key,
+because their data lives in other databases. This service supplies the three
+things such a holder needs. The first consumer is worklogs (append-only logs
+scoped to a factory), which the OpenHands server stores and serves
+(OpenHands/enterprise#1297); nothing here is specific to them.
+
+- **Run token** (`utils/factory_token.py`): the dispatcher injects
+  `AUTOMATION_FACTORY_TOKEN` next to `AUTOMATION_KV_TOKEN`. It is an HS256 JWT
+  signed with a key derived from `AUTOMATION_SERVICE_KEY` by HKDF-SHA256 (zero
+  salt, 32 bytes, info `openhands-factory-run-token-v1`); the raw service key
+  never signs. Claims: `aud` `factory`, `org_id`, `factory_id`,
+  `automation_id`, `automation_name` (at most 256 characters), `run_id`, `iat`,
+  `exp` (24 hours by default; `AUTOMATION_FACTORY_TOKEN_TTL_SECONDS` changes it
+  and Enterprise reads only `exp`; keep it above the longest possible run). The
+  token is never stored, logged or put in `AUTOMATION_EVENT_PAYLOAD`. A run
+  keeps the factory named in its token until it expires, even if its automation
+  is moved to another factory mid-run, and even if the factory is deleted:
+  deleting a factory only needs no live members, so a RUNNING run of a
+  soft-deleted or moved automation can still write under the old id after the
+  `deleted` notification, until the receiver's orphan purge runs. A run
+  sends it as a Bearer token to a route of a service that accepts it, which
+  decides what the factory may do (Enterprise's worklog routes are the first).
+  The token carries the authority of the automation's code: whoever controls
+  what a factory member runs can use it. `PATCH` of a member needs
+  `manage_automations` (see Factories), but git sync, plugin refs and external
+  tarball URLs are trusted as the source of that code. A draft's hidden
+  test-run automation cannot be in a factory, so it never gets a token.
+  Only a service that holds the service key can verify it. The tests in
+  `tests/test_factory_token.py` commit the contract test vector that
+  Enterprise's tests also commit; if the two differ, the enterprise issue is
+  authoritative.
+- **Factory lookup**: `GET /v1/service/factories?org_id=&id=...` (up to 100
+  ids), authenticated with `X-Service-API-Key` like `usage_router`. It tells a
+  service that stores a factory id whether the factory exists.
+- **Delete notification**: so a service can remove its data for a deleted
+  factory. After a factory delete commits, `POST
+  {openhands_api_base_url}/api/service/orgs/{org_id}/factories/{factory_id}/deleted`
+  (`notify_factory_deleted`). Worklogs are the only consumer today. Any answer
+  but 204, or any failure to send, is a warning naming the org, the factory
+  and the URL; it never blocks the delete. Skipped in local mode. Enterprise's
+  maintenance task repairs a missed notification, so there is no retry queue.
 
 ## Preset-Based Automation Creation
 
@@ -618,3 +707,15 @@ To bump the `openhands-sdk` / `openhands-workspace` pins by hand instead:
 2. Run `uv lock` to regenerate `uv.lock`.
 3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —
    release-please handles the version bump and release.
+
+## SDK 1.63 dependency compatibility
+
+- Keep LiteLLM `>=1.108.3,<1.109` with SDK/workspace 1.63: LiteLLM 1.109
+  removed `litellm.llms.openai.chat.gpt_5_transformation`, which SDK imports
+  during startup. Keep the security floor `filelock>=4.2.1` when resolving.
+- SDK 1.63 requires Pydantic >=2.14.3. Its TypeAdapter uses TypeForm; use
+  pyright >=1.1.414 rather than ignoring Trigger argument errors or forcing
+  an incompatible Pydantic downgrade. Explicit TTLCache constructor generics
+  keep cachetools inference consistent with that checker.
+- All-files pre-commit launches multiple pyright processes. On memory-constrained
+  hosts, run whole-project `uv run pyright` once and lint checks sequentially.

@@ -12,12 +12,16 @@ from openhands.automation.event_schemas.bitbucket_data_center import (
 from openhands.automation.event_schemas.detection import EventTypeDetector
 from openhands.automation.event_schemas.github import (
     GITHUB_DETECTION_RULES,
+    CheckRunPayload,
+    CheckRunSuite,
+    CheckSuitePayload,
     IssueCommentPayload,
     IssuesPayload,
     PullRequestPayload,
     PullRequestReviewPayload,
     PushPayload,
     ReleasePayload,
+    StatusPayload,
     WorkflowRunPayload,
     detect_github_event_type,
     parse_github_event_auto,
@@ -1142,6 +1146,98 @@ class TestGitHubAutoDetection:
         assert event.workflow_run.run_attempt == 2
         assert event.workflow_run.pull_requests[0].number == 42
         assert event.workflow_run.pull_requests[0].base.ref == "main"
+
+    def test_detect_check_suite(self):
+        """Detect check_suite event and keep the fields a CI gate needs."""
+        payload = {
+            **self._base_payload(),
+            "action": "completed",
+            "check_suite": {
+                "id": 118578147,
+                "head_branch": "feature",
+                "head_sha": "abc123",
+                "status": "completed",
+                "conclusion": "failure",
+                "app": {"id": 15368, "slug": "github-actions"},
+                "pull_requests": [
+                    {
+                        "id": 1,
+                        "number": 42,
+                        "url": "https://api.github.com/repos/org/test-repo/pulls/42",
+                        "head": {
+                            "ref": "feature",
+                            "sha": "abc123",
+                            "repo": {"id": 123},
+                        },
+                        "base": {"ref": "main", "sha": "def456", "repo": {"id": 123}},
+                    }
+                ],
+            },
+        }
+
+        event_type = detect_github_event_type(payload)
+        event = parse_github_event_auto(payload)
+
+        assert event_type == "check_suite"
+        assert isinstance(event, CheckSuitePayload)
+        assert event.event_key == "check_suite.completed"
+        assert event.check_suite.conclusion == "failure"
+        assert event.check_suite.head_sha == "abc123"
+        assert event.check_suite.head_branch == "feature"
+        assert event.check_suite.pull_requests[0].number == 42
+
+    def test_detect_check_run(self):
+        """Detect check_run event, which nests its suite, and keep its result."""
+        payload = {
+            **self._base_payload(),
+            "action": "completed",
+            "check_run": {
+                "id": 128620228,
+                "name": "build",
+                "head_sha": "abc123",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://github.com/org/test-repo/runs/128620228",
+                "check_suite": {"id": 118578147, "head_branch": "feature"},
+                "pull_requests": [],
+            },
+        }
+
+        event_type = detect_github_event_type(payload)
+        event = parse_github_event_auto(payload)
+
+        assert event_type == "check_run"
+        assert isinstance(event, CheckRunPayload)
+        assert event.event_key == "check_run.completed"
+        assert event.check_run.name == "build"
+        assert event.check_run.conclusion == "failure"
+        assert event.check_run.check_suite == CheckRunSuite(head_branch="feature")
+
+    def test_detect_status(self):
+        """Detect status event, which has no action, and keep the commit's result."""
+        payload = {
+            **self._base_payload(),
+            "id": 9216538,
+            "sha": "abc123",
+            "name": "org/test-repo",
+            "state": "failure",
+            "context": "ci/build",
+            "description": "Build failed",
+            "target_url": "https://ci.example.com/builds/7",
+            "commit": {"sha": "abc123"},
+            "branches": [{"name": "feature", "commit": {"sha": "abc123"}}],
+        }
+
+        event_type = detect_github_event_type(payload)
+        event = parse_github_event_auto(payload)
+
+        assert event_type == "status"
+        assert isinstance(event, StatusPayload)
+        assert event.event_key == "status"
+        assert event.state == "failure"
+        assert event.context == "ci/build"
+        assert event.sha == "abc123"
+        assert event.branches[0].name == "feature"
 
     def test_detect_unknown_raises(self):
         """Unknown payload structure raises ValueError."""

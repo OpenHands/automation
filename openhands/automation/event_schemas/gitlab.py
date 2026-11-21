@@ -13,7 +13,7 @@ object), so the raw payload is kept as-is for filters.
 Reference: https://docs.gitlab.com/user/project/integrations/webhook_events/
 """
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
 from pydantic import computed_field
 
@@ -23,7 +23,7 @@ from openhands.automation.event_schemas import WebhookEvent
 # The kinds the OpenHands server's GitLab webhooks subscribe to, each with the
 # payload path holding its action. GitLab sends job events with object_kind
 # "build".
-GITLAB_EVENT_ACTIONS: dict[str, str] = {
+GITLAB_EVENT_ACTIONS: Final[dict[str, str]] = {
     "build": "build_status",
     "issue": "object_attributes.action",
     "merge_request": "object_attributes.action",
@@ -31,7 +31,7 @@ GITLAB_EVENT_ACTIONS: dict[str, str] = {
     "pipeline": "object_attributes.status",
 }
 
-GITLAB_EVENT_TYPES: tuple[str, ...] = tuple(sorted(GITLAB_EVENT_ACTIONS))
+GITLAB_EVENT_TYPES: Final[tuple[str, ...]] = tuple(sorted(GITLAB_EVENT_ACTIONS))
 
 
 def _lookup(payload: dict[str, Any], path: str) -> Any:

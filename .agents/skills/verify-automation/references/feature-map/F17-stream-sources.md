@@ -147,13 +147,17 @@ Preconditions:
 - A failing source never stops retrying (only an identity mismatch is
   terminal), so a deployment with a revoked token logs a traceback every 300 s
   at the cap. The failure count is process-local and resets on restart.
-- The translated path is not the stream path in three ways: the webhook has
-  no delivery-id header for Slack (the stream dedupes on the envelope's
-  `event_id`, the webhook cannot, so a Slack HTTP retry creates a second run);
-  team, bot-message and event-type drops happen only in the stream provider
-  (over HTTP, the trigger's `on` and `filter` do that work, as the recipe's
-  filter does for `team_id`); and Slack's HTTP `url_verification` handshake is
-  not answered by the event route.
+- The translated path is not the stream path in two ways: Slack sends no
+  delivery-id header, so the webhook dedupes only with
+  `event_id_expr: event_id`, the envelope field the stream dedupes on (without
+  it a Slack HTTP retry creates a second run; `event.ts` is not unique, since
+  a mention's `message` and `app_mention` events share it); and team,
+  bot-message and event-type drops happen only in the stream provider (over
+  HTTP, the trigger's `on` and `filter` do that work, as the recipe's filter
+  does for `team_id`).
+- A `slack_v0` webhook answers Slack's HTTP `url_verification` handshake: a
+  signed challenge gets a 200 `text/plain` echo, records no event and starts
+  no run.
 - A custom webhook named `slack` and a configured Slack app share the source
   name, so the same automation matches events from both transports.
 - The fake-token run calls the real `slack.com` when outbound HTTPS is

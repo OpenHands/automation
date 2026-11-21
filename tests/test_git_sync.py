@@ -4,6 +4,7 @@ Uses an in-memory SQLite engine and a real bare repo under tmp_path, not mocks.
 """
 
 import asyncio
+import base64
 import io
 import logging
 import subprocess
@@ -13,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -52,6 +54,7 @@ from openhands.automation.models import (
     AutomationGitSyncState,
     AutomationState,
     Base,
+    CustomWebhook,
     TarballUpload,
     UploadStatus,
 )
@@ -70,6 +73,67 @@ LOCAL_ORG_ID = _LOCAL_USER.org_id
 
 async def _aiter(data: bytes):
     yield data
+
+
+async def test_import_rejects_continuation_on_deadline_webhook(
+    sqlite_session_factory, file_store, git_settings, service_settings, origin, caplog
+):
+    automation_id = await _create_internal_automation(
+        sqlite_session_factory, file_store
+    )
+    async with sqlite_session_factory() as session:
+        automation = await session.get(Automation, automation_id)
+        assert automation is not None
+        original_trigger = dict(automation.trigger)
+        session.add(
+            CustomWebhook(
+                org_id=LOCAL_ORG_ID,
+                name="Synthetic Teams source",
+                source="teams-demo",
+                webhook_secret=base64.b64encode(b"synthetic-git-sync-token").decode(),
+                signature_scheme="teams_hmac_sha256",
+                signature_header="Authorization",
+                acknowledgement="teams_message",
+                event_id_expr="id",
+                admission_expr="allowed",
+            )
+        )
+        await session.commit()
+    await run_sync_cycle(
+        sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+    )
+    editor = origin.parent / "guard-editor"
+    await ensure_repo(editor, f"file://{origin}", "main", "", 30)
+    await pull(editor, "main", "", 30)
+    path = editor / "automations" / "my-first-automation" / "automation.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["trigger"] = {
+        "type": "event",
+        "source": "teams-demo",
+        "on": "message",
+        "destination": "continue_conversation",
+        "subject_key_expr": "id",
+    }
+    data["keep_alive"] = True
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    await commit_and_push(
+        editor,
+        "automations",
+        "Synthetic continuation edit",
+        "Synthetic",
+        "synthetic@example.com",
+        "main",
+        "",
+        30,
+    )
+    result = await run_sync_cycle(
+        sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+    )
+    assert result.imported == 0
+    assert "Deadline-bound" in caplog.text
+    async with sqlite_session_factory() as session:
+        automation = await session.get(Automation, automation_id)
+        assert automation is not None and automation.trigger == original_trigger
 
 
 async def _org_config(

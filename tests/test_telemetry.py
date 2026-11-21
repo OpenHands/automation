@@ -151,6 +151,195 @@ def test_base_properties_includes_derived_failure_kind(monkeypatch):
     assert "secret path" not in str(properties.values())
 
 
+async def _capture_payloads(monkeypatch, captures):
+    """Run captures through the real telemetry path; only PostHog HTTP is faked."""
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+    for event, kwargs in captures:
+        await telemetry.capture_automation_event(event, **kwargs)
+    return [payload for _, payload in _MockAsyncClient.posts]
+
+
+def _failed_run(automation, error_detail=None):
+    run = _run(automation)
+    run.status = AutomationRunStatus.FAILED
+    run.error_detail = error_detail
+    return run
+
+
+@pytest.mark.parametrize(
+    ("trigger_source", "expected_stage", "expected_kind"),
+    [
+        ("callback", "execution", "execution_error"),
+        ("dispatcher", "dispatch", "dispatch_error"),
+        ("watchdog", "watchdog", "execution_error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_event_without_error_detail_is_categorized(
+    monkeypatch, trigger_source, expected_stage, expected_kind
+):
+    """A terminal failure with no stored error text still gets bounded stage/kind."""
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_failed",
+                {
+                    "automation": automation,
+                    "run": _failed_run(automation),
+                    "properties": {"trigger_source": trigger_source},
+                },
+            )
+        ],
+    )
+
+    assert len(payloads) == 1
+    properties = payloads[0]["properties"]
+    assert properties["failure_stage"] == expected_stage
+    assert properties["failure_kind"] == expected_kind
+    assert properties["trigger_source"] == trigger_source
+    assert properties["run_status"] == "FAILED"
+    assert properties["deployment_mode"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_failed_event_keeps_explicit_failure_kind(monkeypatch):
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_failed",
+                {
+                    "automation": automation,
+                    "run": _failed_run(automation, "Timed out: sandbox stalled"),
+                    "properties": {
+                        "trigger_source": "watchdog",
+                        "failure_kind": "verification_failed",
+                    },
+                },
+            )
+        ],
+    )
+
+    properties = payloads[0]["properties"]
+    assert properties["failure_kind"] == "verification_failed"
+    assert properties["failure_stage"] == "watchdog"
+
+
+@pytest.mark.asyncio
+async def test_completed_event_has_no_failure_properties(monkeypatch):
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_completed",
+                {
+                    "automation": automation,
+                    "run": _run(automation),
+                    "properties": {"trigger_source": "callback"},
+                },
+            )
+        ],
+    )
+
+    properties = payloads[0]["properties"]
+    assert "failure_kind" not in properties
+    assert "failure_stage" not in properties
+
+
+@pytest.mark.asyncio
+async def test_failed_event_never_leaks_raw_error_detail(monkeypatch):
+    automation = _automation()
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_failed",
+                {
+                    "automation": automation,
+                    "run": _failed_run(
+                        automation,
+                        "Timed out: token=sekrit at /home/user/private",
+                    ),
+                    "properties": {"trigger_source": "callback"},
+                },
+            )
+        ],
+    )
+
+    properties = payloads[0]["properties"]
+    assert properties["failure_kind"] == "timeout"
+    assert properties["failure_stage"] == "execution"
+    assert "sekrit" not in str(properties)
+    assert "private" not in str(properties)
+
+
+@pytest.mark.asyncio
+async def test_terminal_events_separate_success_users_from_failure_only(
+    monkeypatch,
+):
+    """Unique users with a success are separable from failure-only users."""
+    successful_user = _automation()
+    failure_only_user = _automation()
+    success_run = _run(successful_user)
+    payloads = await _capture_payloads(
+        monkeypatch,
+        [
+            (
+                "automation_run_completed",
+                {
+                    "automation": successful_user,
+                    "run": success_run,
+                    "properties": {"trigger_source": "callback"},
+                },
+            ),
+            (
+                "automation_run_failed",
+                {
+                    "automation": successful_user,
+                    "run": _failed_run(successful_user),
+                    "properties": {"trigger_source": "watchdog"},
+                },
+            ),
+            (
+                "automation_run_failed",
+                {
+                    "automation": failure_only_user,
+                    "run": _failed_run(failure_only_user),
+                    "properties": {"trigger_source": "dispatcher"},
+                },
+            ),
+        ],
+    )
+
+    events_by_user: dict[str, set[str]] = {}
+    for payload in payloads:
+        events_by_user.setdefault(payload["distinct_id"], set()).add(payload["event"])
+    with_success = {
+        user
+        for user, events in events_by_user.items()
+        if "automation_run_completed" in events
+    }
+    failure_only = set(events_by_user) - with_success
+
+    assert with_success == {str(successful_user.user_id)}
+    assert failure_only == {str(failure_only_user.user_id)}
+    for payload in payloads:
+        if payload["event"] == "automation_run_failed":
+            assert payload["properties"]["failure_stage"]
+            assert payload["properties"]["failure_kind"]
+
+
 def test_base_properties_report_run_as_kind(monkeypatch):
     monkeypatch.setattr(
         telemetry,

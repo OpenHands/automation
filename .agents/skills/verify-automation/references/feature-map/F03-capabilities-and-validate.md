@@ -65,7 +65,7 @@ Preconditions:
 
 - **Default capabilities (`F03.caps-default`).** The full feature list of a local run, which always has a KV secret.
   ```sh
-  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDescription", "automationDrafts", "conversationDispatch", "customTarball", "kvStore", "mcpTools", "pluginConfigUpdate", "pluginSpecAgentProfiles", "presetAgentProfiles", "presetPlugin", "presetPrompt", "repoClone", "repoUpdate", "serviceAccountRunAs"]' --check repoProviders contains github --check repoProviders len-ge 3 --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
+  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDescription", "automationDrafts", "conversationDispatch", "customTarball", "factories", "kvStore", "mcpTools", "pluginConfigUpdate", "pluginSpecAgentProfiles", "presetAgentProfiles", "presetPlugin", "presetPrompt", "repoClone", "repoUpdate", "serviceAccountRunAs"]' --check repoProviders contains github --check repoProviders len-ge 3 --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
   ```
 - **Cron constraints (`F03.caps-cron`).** The run's scheduler polls every 5 s, but the floor never goes below 60.
   ```sh
