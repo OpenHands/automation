@@ -2621,7 +2621,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "litellm", specifier = ">=1.108.3,<1.110" },
+    { name = "litellm", specifier = ">=1.108.3,<1.111" },
     { name = "openhands-sdk", specifier = "==1.63.1" },
     { name = "openhands-workspace", specifier = "==1.63.1" },
     { name = "pg8000", specifier = ">=1.31" },
