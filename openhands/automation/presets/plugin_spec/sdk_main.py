@@ -118,7 +118,6 @@ def _attach_started_conversation(workspace, conversation_id: str, callbacks=None
         register(str(conversation.id))
     return conversation
 
-
 # Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
@@ -169,13 +168,13 @@ print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else '
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
-from prompt_builder import build_user_prompt
-
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.automation import automation_conversation_kwargs
 from openhands.sdk.conversation.request import StartConversationRequest
-from openhands.sdk.plugin import PluginSource
 from openhands.sdk.workspace.local import LocalWorkspace
+
+from openhands.sdk.plugin import PluginSource
+from prompt_builder import build_user_prompt
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.workspace import OpenHandsCloudWorkspace
 

@@ -95,7 +95,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 
 def _detect_execution_mode(environ) -> tuple[str, str]:
@@ -350,12 +350,10 @@ def _phase_poster() -> None:
 
 
 # SDK imports (before workspace context so import errors are caught)
-from finish_tool_hook import finish_tool_required_hook_config
-
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.automation import automation_conversation_kwargs
+from finish_tool_hook import finish_tool_required_hook_config
 from openhands.tools.preset import TaskOutcome
-
 
 try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
@@ -398,10 +396,7 @@ def _users_me_mcp_config():
     response = httpx.get(
         f"{api_url}/api/v1/users/me",
         params={"expose_secrets": "true"},
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "X-Session-API-Key": session_key,
-        },
+        headers={"Authorization": f"Bearer {api_key}", "X-Session-API-Key": session_key},
         timeout=60.0,
     )
     response.raise_for_status()
@@ -530,7 +525,7 @@ def _build_conversation_title(event_context) -> str | None:
                 if isinstance(issue_key, str) and issue_key.strip():
                     context = issue_key.strip()
     if context is None:
-        context = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"{name} — {context}"[:200]
 
 

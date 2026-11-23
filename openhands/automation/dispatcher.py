@@ -1346,20 +1346,6 @@ async def _execute_run(
             expires_in=timedelta(seconds=settings.factory_token_ttl_seconds),
         )
 
-    # A run of a factory's automation gets a token naming its factory. Local
-    # mode has no OpenHands server to verify the token, and without the service
-    # key there is nothing to sign it with. The run starts either way.
-    if automation.factory_id and settings.service_key and not settings.is_local_mode:
-        env_vars["AUTOMATION_FACTORY_TOKEN"] = create_factory_token(
-            settings.service_key,
-            org_id=automation.org_id,
-            factory_id=automation.factory_id,
-            automation_id=automation.id,
-            automation_name=automation.name,
-            run_id=run.id,
-            expires_in=timedelta(seconds=settings.factory_token_ttl_seconds),
-        )
-
     # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.
     try:
         if automation.plugin_spec:

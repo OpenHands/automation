@@ -95,7 +95,7 @@ them honest: [../maintenance.md](../maintenance.md).
 | F17 | [Stream sources (Slack Socket Mode)](F17-stream-sources.md) | stream supervisor, config parsing, retries, kill switch, Socket Mode delivery | the stream supervisor (no route) | baseline; a real Slack app for two blocked bullets | 7 |
 | F18 | [Usage totals for the OpenHands server](F18-usage-report.md) | instance-wide automation count behind the service key, unconfigured and wrong-key refusals | `GET /v1/usage` | baseline | 3 |
 | F19 | [Factories](F19-factories.md) | factory create, rename, create or assign an automation, list filter, delete, factory lookup, change audit | `/v1/factories`, `factory_id` on `/v1`, `/v1/{id}`, `GET /v1/service/factories` | baseline | 8 |
-| F20 | [Automation outcome values](F20-outcomes.md) | typed outcome submission, parser normalization, raw value listing and aggregation | `/v1/outcomes`, `/v1/{id}/outcomes/values`, `/v1/{id}/outcomes/aggregate` | baseline | 5 |
+| F20 | [Outcome values](F20-outcomes.md) | factory-scoped typed submissions, provenance, values and aggregates | `POST /v1/outcomes`, `GET /v1/factories/{factory_id}/outcomes/values`, `GET /v1/factories/{factory_id}/outcomes/aggregate` | baseline | 5 |
 
 ## Not mapped
 
