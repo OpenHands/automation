@@ -49,7 +49,18 @@ jobs:
             # openhands-workspace is released with the SDK under the same version.
             # --no-cache and --no-config are what the SDK's version-bump workflow
             # passed here: the lock has to see a release published minutes ago.
+            # PyPI does not show a new release to every runner at the same time,
+            # so a lock that does not resolve is retried for five minutes before
+            # the run fails. On v1.63.1 this runner still got the old index for
+            # openhands-workspace a minute after the SDK's own runner had
+            # resolved all four packages.
             command: |
                 sed -i -E 's/"openhands-sdk==[^"]*"/"openhands-sdk=='"$PIN_SDK"'"/' pyproject.toml
                 sed -i -E 's/"openhands-workspace==[^"]*"/"openhands-workspace=='"$PIN_SDK"'"/' pyproject.toml
-                git diff --quiet || uv lock --no-cache --no-config
+                git diff --quiet && exit 0
+                for attempt in $(seq 1 10); do
+                    uv lock --no-cache --no-config && exit 0
+                    echo "uv lock did not resolve (attempt $attempt); trying again in 30s"
+                    sleep 30
+                done
+                uv lock --no-cache --no-config
