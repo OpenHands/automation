@@ -11,7 +11,7 @@ import tarfile
 import uuid
 import venv
 from collections.abc import Callable
-from datetime import UTC, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -97,7 +97,7 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
         if isinstance(node, ast.FunctionDef)
         and node.name == "_build_conversation_title"
     )
-    namespace: dict[str, Any] = {"datetime": datetime, "timezone": timezone, "UTC": UTC}
+    namespace: dict[str, Any] = {"datetime": datetime, "timezone": timezone}
     ast.fix_missing_locations(function_node)
     exec(
         compile(
