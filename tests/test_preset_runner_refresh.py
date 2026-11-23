@@ -65,7 +65,7 @@ def test_a_1_27_0_preset_runs_with_the_current_runner(
     after = _members(with_current_preset_runner(stored))
 
     current = load_current()
-    for name in ("main.py", "setup.sh", "finish_tool_hook.py"):
+    for name in ("main.py", "setup.sh", "finish_tool_hook.py", "outcome_prompt.py"):
         assert after[name][0] == current[name].encode(), name
     assert b"AUTOMATION_RUNNER_REPOS" in after["main.py"][0]
     assert b"RemoteConversation.attach(" in after["main.py"][0]
@@ -74,7 +74,7 @@ def test_a_1_27_0_preset_runs_with_the_current_runner(
     assert after[config] == before[config]
     assert after["repos_config.json"] == before["repos_config.json"]
     assert after["setup.sh"][1] == 0o755
-    assert set(after) == set(before)
+    assert set(after) == set(before) | {"outcome_prompt.py"}
 
 
 @pytest.mark.parametrize("os_name", ["posix", "nt"])
@@ -121,7 +121,7 @@ def test_a_preset_from_before_the_finish_hook_gets_it():
 
     after = _members(with_current_preset_runner(stored))
 
-    for name in ("main.py", "setup.sh", "finish_tool_hook.py"):
+    for name in ("main.py", "setup.sh", "finish_tool_hook.py", "outcome_prompt.py"):
         assert after[name][0] == current[name].encode(), name
     assert after["prompt.txt"][0] == b"hi"
 

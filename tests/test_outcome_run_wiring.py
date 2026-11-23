@@ -56,6 +56,7 @@ def test_prompt_guidance_is_credential_safe_and_describes_both_workflows(monkeyp
         "AUTOMATION_KV_TOKEN": env["AUTOMATION_KV_TOKEN"],
     }
     section = outcome_context_section(env)
+    assert section is not None
     assert "very-secret" not in section
     assert '"values"' in section
     assert '"payload"' in section
@@ -63,6 +64,7 @@ def test_prompt_guidance_is_credential_safe_and_describes_both_workflows(monkeyp
     assert "$AUTOMATION_KV_TOKEN" in section
     env["AUTOMATION_OUTCOME_SCHEMA"] = '{"required":["payload"]}'
     section = outcome_context_section(env)
+    assert section is not None
     assert '"payload"' in section
     assert '"required"' in section
     assert (
