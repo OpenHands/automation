@@ -20,6 +20,7 @@ from openhands.automation.models import (
     Factory,
 )
 from openhands.automation.outcome_aggregation import aggregate_outcome_values
+from openhands.automation.outcome_parsers import parse_outcome_payload
 from openhands.automation.outcome_schemas import (
     OutcomeAggregateBucket,
     OutcomeAggregateResponse,
@@ -107,7 +108,12 @@ async def submit_outcome(
                 [item.model_dump() for item in body.values]
             )
         elif body.payload is not None:
-            columns_list = extract_outcome_value_columns(body.payload)
+            if automation.outcome_parsers:
+                columns_list = normalize_outcome_values(
+                    parse_outcome_payload(body.payload, automation.outcome_parsers)
+                )
+            else:
+                columns_list = extract_outcome_value_columns(body.payload)
         else:
             raise ValueError("An outcome submission needs values or payload")
         for columns in columns_list:

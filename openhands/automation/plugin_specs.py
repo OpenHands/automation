@@ -36,6 +36,10 @@ from openhands.automation.models import AutomationVisibility
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
+from openhands.automation.outcome_parsers import (
+    OutcomeParserDefinition,
+    validate_outcome_parsers,
+)
 from openhands.automation.schemas import (
     FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
@@ -441,6 +445,7 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         ),
     )
     observability_associations: dict[str, str] | None = None
+    outcome_parsers: list[OutcomeParserDefinition] | None = None
     timeout: int | None = None
     keep_alive: bool | None = None
     template: TemplateProvenance | None = None
@@ -470,6 +475,13 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         cls, value: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(value)
+
+    @field_validator("outcome_parsers")
+    @classmethod
+    def validate_parser_definitions(
+        cls, value: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(value)
 
     @field_validator("timeout")
     @classmethod

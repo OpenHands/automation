@@ -400,6 +400,37 @@ async def test_admin_can_edit_an_automation_in_a_factory(async_client):
     assert response.json()["name"] == "Renamed"
 
 
+async def test_parsers_must_match_factory_registry_on_create_and_update(async_client):
+    factory = await _create_factory(
+        async_client, "Parser factory", outcome_keys={"score": "number"}
+    )
+    parser = {"key": "score", "expression": "result.score", "value_type": "number"}
+    response = await async_client.post(
+        BASE, json=_raw_body("No factory", outcome_parsers=[parser])
+    )
+    assert response.status_code == 409
+
+    invalid = {**parser, "value_type": "string"}
+    response = await async_client.post(
+        BASE,
+        json=_raw_body(
+            "Wrong parser", factory_id=factory["id"], outcome_parsers=[invalid]
+        ),
+    )
+    assert response.status_code == 422
+
+    automation = await _create_automation(
+        async_client, "Parsed", factory_id=factory["id"], outcome_parsers=[parser]
+    )
+    assert automation["outcome_parsers"] == [parser]
+    url = f"{BASE}/{automation['id']}"
+    response = await async_client.patch(url, json={"outcome_parsers": [invalid]})
+    assert response.status_code == 422
+    response = await async_client.patch(url, json={"factory_id": None})
+    assert response.status_code == 409
+    assert (await async_client.get(url)).json()["outcome_parsers"] == [parser]
+
+
 async def test_each_factory_change_appears_in_the_change_audit(
     async_client, async_session
 ):
@@ -939,7 +970,9 @@ def test_git_sync_export_does_not_write_the_factory():
 async def test_git_sync_update_leaves_the_factory_unchanged(
     async_session: AsyncSession,
 ):
-    factory = Factory(org_id=TEST_ORG_ID, name="First")
+    factory = Factory(
+        org_id=TEST_ORG_ID, name="First", outcome_keys={"score": "number"}
+    )
     async_session.add(factory)
     await async_session.flush()
     files = serialize_automation(_automation_row("Synced", id=uuid.uuid4()), None)
@@ -963,6 +996,9 @@ async def test_git_sync_update_leaves_the_factory_unchanged(
 
     changed = yaml.safe_load(files["automation.yaml"].decode())
     changed["name"] = "Renamed in git"
+    changed["outcome_parsers"] = [
+        {"key": "score", "expression": "result.score", "value_type": "number"}
+    ]
     changed_files = {**files, "automation.yaml": yaml.safe_dump(changed).encode()}
     changed_deserialized = deserialize_automation(changed_files)
     assert changed_deserialized is not None
@@ -974,6 +1010,13 @@ async def test_git_sync_update_leaves_the_factory_unchanged(
 
     assert automation.name == "Renamed in git"
     assert automation.factory_id == factory.id
+
+    assert automation.outcome_parsers == changed["outcome_parsers"]
+    exported = serialize_automation(automation, None)
+    assert (
+        yaml.safe_load(exported["automation.yaml"])["outcome_parsers"]
+        == changed["outcome_parsers"]
+    )
 
 
 # --- outcome keys ---

@@ -180,6 +180,9 @@ class Automation(Base):
     observability_associations: Mapped[dict[str, str] | None] = mapped_column(
         JSON, nullable=True
     )
+    outcome_parsers: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
 
     # User-facing labels for grouping and filtering, normalized by tags.py.
     # Never NULL, so the tag facet query can expand every row.

@@ -218,3 +218,43 @@ async def test_run_row_limit_rejects_additional_submissions(
     )
     assert response.status_code == 422
     assert "limit" in response.json()["detail"]
+
+
+async def test_nested_parser_payload_and_typed_values_share_factory_writer(
+    async_client, async_session, mock_authenticated_user, outcome_auth
+):
+    factory = Factory(
+        org_id=mock_authenticated_user.org_id,
+        name="Parser factory",
+        outcome_keys={"score": "number"},
+    )
+    async_session.add(factory)
+    await async_session.commit()
+    automation = await make_automation(
+        async_session, mock_authenticated_user, factory=factory
+    )
+    automation.outcome_parsers = [
+        {"key": "score", "expression": "result.score", "value_type": "number"}
+    ]
+    await async_session.commit()
+    url = "/api/automation/v1/outcomes"
+    params = {"automation_id": str(automation.id)}
+    response = await async_client.post(
+        url, params=params, json={"payload": {"result": {"score": 3}}}
+    )
+    assert response.status_code == 201, response.text
+    response = await async_client.post(
+        url,
+        params=params,
+        json={"values": [{"key": "score", "type": "number", "value": 4}]},
+    )
+    assert response.status_code == 201, response.text
+    response = await async_client.post(
+        url, params=params, json={"payload": {"result": {}}}
+    )
+    assert response.status_code == 422
+    response = await async_client.get(
+        f"/api/automation/v1/factories/{factory.id}/outcomes/aggregate",
+        params={"key": "score", "operation": "sum"},
+    )
+    assert response.json()["value"] == 7
