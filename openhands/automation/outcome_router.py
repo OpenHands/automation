@@ -102,11 +102,14 @@ async def submit_outcome(
     run_id = auth.run_id if source == "agent" else body.run_id
     run_id = await _validated_run_id(session, automation.id, run_id)
     try:
-        columns_list = (
-            normalize_outcome_values([item.model_dump() for item in body.values])
-            if body.values is not None
-            else extract_outcome_value_columns(body.payload)
-        )
+        if body.values is not None:
+            columns_list = normalize_outcome_values(
+                [item.model_dump() for item in body.values]
+            )
+        elif body.payload is not None:
+            columns_list = extract_outcome_value_columns(body.payload)
+        else:
+            raise ValueError("An outcome submission needs values or payload")
         for columns in columns_list:
             if factory.outcome_keys.get(columns["key"]) != columns["value_type"]:
                 raise ValueError(
@@ -124,7 +127,7 @@ async def submit_outcome(
                 AutomationOutcomeValue.run_id == run_id,
             )
         )
-        if existing + len(columns_list) > MAX_OUTCOME_ROWS_PER_RUN:
+        if (existing or 0) + len(columns_list) > MAX_OUTCOME_ROWS_PER_RUN:
             raise HTTPException(422, "Run outcome row limit exceeded")
 
     now = utcnow()

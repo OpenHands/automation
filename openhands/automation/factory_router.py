@@ -6,7 +6,7 @@ factories themselves.
 """
 
 import uuid
-from typing import Literal
+from typing import Literal, cast
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -20,6 +20,7 @@ from openhands.automation.auth import (
 )
 from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.models import Automation, Factory
+from openhands.automation.outcome_values import OutcomeValueType
 from openhands.automation.schemas import (
     FactoryCreate,
     FactoryListResponse,
@@ -59,7 +60,7 @@ def _to_response(factory: Factory, automation_count: int) -> FactoryResponse:
     return FactoryResponse(
         id=factory.id,
         name=factory.name,
-        outcome_keys=factory.outcome_keys,
+        outcome_keys=cast(dict[str, OutcomeValueType], factory.outcome_keys),
         automation_count=automation_count,
         created_at=factory.created_at,
         updated_at=factory.updated_at,
@@ -183,7 +184,9 @@ async def create_factory(
 ) -> FactoryResponse:
     """Create a factory. A fresh install has none."""
     factory = Factory(
-        org_id=user.org_id, name=data.name, outcome_keys=data.outcome_keys
+        org_id=user.org_id,
+        name=data.name,
+        outcome_keys={key: str(value) for key, value in data.outcome_keys.items()},
     )
     session.add(factory)
     await session.flush()
@@ -241,7 +244,9 @@ async def rename_factory(
     factory = await _get_org_factory(session, user.org_id, factory_id)
     factory.name = data.name
     if "outcome_keys" in data.model_fields_set:
-        factory.outcome_keys = data.outcome_keys
+        factory.outcome_keys = {
+            key: str(value) for key, value in data.outcome_keys.items()
+        }
     await session.flush()
     await session.refresh(factory)
     count = await _count_live(session, factory.id)
