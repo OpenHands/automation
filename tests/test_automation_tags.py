@@ -18,7 +18,7 @@ from openhands.automation.git_sync.serializer import (
     deserialize_automation,
     serialize_automation,
 )
-from openhands.automation.models import Automation
+from openhands.automation.models import Automation, AutomationVisibility
 from openhands.automation.tags import MAX_TAGS, normalize_tags
 from openhands.automation.utils import utcnow
 
@@ -189,6 +189,26 @@ async def test_tags_endpoint_counts_live_org_automations(async_client, async_ses
             {"tag": "alpha", "count": 1},
             {"tag": "qa", "count": 1},
         ]
+    }
+
+
+async def test_tags_endpoint_skips_a_teammates_private_automations(
+    readonly_client, async_session
+):
+    private = AutomationVisibility.PRIVATE
+    async_session.add_all(
+        [
+            _row("Mine", ["mine"], visibility=private),
+            _row("Teammate's", ["shared"], user_id=OTHER_USER_ID),
+            _row("Hidden", ["hidden"], user_id=OTHER_USER_ID, visibility=private),
+        ]
+    )
+    await async_session.commit()
+
+    response = await readonly_client.get(f"{BASE}/tags")
+
+    assert response.json() == {
+        "tags": [{"tag": "mine", "count": 1}, {"tag": "shared", "count": 1}]
     }
 
 

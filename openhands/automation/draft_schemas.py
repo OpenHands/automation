@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.models import AutomationVisibility
 from openhands.automation.preset_router import (
     MAX_VARIANTS,
     CreatePluginAutomationRequest,
@@ -24,6 +25,7 @@ from openhands.automation.schemas import (
     FACTORY_ID_DESCRIPTION,
     RUN_AS_USER_ID_DESCRIPTION,
     TAGS_DESCRIPTION,
+    VISIBILITY_DESCRIPTION,
     AutomationState,
     CreateAutomationRequest,
     DraftEndpoint,
@@ -103,6 +105,9 @@ class _BaseDraftBody(BaseModel):
 
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
+    visibility: AutomationVisibility | None = Field(
+        default=None, description=VISIBILITY_DESCRIPTION
     )
     agent_profile_id: uuid.UUID | None = None
     name: str | None = Field(default=None, min_length=1, max_length=500)

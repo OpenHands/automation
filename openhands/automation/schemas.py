@@ -21,7 +21,11 @@ from pydantic.alias_generators import to_camel
 
 from openhands.automation.acknowledgements import DEFAULT_ACKNOWLEDGEMENT
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.models import AutomationRunAsKind, AutomationState
+from openhands.automation.models import (
+    AutomationRunAsKind,
+    AutomationState,
+    AutomationVisibility,
+)
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
@@ -516,6 +520,31 @@ RUN_AS_USER_ID_DESCRIPTION = (
 )
 
 
+VISIBILITY_DESCRIPTION = (
+    "Who in the organization can see the automation: 'organization' (every "
+    "member) or 'private' (the person it runs as, and holders of "
+    "manage_automations). An automation that runs as a service account is "
+    "always 'organization'."
+)
+
+PRIVATE_SERVICE_ACCOUNT_ERROR = (
+    "An automation that runs as a service account cannot be private"
+)
+
+
+def reject_private_service_account(
+    value: AutomationVisibility, info: ValidationInfo
+) -> AutomationVisibility:
+    """Refuse ``private`` for an automation created to run as a service account.
+
+    ``run_as_user_id`` is read from the fields validated so far, so each create
+    schema declares it before ``visibility``.
+    """
+    if value == AutomationVisibility.PRIVATE and info.data.get("run_as_user_id"):
+        raise ValueError(PRIVATE_SERVICE_ACCOUNT_ERROR)
+    return value
+
+
 FACTORY_ID_DESCRIPTION = (
     "Factory to create the automation in. Requires manage_automations "
     "(members get 403); an unknown or other-org factory returns 404."
@@ -559,6 +588,9 @@ class CreateAutomationRequest(BaseModel):
 
     run_as_user_id: uuid.UUID | None = Field(
         default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
+    visibility: AutomationVisibility = Field(
+        default=AutomationVisibility.ORGANIZATION, description=VISIBILITY_DESCRIPTION
     )
 
     agent_profile_id: uuid.UUID | None = Field(
@@ -654,6 +686,13 @@ class CreateAutomationRequest(BaseModel):
     @classmethod
     def validate_public_state(cls, v: Any) -> Any:
         return reject_public_draft_state(v)
+
+    @field_validator("visibility")
+    @classmethod
+    def validate_visibility(
+        cls, v: AutomationVisibility, info: ValidationInfo
+    ) -> AutomationVisibility:
+        return reject_private_service_account(v, info)
 
     @field_validator("tarball_path")
     @classmethod
@@ -754,6 +793,9 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         description="Agent profile selected for this automation.",
     )
+    visibility: AutomationVisibility | None = Field(
+        default=None, description=VISIBILITY_DESCRIPTION
+    )
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=2000)
@@ -830,7 +872,9 @@ class UpdateAutomationRequest(BaseModel):
 
     # state is NOT NULL too, but an explicit null there has always been a
     # no-op (the handler skips it), so it is left out on purpose.
-    @field_validator("name", "trigger", "tarball_path", "entrypoint", "enabled")
+    @field_validator(
+        "name", "trigger", "tarball_path", "entrypoint", "enabled", "visibility"
+    )
     @classmethod
     def validate_not_null(cls, v: Any, info: ValidationInfo) -> Any:
         return reject_explicit_null(v, info)
@@ -1285,6 +1329,7 @@ class AutomationResponse(BaseModel):
     user_id: uuid.UUID
     run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER
     created_by_user_id: uuid.UUID
+    visibility: AutomationVisibility = AutomationVisibility.ORGANIZATION
     org_id: uuid.UUID
     model: str | None
 

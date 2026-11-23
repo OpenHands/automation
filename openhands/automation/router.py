@@ -51,6 +51,7 @@ from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
+    AutomationVisibility,
 )
 from openhands.automation.observability import (
     add_event,
@@ -81,6 +82,7 @@ from openhands.automation.preset_router import (
     repos_config_json,
 )
 from openhands.automation.schemas import (
+    PRIVATE_SERVICE_ACCOUNT_ERROR,
     AutomationChangeListResponse,
     AutomationChangeResponse,
     AutomationListResponse,
@@ -157,6 +159,7 @@ from openhands.automation.utils.templates import (
 )
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
+from openhands.automation.utils.visibility import visible_to
 from openhands.automation.utils.webhook import is_builtin_source
 from openhands.automation.webhook_policy import require_compatible_trigger
 
@@ -314,6 +317,7 @@ async def create_automation(
         user_id=run_as.user_id,
         run_as_kind=run_as.kind,
         created_by_user_id=user.user_id,
+        visibility=body.visibility,
         org_id=user.org_id,
         name=body.name,
         description=body.description,
@@ -417,6 +421,7 @@ async def create_automation_from_plugin_spec(
         user_id=run_as.user_id,
         run_as_kind=run_as.kind,
         created_by_user_id=user.user_id,
+        visibility=body.visibility,
         org_id=user.org_id,
         name=body.name,
         prompt=None,
@@ -819,9 +824,13 @@ async def list_automations(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
-    """List automations for the caller's org (excludes soft-deleted)."""
+    """List the caller's org's automations that the caller may see.
+
+    Excludes soft-deleted automations, and private ones of other members (see
+    ``visible_to``).
+    """
     base_query = select(Automation).where(
-        Automation.org_id == user.org_id,
+        visible_to(user),
         Automation.deleted_at.is_(None),
     )
     # The creator, not the run-as identity: an automation the caller created to
@@ -868,8 +877,8 @@ async def list_automation_tags(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationTagsResponse:
-    """Tags on the caller's org's live automations, most-used first."""
-    counts = await count_org_tags(session, user.org_id)
+    """Tags on the live automations the caller may see, most-used first."""
+    counts = await count_org_tags(session, user)
     return AutomationTagsResponse(
         tags=[AutomationTagCount(tag=tag, count=count) for tag, count in counts]
     )
@@ -882,7 +891,7 @@ async def get_automation(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
-    auto = await _get_org_automation(session, automation_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user)
     return AutomationResponse.model_validate(auto)
 
 
@@ -901,7 +910,7 @@ async def update_automation(
     members only those they created (see ``_assert_can_manage``). An edit never
     changes who the automation runs as: it keeps running as ``user_id``.
     """
-    auto = await _get_org_automation(session, automation_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user)
     await _assert_can_manage(auto, user)
     # Membership gives an automation access to its factory's data, so the creator
     # exception of _assert_can_manage does not extend to editing what it runs.
@@ -912,6 +921,13 @@ async def update_automation(
         )
 
     update_data = body.model_dump(exclude_unset=True)
+    if (
+        update_data.get("visibility") == AutomationVisibility.PRIVATE
+        and auto.run_as_kind == AutomationRunAsKind.SERVICE
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, PRIVATE_SERVICE_ACCOUNT_ERROR
+        )
     # Only a new value is checked, like tarball_path below: resending the stored
     # factory grants nothing.
     factory_changing = (
@@ -1244,7 +1260,7 @@ async def delete_automation(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
     """Soft delete an automation."""
-    auto = await _get_org_automation(session, automation_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user)
     await _assert_can_manage(auto, user)
     was_enabled = auto.enabled
     auto.enabled = False
@@ -1406,7 +1422,7 @@ async def change_run_as(
       dispatched in between can finish under the old identity's key and get
       403 on its callbacks, until the watchdog times it out.
     """
-    auto = await _get_org_automation(session, automation_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user)
     # As on create (``resolve_run_as``): a service account must not make an
     # automation run as itself, whatever its permissions.
     refuse_service_account(
@@ -1474,6 +1490,9 @@ async def change_run_as(
     disabled_detail = {"reason": "run_as_changed", "source": "run_as_change"}
     auto.user_id = new_run_as.user_id
     auto.run_as_kind = new_run_as.kind
+    if new_run_as.kind == AutomationRunAsKind.SERVICE:
+        # A service account's automations are visible to the organization.
+        auto.visibility = AutomationVisibility.ORGANIZATION
     auto.enabled = False
     auto.state = ModelAutomationState.INACTIVE
     auto.disabled_reason = "run_as_changed"
@@ -1535,7 +1554,7 @@ async def download_automation_tarball(
     - s3:// or gs:// URLs: returns 422 (cannot proxy cloud storage URLs).
     - 404 if the automation has no accessible tarball.
     """
-    auto = await _get_org_automation(session, automation_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user)
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
@@ -1612,7 +1631,7 @@ async def dispatch_automation(
     Creates a PENDING run for the specified automation, which will be
     picked up by the dispatcher and executed.
     """
-    auto = await _get_org_automation(session, automation_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user)
     await _assert_can_manage(auto, user)
     await _assert_normal_api_can_use_draft_artifact(session, auto)
 
@@ -1662,7 +1681,7 @@ async def list_automation_runs(
     Returns runs ordered by creation time (latest first), with pagination.
     """
     # Verify the automation exists and belongs to the caller's org
-    await _get_org_automation(session, automation_id, user.org_id)
+    await _get_org_automation(session, automation_id, user)
 
     # Count lifetime runs by status for this automation
     count_result = await session.execute(
@@ -1708,7 +1727,7 @@ async def list_automation_changes(
     the same second still list newest first on SQLite. Rows written before that
     (whole seconds on SQLite) can tie; ``id`` keeps their order stable.
     """
-    await _get_org_automation(session, automation_id, user.org_id)
+    await _get_org_automation(session, automation_id, user)
 
     total = await session.scalar(
         select(func.count())
@@ -2166,13 +2185,16 @@ async def cancel_run(
 async def _get_org_automation(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    org_id: uuid.UUID,
+    user: AuthenticatedUser,
 ) -> Automation:
-    """Fetch a non-deleted automation in the caller's org."""
+    """Fetch a non-deleted automation in the caller's org that the caller may see.
+
+    Another member's private automation is a 404, like one in another org.
+    """
     result = await session.execute(
         select(Automation).where(
             Automation.id == automation_id,
-            Automation.org_id == org_id,
+            visible_to(user),
             Automation.deleted_at.is_(None),
         )
     )

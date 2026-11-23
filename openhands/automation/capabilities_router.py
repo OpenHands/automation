@@ -69,6 +69,9 @@ _require_view_automations = require_permission("view_automations")
 _STATIC_FEATURES = (
     "automationDescription",
     "automationDrafts",
+    # An automation that runs as a person can be private, and its visibility
+    # is reported.
+    "automationVisibility",
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",
