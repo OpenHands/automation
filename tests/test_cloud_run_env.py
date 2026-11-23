@@ -167,7 +167,8 @@ def _runner_mode(runner: str, environ: dict[str, str]) -> str:
         raise AssertionError("the runner never assigns IS_LOCAL_MODE")
     namespace: dict[str, Any] = {}
     code = compile(ast.Module(body=statements, type_ignores=[]), "main.py", "exec")
-    with _environ(environ):
+    with _environ(environ), pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.syspath_prepend(str(PRESETS_DIR))
         exec(code, namespace)
     return "local" if namespace["IS_LOCAL_MODE"] else "cloud"
 
