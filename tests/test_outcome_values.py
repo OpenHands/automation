@@ -1,8 +1,8 @@
 import pytest
 
 from openhands.automation.outcome_values import (
-    build_outcome_payload_schema,
     extract_outcome_value_columns,
+    normalize_outcome_values,
 )
 
 
@@ -13,7 +13,6 @@ def test_flat_outcome_payload_accepts_scalar_values():
             "reviewed": True,
             "repository": "OpenHands/automation",
         },
-        None,
     )
 
     by_key = {column["key"]: column for column in columns}
@@ -24,75 +23,44 @@ def test_flat_outcome_payload_accepts_scalar_values():
 
 def test_flat_outcome_payload_rejects_invalid_keys():
     with pytest.raises(ValueError):
-        extract_outcome_value_columns({"bad key": 1}, None)
+        extract_outcome_value_columns({"bad key": 1})
 
 
 def test_flat_outcome_payload_rejects_nested_values():
     with pytest.raises(ValueError, match="must be a string, finite number, or boolean"):
-        extract_outcome_value_columns({"review": {"comments_posted": 4}}, None)
+        extract_outcome_value_columns({"review": {"comments_posted": 4}})
 
 
-def test_configured_outcome_parsers_extract_nested_values():
-    columns = extract_outcome_value_columns(
-        {"outcome": {"comments_posted": 4, "reviewed": True}},
+def test_direct_typed_values_accept_json_datetime_and_boolean():
+    columns = normalize_outcome_values(
         [
+            {"key": "metadata", "value_type": "json", "value": {"issue": 1}},
             {
-                "key": "review.comments_posted",
-                "expression": "outcome.comments_posted",
-                "value_type": "number",
+                "key": "finished_at",
+                "value_type": "datetime",
+                "value": "2026-11-23T12:00:00Z",
             },
-            {
-                "key": "review.reviewed",
-                "expression": "outcome.reviewed",
-                "value_type": "boolean",
-            },
-        ],
+            {"key": "passed", "value_type": "boolean", "value": False},
+        ]
     )
+    assert columns[0]["json_value"] == {"issue": 1}
+    assert columns[1]["datetime_value"].year == 2026
+    assert columns[2]["boolean_value"] is False
 
-    by_key = {column["key"]: column for column in columns}
-    assert by_key["review.comments_posted"]["numeric_value"] == 4
-    assert by_key["review.reviewed"]["boolean_value"] is True
 
-
-def test_configured_outcome_parser_failure_rejects_submission():
-    with pytest.raises(ValueError, match="returned null or missing value"):
-        extract_outcome_value_columns(
-            {"outcome": {"reviewed": True}},
-            [
-                {
-                    "key": "review.comments_posted",
-                    "expression": "outcome.comments_posted",
-                    "value_type": "number",
-                }
-            ],
+@pytest.mark.parametrize("number", [2**53 + 1, -(2**53 + 1), 10**1000])
+def test_oversized_numbers_are_rejected_before_float_conversion(number):
+    with pytest.raises(ValueError, match="2\\^53"):
+        normalize_outcome_values(
+            [{"key": "score", "value_type": "number", "value": number}]
         )
 
 
-def test_configured_outcome_parsers_build_request_schema():
-    schema = build_outcome_payload_schema(
-        [
-            {
-                "key": "score",
-                "expression": "result.score",
-                "value_type": "number",
-            },
-            {
-                "key": "finished_at",
-                "expression": "finished_at",
-                "value_type": "datetime",
-            },
-        ]
-    )
-
-    assert schema is not None
-    assert schema["required"] == ["payload"]
-    outcome_values = schema["properties"]["payload"]["x-openhands-outcome-values"]
-    assert outcome_values["required"] == ["score", "finished_at"]
-    assert outcome_values["properties"]["score"]["type"] == "number"
-    assert outcome_values["properties"]["finished_at"]["format"] == "date-time"
-    assert "result.score" in outcome_values["properties"]["score"]["description"]
-
-
-def test_empty_outcome_parsers_do_not_build_request_schema():
-    assert build_outcome_payload_schema(None) is None
-    assert build_outcome_payload_schema([]) is None
+def test_direct_typed_values_reject_duplicate_keys():
+    with pytest.raises(ValueError, match="unique"):
+        normalize_outcome_values(
+            [
+                {"key": "score", "value_type": "number", "value": 1},
+                {"key": "score", "value_type": "number", "value": 2},
+            ]
+        )

@@ -27,7 +27,6 @@ from openhands.automation.backends.base import (
     ExecutionContext,
     StartedConversation,
 )
-from openhands.automation.config import clear_config_cache
 from openhands.automation.dispatcher import (
     _conversation_start,
     _execute_run,
@@ -46,9 +45,6 @@ from openhands.automation.models import (
 from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
-)
-from openhands.automation.presets.plugin_spec.prompt_builder import (
-    outcome_context_section as plugin_spec_outcome_context_section,
 )
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
@@ -808,7 +804,6 @@ class TestExecuteRunStartsTheConversation:
         agent_profile_id: uuid.UUID | None = PROFILE_UUID,
         subject_key: str | None = None,
         tarball_path: str = "https://example.com/code.tar.gz",
-        outcome_parsers: list[dict] | None = None,
     ) -> AutomationRun:
         async with async_session_factory() as session:
             automation = Automation(
@@ -822,7 +817,6 @@ class TestExecuteRunStartsTheConversation:
                 tarball_path=tarball_path,
                 entrypoint="uv run main.py",
                 enabled=True,
-                outcome_parsers=outcome_parsers,
             )
             session.add(automation)
             await session.commit()
@@ -935,54 +929,6 @@ class TestExecuteRunStartsTheConversation:
         backend.start_conversation.assert_not_awaited()
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert "AUTOMATION_CONVERSATION_STARTED" not in env_vars
-
-    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
-    async def test_outcome_api_reuses_kv_token_and_exports_schema(
-        self,
-        mock_execute,
-        async_session_factory,
-        mock_settings,
-        mock_client,
-        monkeypatch,
-    ):
-        monkeypatch.setenv("AUTOMATION_KV_SECRET", "test-kv-secret")
-        clear_config_cache()
-        run = await self._run(
-            async_session_factory,
-            preset_metadata=None,
-            outcome_parsers=[
-                {
-                    "key": "score",
-                    "expression": "result.score",
-                    "value_type": "number",
-                }
-            ],
-        )
-        backend = self._backend(None)
-        mock_execute.return_value = MagicMock(
-            success=True, bash_command_id="cmd-1", error=None
-        )
-
-        try:
-            with patch(
-                "openhands.automation.dispatcher.get_backend", return_value=backend
-            ):
-                await _execute_run(
-                    run, mock_settings, async_session_factory, mock_client
-                )
-        finally:
-            clear_config_cache()
-
-        env_vars = mock_execute.await_args.kwargs["env_vars"]
-        assert "AUTOMATION_OUTCOME_TOKEN" not in env_vars
-        assert (
-            env_vars["AUTOMATION_OUTCOME_URL"]
-            == "http://localhost:8000/api/automation/v1/outcomes"
-        )
-        assert env_vars["AUTOMATION_KV_TOKEN"].count(".") == 2
-        schema = json.loads(env_vars["AUTOMATION_OUTCOME_SCHEMA"])
-        outcome_values = schema["properties"]["payload"]["x-openhands-outcome-values"]
-        assert outcome_values["properties"]["score"]["type"] == "number"
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_an_app_server_without_the_contract_falls_back(
@@ -1733,53 +1679,6 @@ class TestRunnersAttachToTheStartedConversation:
         assert "never" not in text
         assert section([]) is None
         assert section([skills[1]]) is None
-
-    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
-    def test_outcome_api_rides_in_the_task_message(self, preset_name):
-        section = _load_preset_function(
-            preset_name,
-            "_outcome_context_section",
-            {"os": __import__("os")},
-        )
-        env = {
-            "AUTOMATION_OUTCOME_URL": "http://automation/v1/outcomes",
-            "AUTOMATION_KV_TOKEN": "token",
-            "AUTOMATION_OUTCOME_SCHEMA": '{"type":"object"}',
-        }
-
-        assert section({}) is None
-        assert (
-            section({"AUTOMATION_OUTCOME_URL": env["AUTOMATION_OUTCOME_URL"]}) is None
-        )
-        text = section(env)
-        assert text is not None
-        assert "Outcome Reporting API" in text
-        assert "$AUTOMATION_OUTCOME_URL" in text
-        assert "$AUTOMATION_KV_TOKEN" in text
-        assert '"payload"' in text
-        assert "$AUTOMATION_OUTCOME_SCHEMA" in text
-
-    def test_plugin_spec_outcome_api_rides_in_the_task_message(self):
-        env = {
-            "AUTOMATION_OUTCOME_URL": "http://automation/v1/outcomes",
-            "AUTOMATION_KV_TOKEN": "token",
-            "AUTOMATION_OUTCOME_SCHEMA": '{"type":"object"}',
-        }
-
-        assert plugin_spec_outcome_context_section({}) is None
-        assert (
-            plugin_spec_outcome_context_section(
-                {"AUTOMATION_KV_TOKEN": env["AUTOMATION_KV_TOKEN"]}
-            )
-            is None
-        )
-        text = plugin_spec_outcome_context_section(env)
-        assert text is not None
-        assert "Outcome Reporting API" in text
-        assert "$AUTOMATION_OUTCOME_URL" in text
-        assert "$AUTOMATION_KV_TOKEN" in text
-        assert '"payload"' in text
-        assert "$AUTOMATION_OUTCOME_SCHEMA" in text
 
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     def test_reads_the_list_only_when_attaching(self, preset_name):

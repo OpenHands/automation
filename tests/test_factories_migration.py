@@ -64,8 +64,16 @@ def test_existing_rows_survive_the_upgrade_with_no_factory(tmp_path):
     indexes = {index["name"] for index in inspector.get_indexes("automations")}
     foreign_keys = inspector.get_foreign_keys("automations")
     factory_columns = {c["name"] for c in inspector.get_columns("factories")}
+    outcome_indexes = {
+        i["name"] for i in inspector.get_indexes("automation_outcome_values")
+    }
+    outcome_checks = {
+        c["name"] for c in inspector.get_check_constraints("automation_outcome_values")
+    }
     engine.dispose()
 
+    assert {"ix_outcomes_run_id", "ix_outcomes_factory_key_created"} <= outcome_indexes
+    assert {"outcome_key", "outcome_source", "outcome_typed_value"} <= outcome_checks
     assert automation.factory_id is None
     assert len(runs) == 1
     assert "ix_automations_factory_id" in indexes
@@ -73,7 +81,14 @@ def test_existing_rows_survive_the_upgrade_with_no_factory(tmp_path):
         (fk["referred_table"], fk.get("options", {}).get("ondelete"))
         for fk in foreign_keys
     ] == [("factories", "SET NULL")]
-    assert factory_columns == {"id", "org_id", "name", "created_at", "updated_at"}
+    assert factory_columns == {
+        "id",
+        "org_id",
+        "name",
+        "outcome_keys",
+        "created_at",
+        "updated_at",
+    }
 
 
 def test_the_upgrade_adds_one_head_and_downgrades(tmp_path):

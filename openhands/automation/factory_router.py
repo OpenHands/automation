@@ -59,6 +59,7 @@ def _to_response(factory: Factory, automation_count: int) -> FactoryResponse:
     return FactoryResponse(
         id=factory.id,
         name=factory.name,
+        outcome_keys=factory.outcome_keys,
         automation_count=automation_count,
         created_at=factory.created_at,
         updated_at=factory.updated_at,
@@ -181,7 +182,9 @@ async def create_factory(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
     """Create a factory. A fresh install has none."""
-    factory = Factory(org_id=user.org_id, name=data.name)
+    factory = Factory(
+        org_id=user.org_id, name=data.name, outcome_keys=data.outcome_keys
+    )
     session.add(factory)
     await session.flush()
     await session.refresh(factory)
@@ -237,6 +240,8 @@ async def rename_factory(
     """Rename a factory."""
     factory = await _get_org_factory(session, user.org_id, factory_id)
     factory.name = data.name
+    if "outcome_keys" in data.model_fields_set:
+        factory.outcome_keys = data.outcome_keys
     await session.flush()
     await session.refresh(factory)
     count = await _count_live(session, factory.id)

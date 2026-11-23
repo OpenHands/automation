@@ -216,6 +216,7 @@ class TestGetCapabilities:
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
         assert "factories" in body["features"]
+        assert "outcomes" in body["features"]
         assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
         assert "pluginConfigUpdate" in body["features"]

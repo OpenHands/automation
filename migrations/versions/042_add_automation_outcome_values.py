@@ -19,17 +19,38 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column(
-        "automations",
-        sa.Column("outcome_parsers", sa.JSON(), nullable=True),
+        "factories",
+        sa.Column(
+            "outcome_keys", sa.JSON(), server_default=sa.text("'{}'"), nullable=False
+        ),
+    )
+    columns = (
+        "numeric_value",
+        "text_value",
+        "boolean_value",
+        "datetime_value",
+        "json_value",
+    )
+    types = ("number", "string", "boolean", "datetime", "json")
+    typed_check = " OR ".join(
+        f"(value_type = '{kind}' AND "
+        + " AND ".join(
+            f"{column} IS {'NOT ' if column == selected else ''}NULL"
+            for column in columns
+        )
+        + ")"
+        for kind, selected in zip(types, columns)
     )
     op.create_table(
         "automation_outcome_values",
-        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("org_id", sa.Uuid(), nullable=False),
-        sa.Column("automation_id", sa.Uuid(), nullable=False),
+        sa.Column("factory_id", sa.Uuid(), nullable=False),
+        sa.Column("automation_id", sa.Uuid(), nullable=True),
         sa.Column("run_id", sa.Uuid(), nullable=True),
-        sa.Column("key", sa.String(length=100), nullable=False),
-        sa.Column("value_type", sa.String(length=20), nullable=False),
+        sa.Column("source", sa.String(20), nullable=False, server_default="agent"),
+        sa.Column("key", sa.String(100), nullable=False),
+        sa.Column("value_type", sa.String(20), nullable=False),
         sa.Column("numeric_value", sa.Float(), nullable=True),
         sa.Column("text_value", sa.Text(), nullable=True),
         sa.Column("boolean_value", sa.Boolean(), nullable=True),
@@ -41,69 +62,29 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
-        sa.ForeignKeyConstraint(
-            ["automation_id"], ["automations.id"], ondelete="CASCADE"
+        sa.CheckConstraint(
+            "source IN ('agent', 'user', 'platform')", name="outcome_source"
         ),
-        sa.ForeignKeyConstraint(
-            ["run_id"], ["automation_runs.id"], ondelete="SET NULL"
+        sa.CheckConstraint(
+            "length(key) BETWEEN 1 AND 100 AND "
+            "trim(key, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            "0123456789_.-') = ''",
+            name="outcome_key",
         ),
-        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(typed_check, name="outcome_typed_value"),
     )
-    op.create_index(
-        "ix_automation_outcome_values_automation_key_created",
-        "automation_outcome_values",
-        ["automation_id", "key", "created_at"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_automation_outcome_values_org_created",
-        "automation_outcome_values",
-        ["org_id", "created_at"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_automation_outcome_values_org_automation_created",
-        "automation_outcome_values",
-        ["org_id", "automation_id", "created_at"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_automation_outcome_values_type_created",
-        "automation_outcome_values",
-        ["automation_id", "key", "value_type", "created_at"],
-        unique=False,
-    )
-    where = "numeric_value IS NOT NULL"
-    op.create_index(
-        "ix_automation_outcome_values_numeric",
-        "automation_outcome_values",
-        ["automation_id", "key", "created_at", "numeric_value"],
-        unique=False,
-        postgresql_where=sa.text(where),
-        sqlite_where=sa.text(where),
-    )
+    for name, fields in (
+        ("ix_outcomes_factory_key_created", ["factory_id", "key", "created_at"]),
+        ("ix_outcomes_org_factory_created", ["org_id", "factory_id", "created_at"]),
+        (
+            "ix_outcomes_factory_automation_created",
+            ["factory_id", "automation_id", "created_at"],
+        ),
+        ("ix_outcomes_run_id", ["run_id"]),
+    ):
+        op.create_index(name, "automation_outcome_values", fields)
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_automation_outcome_values_numeric",
-        table_name="automation_outcome_values",
-    )
-    op.drop_index(
-        "ix_automation_outcome_values_type_created",
-        table_name="automation_outcome_values",
-    )
-    op.drop_index(
-        "ix_automation_outcome_values_org_automation_created",
-        table_name="automation_outcome_values",
-    )
-    op.drop_index(
-        "ix_automation_outcome_values_org_created",
-        table_name="automation_outcome_values",
-    )
-    op.drop_index(
-        "ix_automation_outcome_values_automation_key_created",
-        table_name="automation_outcome_values",
-    )
     op.drop_table("automation_outcome_values")
-    op.drop_column("automations", "outcome_parsers")
+    op.drop_column("factories", "outcome_keys")

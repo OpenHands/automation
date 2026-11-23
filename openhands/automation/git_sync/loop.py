@@ -76,10 +76,6 @@ from openhands.automation.models import (
 from openhands.automation.observability_associations import (
     validate_observability_associations,
 )
-from openhands.automation.outcome_values import (
-    OutcomeParserDefinition,
-    validate_outcome_parsers,
-)
 from openhands.automation.schemas import (
     Trigger,
     continue_conversation_keep_alive,
@@ -538,21 +534,6 @@ async def _validate_and_resolve_fields(
     observability_associations = validate_observability_associations(
         fields.get("observability_associations")
     )
-    raw_outcome_parsers = fields.get("outcome_parsers")
-    outcome_parsers = None
-    if raw_outcome_parsers is not None:
-        if not isinstance(raw_outcome_parsers, list):
-            raise ValueError("automation.yaml 'outcome_parsers' must be a list")
-        outcome_parsers = [
-            parser.model_dump()
-            for parser in validate_outcome_parsers(
-                [
-                    OutcomeParserDefinition.model_validate(parser)
-                    for parser in raw_outcome_parsers
-                ]
-            )
-            or []
-        ]
     # Export omits an empty list, so a missing key means no tags.
     raw_tags = fields.get("tags") or []
     if not isinstance(raw_tags, list):
@@ -633,7 +614,6 @@ async def _validate_and_resolve_fields(
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
         "observability_associations": observability_associations,
-        "outcome_parsers": outcome_parsers,
         "tags": tags,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,

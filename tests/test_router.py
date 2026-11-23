@@ -14,14 +14,11 @@ import httpx
 import pytest
 from sqlalchemy import delete, func, select
 
-from openhands.automation.app import app
-from openhands.automation.kv_router import KVAuthContext, get_kv_auth_context
 from openhands.automation.models import (
     Automation,
     AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationGitSyncState,
-    AutomationOutcomeValue,
     AutomationRun,
     AutomationRunAsKind,
     AutomationRunStatus,
@@ -4326,158 +4323,6 @@ class TestCompleteRun:
         assert run.run_metadata["finish_tool_response"]["status"] == "success"
 
         assert run.status == AutomationRunStatus.COMPLETED
-
-    async def test_submit_outcome_parses_configured_payload(
-        self, async_client, async_session
-    ):
-        automation = Automation(
-            user_id=TEST_USER_ID,
-            org_id=TEST_ORG_ID,
-            name="Outcome Automation",
-            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
-            tarball_path="s3://bucket/code.tar.gz",
-            entrypoint="uv run script.py",
-            outcome_parsers=[
-                {
-                    "key": "code_reviews_created",
-                    "expression": "metrics.code_reviews_created",
-                    "value_type": "number",
-                },
-                {
-                    "key": "reviewed",
-                    "expression": "metrics.reviewed",
-                    "value_type": "boolean",
-                },
-            ],
-        )
-        async_session.add(automation)
-        await async_session.commit()
-
-        run = AutomationRun(
-            automation_id=automation.id,
-            status=AutomationRunStatus.RUNNING,
-        )
-        async_session.add(run)
-        await async_session.commit()
-
-        async def override_outcome_auth():
-            return KVAuthContext(
-                automation_id=automation.id,
-                auth_method="kv_token",
-                run_id=run.id,
-            )
-
-        app.dependency_overrides[get_kv_auth_context] = override_outcome_auth
-        response = await async_client.post(
-            "/api/automation/v1/outcomes",
-            json={
-                "payload": {"metrics": {"code_reviews_created": 3, "reviewed": True}}
-            },
-        )
-
-        assert response.status_code == 201
-        assert response.json() == {"stored": 2}
-        result = await async_session.execute(
-            select(AutomationOutcomeValue).where(
-                AutomationOutcomeValue.run_id == run.id
-            )
-        )
-        values_by_key = {value.key: value for value in result.scalars()}
-        assert values_by_key["code_reviews_created"].numeric_value == 3
-        assert values_by_key["reviewed"].boolean_value is True
-
-        bad_response = await async_client.post(
-            "/api/automation/v1/outcomes",
-            json={"payload": {"metrics": {"reviewed": True}}},
-        )
-        assert bad_response.status_code == 422
-        count = await async_session.scalar(
-            select(func.count())
-            .select_from(AutomationOutcomeValue)
-            .where(AutomationOutcomeValue.run_id == run.id)
-        )
-        assert count == 2
-
-        list_response = await async_client.get(
-            f"/api/automation/v1/{automation.id}/outcomes/values",
-            params={"key": "code_reviews_created"},
-        )
-        assert list_response.status_code == 200
-        assert list_response.json()["total"] == 1
-        assert list_response.json()["values"][0]["value"] == 3
-
-        aggregate_response = await async_client.get(
-            f"/api/automation/v1/{automation.id}/outcomes/aggregate",
-            params={"key": "code_reviews_created", "operation": "sum"},
-        )
-        assert aggregate_response.status_code == 200
-        assert aggregate_response.json()["value"] == 3
-        assert aggregate_response.json()["count"] == 1
-
-    async def test_submit_outcome_rejects_nested_payload_without_parsers(
-        self, async_client, async_session
-    ):
-        automation = Automation(
-            user_id=TEST_USER_ID,
-            org_id=TEST_ORG_ID,
-            name="Flat Outcome Automation",
-            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
-            tarball_path="s3://bucket/code.tar.gz",
-            entrypoint="uv run script.py",
-        )
-        async_session.add(automation)
-        await async_session.commit()
-
-        async def override_outcome_auth():
-            return KVAuthContext(automation_id=automation.id, auth_method="kv_token")
-
-        app.dependency_overrides[get_kv_auth_context] = override_outcome_auth
-        response = await async_client.post(
-            "/api/automation/v1/outcomes",
-            json={"payload": {"nested": {"count": 1}}},
-        )
-
-        assert response.status_code == 422
-        assert (
-            "must be a string, finite number, or boolean" in response.json()["detail"]
-        )
-
-    async def test_outcome_values_are_org_scoped(self, async_client, async_session):
-        automation = Automation(
-            user_id=OTHER_USER_ID,
-            org_id=OTHER_ORG_ID,
-            name="Other Org Automation",
-            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
-            tarball_path="s3://bucket/code.tar.gz",
-            entrypoint="uv run script.py",
-        )
-        async_session.add(automation)
-        await async_session.flush()
-        run = AutomationRun(
-            automation_id=automation.id,
-            status=AutomationRunStatus.COMPLETED,
-            completed_at=utcnow(),
-        )
-        async_session.add(run)
-        await async_session.flush()
-        async_session.add(
-            AutomationOutcomeValue(
-                org_id=OTHER_ORG_ID,
-                automation_id=automation.id,
-                run_id=run.id,
-                key="issues_triaged",
-                value_type="number",
-                numeric_value=1,
-                created_at=utcnow(),
-            )
-        )
-        await async_session.commit()
-
-        response = await async_client.get(
-            f"/api/automation/v1/{automation.id}/outcomes/values"
-        )
-
-        assert response.status_code == 404
 
     async def test_complete_run_saves_conversation_id_for_failed_runs(
         self, async_client, async_session

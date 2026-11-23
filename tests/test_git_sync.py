@@ -2185,7 +2185,6 @@ class TestTarballUploadLifecycle:
                     "model: null",
                     "name: My First Automation",
                     "observability_associations: null",
-                    "outcome_parsers: null",
                     "preset_metadata: null",
                     "prompt: null",
                     "setup_script_path: null",
@@ -2200,7 +2199,6 @@ class TestTarballUploadLifecycle:
                     "model: null",
                     "name: My First Automation",
                     "observability_associations: null",
-                    "outcome_parsers: null",
                     "preset_metadata: null",
                     "prompt: null",
                     "setup_script_path: null",
@@ -2720,7 +2718,7 @@ class TestImportedAutomationDefaults:
         origin,
         caplog,
     ):
-        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger="automation.git_sync")
         await self._push_hand_written(origin)
         await self._cycle(sqlite_session_factory, git_settings, service_settings)
         assert "Repo Writer <writer@example.com>" in caplog.text

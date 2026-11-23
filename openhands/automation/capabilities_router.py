@@ -77,6 +77,7 @@ _STATIC_FEATURES = (
     "customTarball",
     # Factories can be created, and automations created in or moved into one.
     "factories",
+    "outcomes",
     "mcpTools",
     "presetPlugin",
     "presetPrompt",

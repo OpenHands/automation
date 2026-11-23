@@ -10,6 +10,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     Float,
@@ -95,6 +96,9 @@ class Factory(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    outcome_keys: Mapped[dict[str, str]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -174,10 +178,6 @@ class Automation(Base):
     # metadata names; values are JMESPath expressions evaluated against the
     # triggering event payload when an event run is created.
     observability_associations: Mapped[dict[str, str] | None] = mapped_column(
-        JSON, nullable=True
-    )
-
-    outcome_parsers: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON, nullable=True
     )
 
@@ -285,15 +285,11 @@ class AutomationOutcomeValue(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    automation_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
-        ForeignKey("automations.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    run_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid,
-        ForeignKey("automation_runs.id", ondelete="SET NULL"),
-        nullable=True,
+    factory_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    automation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="agent", server_default="agent"
     )
     key: Mapped[str] = mapped_column(String(100), nullable=False)
     value_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -303,7 +299,9 @@ class AutomationOutcomeValue(Base):
     datetime_value: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    json_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    json_value: Mapped[Any | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -312,35 +310,48 @@ class AutomationOutcomeValue(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "source IN ('agent', 'user', 'platform')", name="outcome_source"
+        ),
+        CheckConstraint(
+            "length(key) BETWEEN 1 AND 100 AND "
+            "trim(key, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            "0123456789_.-') = ''",
+            name="outcome_key",
+        ),
+        CheckConstraint(
+            " OR ".join(
+                f"(value_type = '{kind}' AND "
+                + " AND ".join(
+                    f"{column} IS {'NOT ' if column == selected else ''}NULL"
+                    for column in (
+                        "numeric_value",
+                        "text_value",
+                        "boolean_value",
+                        "datetime_value",
+                        "json_value",
+                    )
+                )
+                + ")"
+                for kind, selected in (
+                    ("number", "numeric_value"),
+                    ("string", "text_value"),
+                    ("boolean", "boolean_value"),
+                    ("datetime", "datetime_value"),
+                    ("json", "json_value"),
+                )
+            ),
+            name="outcome_typed_value",
+        ),
+        Index("ix_outcomes_factory_key_created", "factory_id", "key", "created_at"),
+        Index("ix_outcomes_org_factory_created", "org_id", "factory_id", "created_at"),
         Index(
-            "ix_automation_outcome_values_automation_key_created",
+            "ix_outcomes_factory_automation_created",
+            "factory_id",
             "automation_id",
-            "key",
             "created_at",
         ),
-        Index("ix_automation_outcome_values_org_created", "org_id", "created_at"),
-        Index(
-            "ix_automation_outcome_values_org_automation_created",
-            "org_id",
-            "automation_id",
-            "created_at",
-        ),
-        Index(
-            "ix_automation_outcome_values_type_created",
-            "automation_id",
-            "key",
-            "value_type",
-            "created_at",
-        ),
-        Index(
-            "ix_automation_outcome_values_numeric",
-            "automation_id",
-            "key",
-            "created_at",
-            "numeric_value",
-            postgresql_where=(numeric_value.isnot(None)),
-            sqlite_where=(numeric_value.isnot(None)),
-        ),
+        Index("ix_outcomes_run_id", "run_id"),
     )
 
 

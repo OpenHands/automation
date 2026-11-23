@@ -66,7 +66,6 @@ from openhands.automation.observability import (
     inject_trace_context,
     span,
 )
-from openhands.automation.outcome_values import build_outcome_payload_schema
 from openhands.automation.plugin_secrets import PluginSourceSecrets
 from openhands.automation.plugin_specs import (
     PluginSpecError,
@@ -1327,17 +1326,25 @@ async def _execute_run(
     # disabled service-wide.
     kv_config = get_config().kv
     if kv_config.kv_secret:
-        scoped_token = create_kv_token(
+        env_vars["AUTOMATION_KV_TOKEN"] = create_kv_token(
             secret=kv_config.kv_secret,
             automation_id=automation.id,
             run_id=run.id,
         )
-        env_vars["AUTOMATION_KV_TOKEN"] = scoped_token
-        env_vars["AUTOMATION_OUTCOME_URL"] = (
-            f"{settings.resolved_base_url.rstrip('/')}/v1/outcomes"
+
+    # A run of a factory's automation gets a token naming its factory. Local
+    # mode has no OpenHands server to verify the token, and without the service
+    # key there is nothing to sign it with. The run starts either way.
+    if automation.factory_id and settings.service_key and not settings.is_local_mode:
+        env_vars["AUTOMATION_FACTORY_TOKEN"] = create_factory_token(
+            settings.service_key,
+            org_id=automation.org_id,
+            factory_id=automation.factory_id,
+            automation_id=automation.id,
+            automation_name=automation.name,
+            run_id=run.id,
+            expires_in=timedelta(seconds=settings.factory_token_ttl_seconds),
         )
-        if schema := build_outcome_payload_schema(automation.outcome_parsers):
-            env_vars["AUTOMATION_OUTCOME_SCHEMA"] = json.dumps(schema)
 
     # A run of a factory's automation gets a token naming its factory. Local
     # mode has no OpenHands server to verify the token, and without the service
