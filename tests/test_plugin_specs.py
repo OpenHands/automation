@@ -476,6 +476,9 @@ async def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monke
             ),
             "setup.sh": "#!/usr/bin/env bash\n",
             "setup.py": "",
+            "outcome_prompt.py": (
+                "def outcome_context_section(environ):\n    return None\n"
+            ),
         },
     )
 
@@ -491,6 +494,7 @@ async def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monke
         main_file = tar.extractfile("main.py")
         assert main_file is not None
         assert main_file.read().decode() == sentinel_main
+        assert "outcome_prompt.py" in tar.getnames()
 
 
 def test_conversation_runner_rejects_missing_plugin_command(tmp_path):

@@ -97,6 +97,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from outcome_prompt import outcome_context_section, outcome_secret_env
+
 
 def _detect_execution_mode(environ) -> tuple[str, str]:
     """Return ("cloud" | "local", the signal that decided it).
@@ -672,6 +674,9 @@ More activity arrived on the same subject while this run was queued:
 
 {follow_ups}""")
 
+    if outcome_section := outcome_context_section(os.environ):
+        context_sections.append(outcome_section)
+
     # Prepend context sections to the user prompt
     if context_sections:
         context_block = "\n\n".join(context_sections)
@@ -850,6 +855,9 @@ More activity arrived on the same subject while this run was queued:
     threading.Thread(target=_phase_poster, name="phase-poster", daemon=True).start()
 
     cost = None
+    if outcome_env := outcome_secret_env(os.environ):
+        conversation.update_secrets(outcome_env)
+
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)

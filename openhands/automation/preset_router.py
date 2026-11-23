@@ -167,6 +167,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
             "setup.py": SHARED_SETUP_PY.read_text(),
             "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
+            "outcome_prompt.py": (PRESETS_DIR / "outcome_prompt.py").read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -183,6 +184,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
             "setup.py": SHARED_SETUP_PY.read_text(),
             "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
+            "outcome_prompt.py": (PRESETS_DIR / "outcome_prompt.py").read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
@@ -395,6 +397,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "outcome_prompt.py", preset_files["outcome_prompt.py"])
         _add_file_to_tar(
             tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
         )
@@ -1159,6 +1162,7 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "outcome_prompt.py", preset_files["outcome_prompt.py"])
         _add_file_to_tar(
             tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
         )

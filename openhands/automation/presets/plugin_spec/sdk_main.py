@@ -59,6 +59,8 @@ import os
 import sys
 import uuid
 
+from outcome_prompt import outcome_secret_env
+
 
 def _detect_execution_mode(environ) -> tuple[str, str]:
     """Return ("cloud" | "local", the signal that decided it).
@@ -340,6 +342,8 @@ with workspace_ctx as workspace:
         session_url = f"{api_url}/canvas/conversations/{conversation.id}"
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
+    if outcome_env := outcome_secret_env(os.environ):
+        conversation.update_secrets(outcome_env)
 
     try:
         print("  sending prompt")
