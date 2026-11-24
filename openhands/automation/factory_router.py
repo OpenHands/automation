@@ -6,7 +6,7 @@ factories themselves.
 """
 
 import uuid
-from typing import Literal
+from typing import Literal, cast
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -19,10 +19,16 @@ from openhands.automation.auth import (
     require_permission,
 )
 from openhands.automation.db import get_session, using_sqlite
-from openhands.automation.models import Automation, Factory
+from openhands.automation.models import Automation, AutomationOutcomeValue, Factory
+from openhands.automation.outcome_values import (
+    MAX_OUTCOME_KEYS,
+    OutcomeValueType,
+    validate_outcome_key,
+)
 from openhands.automation.schemas import (
     FactoryCreate,
     FactoryListResponse,
+    FactoryOutcomeKeyUpdate,
     FactoryResponse,
     FactoryUpdate,
 )
@@ -59,13 +65,14 @@ def _to_response(factory: Factory, automation_count: int) -> FactoryResponse:
     return FactoryResponse(
         id=factory.id,
         name=factory.name,
+        outcome_keys=cast(dict[str, OutcomeValueType], factory.outcome_keys),
         automation_count=automation_count,
         created_at=factory.created_at,
         updated_at=factory.updated_at,
     )
 
 
-async def _get_org_factory(
+async def get_org_factory(
     session: AsyncSession,
     org_id: uuid.UUID,
     factory_id: uuid.UUID,
@@ -91,6 +98,32 @@ async def _get_org_factory(
     return factory
 
 
+async def factory_outcome_key_in_use(
+    session: AsyncSession, factory_id: uuid.UUID, key: str
+) -> bool:
+    return bool(
+        await session.scalar(
+            select(
+                exists().where(
+                    AutomationOutcomeValue.factory_id == factory_id,
+                    AutomationOutcomeValue.key == key,
+                )
+            )
+        )
+    )
+
+
+def _outcome_keys(factory: Factory) -> dict[str, str]:
+    return dict(factory.outcome_keys or {})
+
+
+def _key_conflict(key: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"Outcome key {key!r} is already used by stored values",
+    )
+
+
 async def authorize_factory_change(
     session: AsyncSession, user: AuthenticatedUser, factory_id: uuid.UUID | None
 ) -> None:
@@ -109,7 +142,7 @@ async def authorize_factory_change(
             detail="Only admins and owners can change an automation's factory",
         )
     if factory_id is not None:
-        await _get_org_factory(session, user.org_id, factory_id)
+        await get_org_factory(session, user.org_id, factory_id)
 
 
 async def authorize_factory_for_create(
@@ -171,7 +204,7 @@ async def lock_factory_for_assignment(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Factory not found"
             )
     else:
-        await _get_org_factory(session, org_id, factory_id, lock="key_share")
+        await get_org_factory(session, org_id, factory_id, lock="key_share")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -181,7 +214,11 @@ async def create_factory(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
     """Create a factory. A fresh install has none."""
-    factory = Factory(org_id=user.org_id, name=data.name)
+    factory = Factory(
+        org_id=user.org_id,
+        name=data.name,
+        outcome_keys={key: str(value) for key, value in data.outcome_keys.items()},
+    )
     session.add(factory)
     await session.flush()
     await session.refresh(factory)
@@ -222,7 +259,7 @@ async def get_factory(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
     """Get a factory."""
-    factory = await _get_org_factory(session, user.org_id, factory_id)
+    factory = await get_org_factory(session, user.org_id, factory_id)
     count = await _count_live(session, factory.id)
     return _to_response(factory, count)
 
@@ -235,12 +272,75 @@ async def rename_factory(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
     """Rename a factory."""
-    factory = await _get_org_factory(session, user.org_id, factory_id)
+    factory = await get_org_factory(session, user.org_id, factory_id)
     factory.name = data.name
     await session.flush()
     await session.refresh(factory)
     count = await _count_live(session, factory.id)
     return _to_response(factory, count)
+
+
+@router.get("/{factory_id}/outcome-keys")
+async def get_factory_outcome_keys(
+    factory_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> dict[str, OutcomeValueType]:
+    factory = await get_org_factory(session, user.org_id, factory_id)
+    return cast(dict[str, OutcomeValueType], factory.outcome_keys)
+
+
+@router.put("/{factory_id}/outcome-keys/{key}")
+async def put_factory_outcome_key(
+    factory_id: uuid.UUID,
+    key: str,
+    data: FactoryOutcomeKeyUpdate,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> FactoryResponse:
+    validate_outcome_key(key)
+    factory = await get_org_factory(session, user.org_id, factory_id, lock="update")
+    keys = _outcome_keys(factory)
+    current_type = keys.get(key)
+    requested_type = str(data.value_type)
+    if (
+        current_type is not None
+        and current_type != requested_type
+        and await factory_outcome_key_in_use(session, factory.id, key)
+    ):
+        raise _key_conflict(key)
+    if current_type is None and len(keys) >= MAX_OUTCOME_KEYS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Too many outcome keys"
+        )
+    keys[key] = requested_type
+    factory.outcome_keys = keys
+    await session.flush()
+    await session.refresh(factory)
+    count = await _count_live(session, factory.id)
+    return _to_response(factory, count)
+
+
+@router.delete(
+    "/{factory_id}/outcome-keys/{key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_factory_outcome_key(
+    factory_id: uuid.UUID,
+    key: str,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> None:
+    validate_outcome_key(key)
+    factory = await get_org_factory(session, user.org_id, factory_id, lock="update")
+    keys = _outcome_keys(factory)
+    if key not in keys:
+        return
+    if await factory_outcome_key_in_use(session, factory.id, key):
+        raise _key_conflict(key)
+    keys.pop(key)
+    factory.outcome_keys = keys
+    await session.flush()
 
 
 @router.delete("/{factory_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -258,7 +358,7 @@ async def delete_factory(
     what it keeps for the factory; that notification never blocks or undoes the
     delete.
     """
-    factory = await _get_org_factory(session, user.org_id, factory_id, lock="update")
+    factory = await get_org_factory(session, user.org_id, factory_id, lock="update")
 
     # Loaded and set through the ORM, not left to the foreign key's SET NULL, so
     # each detach reaches the automation change audit.

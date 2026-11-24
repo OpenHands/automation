@@ -39,6 +39,7 @@ from openhands.automation.models import (
     Automation,
     AutomationChangeEvent,
     AutomationGitSyncState,
+    AutomationOutcomeValue,
     Factory,
 )
 from openhands.automation.utils import utcnow
@@ -973,3 +974,66 @@ async def test_git_sync_update_leaves_the_factory_unchanged(
 
     assert automation.name == "Renamed in git"
     assert automation.factory_id == factory.id
+
+
+# --- outcome keys ---
+
+
+async def test_outcome_keys_are_managed_as_subresource(async_client):
+    created = await _create_factory(async_client, "Software Factory")
+    url = f"{FACTORIES}/{created['id']}"
+
+    assert (await async_client.get(f"{url}/outcome-keys")).json() == {}
+
+    added = await async_client.put(f"{url}/outcome-keys/score", json={"type": "number"})
+    assert added.status_code == 200, added.text
+    assert added.json()["outcome_keys"] == {"score": "number"}
+    assert (await async_client.get(f"{url}/outcome-keys")).json() == {"score": "number"}
+
+    renamed = await async_client.patch(url, json={"name": "Renamed"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Renamed"
+    assert renamed.json()["outcome_keys"] == {"score": "number"}
+
+    rejected = await async_client.patch(
+        url, json={"name": "Renamed", "outcome_keys": {"score": "string"}}
+    )
+    assert rejected.status_code == 422, rejected.text
+
+    removed = await async_client.delete(f"{url}/outcome-keys/score")
+    assert removed.status_code == 204, removed.text
+    assert (await async_client.get(f"{url}/outcome-keys")).json() == {}
+
+
+async def test_used_outcome_key_cannot_be_retyped_or_removed(
+    async_client, async_session
+):
+    created = await _create_factory(
+        async_client, "Software Factory", outcome_keys={"score": "number"}
+    )
+    factory_id = uuid.UUID(created["id"])
+    automation = _automation_row("Member", factory_id=factory_id)
+    async_session.add(automation)
+    await async_session.flush()
+    async_session.add(
+        AutomationOutcomeValue(
+            org_id=TEST_ORG_ID,
+            factory_id=factory_id,
+            automation_id=automation.id,
+            source="user",
+            key="score",
+            value_type="number",
+            numeric_value=1.0,
+        )
+    )
+    await async_session.commit()
+    url = f"{FACTORIES}/{created['id']}/outcome-keys/score"
+
+    retyped = await async_client.put(url, json={"type": "string"})
+    removed = await async_client.delete(url)
+
+    assert retyped.status_code == 409, retyped.text
+    assert removed.status_code == 409, removed.text
+    assert (
+        await async_client.get(f"{FACTORIES}/{created['id']}/outcome-keys")
+    ).json() == {"score": "number"}

@@ -10,6 +10,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     Float,
@@ -95,6 +96,9 @@ class Factory(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    outcome_keys: Mapped[dict[str, str]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -271,6 +275,83 @@ class Automation(Base):
         "AutomationDisableEvent",
         back_populates="automation",
         cascade="all, delete-orphan",
+    )
+
+
+class AutomationOutcomeValue(Base):
+    """One typed automation outcome value submitted by a run or agent."""
+
+    __tablename__ = "automation_outcome_values"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    factory_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    automation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="agent", server_default="agent"
+    )
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    numeric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    text_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    boolean_value: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    datetime_value: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    json_value: Mapped[Any | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('agent', 'user', 'platform')", name="outcome_source"
+        ),
+        CheckConstraint(
+            "length(key) BETWEEN 1 AND 100 AND "
+            "trim(key, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            "0123456789_.-') = ''",
+            name="outcome_key",
+        ),
+        CheckConstraint(
+            " OR ".join(
+                f"(value_type = '{kind}' AND "
+                + " AND ".join(
+                    f"{column} IS {'NOT ' if column == selected else ''}NULL"
+                    for column in (
+                        "numeric_value",
+                        "text_value",
+                        "boolean_value",
+                        "datetime_value",
+                        "json_value",
+                    )
+                )
+                + ")"
+                for kind, selected in (
+                    ("number", "numeric_value"),
+                    ("string", "text_value"),
+                    ("boolean", "boolean_value"),
+                    ("datetime", "datetime_value"),
+                    ("json", "json_value"),
+                )
+            ),
+            name="outcome_typed_value",
+        ),
+        Index("ix_outcomes_factory_key_created", "factory_id", "key", "created_at"),
+        Index("ix_outcomes_org_factory_created", "org_id", "factory_id", "created_at"),
+        Index(
+            "ix_outcomes_factory_automation_created",
+            "factory_id",
+            "automation_id",
+            "created_at",
+        ),
+        Index("ix_outcomes_run_id", "run_id"),
     )
 
 

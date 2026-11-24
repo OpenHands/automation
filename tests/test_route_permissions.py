@@ -22,6 +22,8 @@ MANAGE_ONLY_ROUTES = {
     ("POST", "/api/automation/v1/factories"),
     ("PATCH", "/api/automation/v1/factories/{factory_id}"),
     ("DELETE", "/api/automation/v1/factories/{factory_id}"),
+    ("PUT", "/api/automation/v1/factories/{factory_id}/outcome-keys/{key}"),
+    ("DELETE", "/api/automation/v1/factories/{factory_id}/outcome-keys/{key}"),
     ("PUT", "/api/automation/v1/git-sync/config"),
     ("POST", "/api/automation/v1/git-sync/check"),
     ("POST", "/api/automation/v1/git-sync/sync"),

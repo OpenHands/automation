@@ -216,6 +216,7 @@ class TestGetCapabilities:
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
         assert "factories" in body["features"]
+        assert "outcomes" in body["features"]
         assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
         assert "pluginConfigUpdate" in body["features"]
@@ -279,6 +280,25 @@ class TestGetCapabilities:
         body = response.json()
         assert body["valid"] is True
         assert body["sampleEventMatched"] is True
+
+    async def test_outcomes_are_advertised_only_when_kv_is_configured(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        monkeypatch.delenv("AUTOMATION_KV_SECRET", raising=False)
+        clear_config_cache()
+
+        body = (await async_client.get(CAPABILITIES_URL)).json()
+
+        assert "kvStore" not in body["features"]
+        assert "outcomes" not in body["features"]
+
+        monkeypatch.setenv("AUTOMATION_KV_SECRET", "kv-secret")
+        clear_config_cache()
+
+        body = (await async_client.get(CAPABILITIES_URL)).json()
+
+        assert "kvStore" in body["features"]
+        assert "outcomes" in body["features"]
 
     async def test_deployment_without_webhook_secret_withdraws_event_support(
         self, async_client, ready_deployment, monkeypatch

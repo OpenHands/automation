@@ -140,7 +140,7 @@ async def get_capabilities(
     if webhook_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
-        features.append("kvStore")
+        features.extend(["kvStore", "outcomes"])
 
     return CapabilitiesResponse(
         ready=True,

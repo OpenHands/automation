@@ -29,6 +29,11 @@ from openhands.automation.models import (
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
+from openhands.automation.outcome_values import (
+    MAX_OUTCOME_KEYS,
+    OutcomeValueType,
+    validate_outcome_key,
+)
 from openhands.automation.providers import (
     DEFAULT_VERIFIER,
     is_builtin_source,
@@ -1376,6 +1381,18 @@ class FactoryCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=255)
+    outcome_keys: dict[str, OutcomeValueType] = Field(default_factory=dict)
+
+    @field_validator("outcome_keys")
+    @classmethod
+    def validate_outcome_keys(
+        cls, value: dict[str, OutcomeValueType]
+    ) -> dict[str, OutcomeValueType]:
+        if len(value) > MAX_OUTCOME_KEYS:
+            raise ValueError(f"At most {MAX_OUTCOME_KEYS} outcome keys are allowed")
+        for key in value:
+            validate_outcome_key(key)
+        return value
 
     @field_validator("name")
     @classmethod
@@ -1386,13 +1403,34 @@ class FactoryCreate(BaseModel):
         return stripped
 
 
-class FactoryUpdate(FactoryCreate):
+class FactoryUpdate(BaseModel):
     """Request to rename a factory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+
+class FactoryOutcomeKeyUpdate(BaseModel):
+    """Request to add or update a factory outcome key."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    value_type: OutcomeValueType = Field(alias="type")
 
 
 class FactoryResponse(BaseModel):
     id: uuid.UUID
     name: str
+    outcome_keys: dict[str, OutcomeValueType] = Field(default_factory=dict)
     automation_count: int = Field(
         ..., description="Live (not soft-deleted) automations in this factory"
     )
