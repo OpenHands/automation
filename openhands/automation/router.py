@@ -127,6 +127,7 @@ from openhands.automation.utils.model_profiles import (
 )
 from openhands.automation.utils.run import (
     create_pending_run,
+    guarded_run_update,
     record_first_run_outcome,
     skip_pending_runs_for_disabled_automation,
 )
@@ -1876,18 +1877,15 @@ async def complete_run(
                 "finish_tool_response": finish_tool_response,
             }
 
-    stmt = (
-        update(AutomationRun)
-        .where(
-            AutomationRun.id == run_id,
-            AutomationRun.status == AutomationRunStatus.RUNNING,
-        )
-        .values(**values)
+    transitioned = await guarded_run_update(
+        session,
+        AutomationRun.id == run_id,
+        expected=(AutomationRunStatus.RUNNING,),
+        values=values,
     )
-    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
 
     reconciled = False
-    if db_result.rowcount == 0:
+    if not transitioned:
         # See the *current* terminal state, not the pre-UPDATE snapshot
         # (the watchdog may have committed FAILED while we held a stale row).
         await session.refresh(run)
@@ -1901,19 +1899,15 @@ async def complete_run(
             # The "Timed out: " prefix is written only by the watchdog, so
             # dispatcher-authored failures and cancellations still 409.
             values["error_detail"] = None
-            reconcile_stmt = (
-                update(AutomationRun)
-                .where(
+            reconciled = bool(
+                await guarded_run_update(
+                    session,
                     AutomationRun.id == run_id,
-                    AutomationRun.status == AutomationRunStatus.FAILED,
                     AutomationRun.error_detail.startswith("Timed out: "),
+                    expected=(AutomationRunStatus.FAILED,),
+                    values=values,
                 )
-                .values(**values)
             )
-            reconcile_result: CursorResult = await session.execute(  # type: ignore[assignment]
-                reconcile_stmt
-            )
-            reconciled = reconcile_result.rowcount > 0
         if not reconciled:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -2126,25 +2120,19 @@ async def cancel_run(
             ),
         )
 
-    now = utcnow()
-    stmt = (
-        update(AutomationRun)
-        .where(
-            AutomationRun.id == run_id,
-            AutomationRun.status.in_(
-                [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
-            ),
-        )
-        .values(
-            status=AutomationRunStatus.CANCELLED,
-            completed_at=now,
-            error_detail="Cancelled by user",
-            status_detail=None,
-        )
+    cancelled = await guarded_run_update(
+        session,
+        AutomationRun.id == run_id,
+        expected=(AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING),
+        values={
+            "status": AutomationRunStatus.CANCELLED,
+            "completed_at": utcnow(),
+            "error_detail": "Cancelled by user",
+            "status_detail": None,
+        },
     )
-    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
 
-    if db_result.rowcount == 0:
+    if not cancelled:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail="Run state changed concurrently, cancellation failed",

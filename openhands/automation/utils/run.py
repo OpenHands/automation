@@ -2,10 +2,11 @@
 
 import logging
 import uuid
+from collections.abc import Collection
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import CursorResult, case, func, select, update
+from sqlalchemy import ColumnElement, CursorResult, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -37,6 +38,37 @@ FIRST_RUN_OUTCOME_STATUSES = (
     AutomationRunStatus.COMPLETED,
     AutomationRunStatus.FAILED,
 )
+
+
+async def guarded_run_update(
+    session: AsyncSession,
+    *where: ColumnElement[bool],
+    expected: Collection[AutomationRunStatus],
+    values: dict[str, Any],
+    synchronize_session: Literal["fetch", False] = "fetch",
+) -> set[uuid.UUID]:
+    """Update the runs matching ``where`` whose status is still in ``expected``.
+
+    Returns the ids of the rows the statement actually changed, read with
+    ``RETURNING`` rather than inferred from an earlier SELECT, so a caller that
+    lost a race to another writer (callback, watchdog, cancel, dispatcher) sees
+    an empty set and must skip the side effects of a transition it did not
+    make. Runs in the caller's session and transaction and never commits: the
+    caller's commit or rollback decides whether the write persists.
+
+    Identity-map objects are synchronized from the returned rows only, so a
+    stale in-memory run is never shown a status the database did not take.
+    ``fetch`` expires attributes set from SQL expressions; a caller that reads
+    its loaded runs after the session closes passes ``False`` instead.
+    """
+    result = await session.execute(
+        update(AutomationRun)
+        .where(*where, AutomationRun.status.in_(tuple(expected)))
+        .values(**values)
+        .returning(AutomationRun.id)
+        .execution_options(synchronize_session=synchronize_session)
+    )
+    return set(result.scalars().all())
 
 
 class DeferredRunRequeueError(RuntimeError):
@@ -170,27 +202,25 @@ async def skip_pending_runs_for_disabled_automation(
     if disabled_detail is not None:
         status_detail["disabled_detail"] = disabled_detail
 
-    filters = [
-        AutomationRun.automation_id == automation_id,
-        AutomationRun.status == AutomationRunStatus.PENDING,
-    ]
+    filters = [AutomationRun.automation_id == automation_id]
     if not include_manual:
         filters.append(
             (AutomationRun.trigger_source.is_(None))
             | (AutomationRun.trigger_source != "manual")
         )
 
-    result: CursorResult = await session.execute(  # type: ignore[assignment]
-        update(AutomationRun)
-        .where(*filters)
-        .values(
-            status=AutomationRunStatus.SKIPPED,
-            completed_at=completed_at,
-            error_detail="Automation disabled",
-            status_detail=status_detail,
-        )
+    skipped = await guarded_run_update(
+        session,
+        *filters,
+        expected=(AutomationRunStatus.PENDING,),
+        values={
+            "status": AutomationRunStatus.SKIPPED,
+            "completed_at": completed_at,
+            "error_detail": "Automation disabled",
+            "status_detail": status_detail,
+        },
     )
-    return result.rowcount or 0
+    return len(skipped)
 
 
 async def create_pending_run(
@@ -590,26 +620,22 @@ async def expire_aged_deferred_runs(
         if not runs:
             return 0
         run_ids = [run.id for run in runs]
-        result = await session.execute(
-            update(AutomationRun)
-            .where(
-                AutomationRun.id.in_(run_ids),
-                AutomationRun.status == AutomationRunStatus.PENDING,
-            )
-            .values(
-                status=AutomationRunStatus.SKIPPED,
-                completed_at=now,
-                deferred_until=None,
-                status_detail=status_detail,
-                subject_released_at=case(
+        updated_ids = await guarded_run_update(
+            session,
+            AutomationRun.id.in_(run_ids),
+            expected=(AutomationRunStatus.PENDING,),
+            values={
+                "status": AutomationRunStatus.SKIPPED,
+                "completed_at": now,
+                "deferred_until": None,
+                "status_detail": status_detail,
+                "subject_released_at": case(
                     (AutomationRun.subject_key.is_not(None), now),
                     else_=AutomationRun.subject_released_at,
                 ),
-            )
-            .returning(AutomationRun.id)
-            .execution_options(synchronize_session=False)
+            },
+            synchronize_session=False,
         )
-        updated_ids = set(result.scalars().all())
         await session.commit()
 
     skipped_runs = [run for run in runs if run.id in updated_ids]
@@ -743,58 +769,54 @@ async def mark_run_terminal(
     status: AutomationRunStatus,
     error: str | None = None,
     status_detail: dict | None = None,
-) -> None:
-    """Mark a run with a terminal status (COMPLETED or FAILED) if still RUNNING.
+) -> bool:
+    """Mark a RUNNING run terminal (COMPLETED, FAILED or SKIPPED) and commit.
 
-    This is a safe wrapper around mark_run_status that:
-    1. Opens a new session
-    2. Re-fetches the run to check current status
-    3. Only updates if the run is still RUNNING (avoids race conditions)
-    4. Commits and handles errors gracefully
+    The status guard is part of the UPDATE itself, so a callback, cancel or
+    watchdog write that commits first is never overwritten. Opens its own
+    session and swallows errors so a dispatch-side failure path cannot raise.
 
-    Args:
-        session_factory: Async session factory
-        run: The run to update (used to get the ID)
-        status: The terminal status to set (COMPLETED or FAILED)
-        error: Optional error message (only used for FAILED status)
-        status_detail: Optional structured lifecycle detail to persist
+    Returns True only when this call made and committed the transition. On
+    False (lost race, run gone, or write failure) the caller must not report
+    the transition: no telemetry. ``run`` is updated in memory only on True.
     """
-    from sqlalchemy import select
+    extra = {"run_id": str(run.id)}
+    if run.automation_id:
+        extra["automation_id"] = str(run.automation_id)
 
-    run_id = str(run.id)
-    automation_id = str(run.automation_id) if run.automation_id else None
-    extra = {"run_id": run_id}
-    if automation_id:
-        extra["automation_id"] = automation_id
+    values: dict[str, Any] = {"status": status, "completed_at": utcnow()}
+    if error and status == AutomationRunStatus.FAILED:
+        values["error_detail"] = error
+    if status_detail is not None:
+        values["status_detail"] = status_detail
+    elif status == AutomationRunStatus.COMPLETED:
+        values["status_detail"] = None
 
     try:
         async with session_factory() as session:
             set_audit_actor(session, SYSTEM_ACTOR)
-            db_result = await session.execute(
-                select(AutomationRun).where(AutomationRun.id == run.id)
+            changed = await guarded_run_update(
+                session,
+                AutomationRun.id == run.id,
+                expected=(AutomationRunStatus.RUNNING,),
+                values=values,
             )
-            db_run = db_result.scalars().first()
-            if db_run and db_run.status == AutomationRunStatus.RUNNING:
-                await mark_run_status(
-                    session,
-                    db_run,
-                    status,
-                    error_detail=error,
-                    status_detail=status_detail,
-                )
-                await session.commit()
-                logger.info("Run marked as %s", status.value, extra=extra)
-                # Dedicated session so a recording failure cannot affect the
-                # already-committed run transition.
-                await record_first_run_outcome(
-                    db_run, status, "dispatch", session_factory=session_factory
-                )
-            else:
+            if not changed:
                 logger.info(
-                    "Run not marked %s (current status: %s)",
-                    status.value,
-                    db_run.status.value if db_run else "not found",
-                    extra=extra,
+                    "Run not marked %s: no longer RUNNING", status.value, extra=extra
                 )
+                return False
+            await session.commit()
     except Exception:
         logger.exception("Failed to mark run as %s", status.value, extra=extra)
+        return False
+
+    for key, value in values.items():
+        setattr(run, key, value)
+    logger.info("Run marked as %s", status.value, extra=extra)
+    # Dedicated session so a recording failure cannot affect the
+    # already-committed run transition.
+    await record_first_run_outcome(
+        run, status, "dispatch", session_factory=session_factory
+    )
+    return True

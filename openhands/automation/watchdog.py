@@ -47,7 +47,10 @@ from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.agent_server import VerificationOutcome
 from openhands.automation.utils.change_events import SYSTEM_ACTOR, set_audit_actor
-from openhands.automation.utils.run import record_first_run_outcome
+from openhands.automation.utils.run import (
+    guarded_run_update,
+    record_first_run_outcome,
+)
 from openhands.automation.utils.run_status_detail import (
     RunStatusDetailKind,
     RunStatusPhase,
@@ -164,6 +167,24 @@ async def _defer_still_running(
     return True
 
 
+async def _mark_running_run_terminal(
+    session: AsyncSession, run: AutomationRun, values: dict
+) -> bool:
+    """Apply a terminal ``values`` write only if the run is still RUNNING.
+
+    Not committed here: ``mark_stale_runs`` commits it together with the
+    cleanup stamp and first-run record written in the same transaction.
+    """
+    return bool(
+        await guarded_run_update(
+            session,
+            AutomationRun.id == run.id,
+            expected=(AutomationRunStatus.RUNNING,),
+            values=values,
+        )
+    )
+
+
 def _loaded_automation(run: AutomationRun) -> Automation | None:
     """Return the parent automation only when it is already loaded."""
     if "automation" in inspect(run).unloaded:
@@ -249,27 +270,23 @@ async def _verify_and_mark_run(
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
         error_detail = f"Timed out: verification failed: {e}"
-        stmt = (
-            update(AutomationRun)
-            .where(
-                AutomationRun.id == run.id,
-                AutomationRun.status == AutomationRunStatus.RUNNING,
-            )
-            .values(
-                status=AutomationRunStatus.FAILED,
-                completed_at=now,
-                error_detail=error_detail,
-                status_detail=run_status_detail_from_exception(
+        marked = await _mark_running_run_terminal(
+            session,
+            run,
+            {
+                "status": AutomationRunStatus.FAILED,
+                "completed_at": now,
+                "error_detail": error_detail,
+                "status_detail": run_status_detail_from_exception(
                     e,
                     phase=RunStatusPhase.VERIFICATION,
                     source="automation_service",
                     operation="verify_run",
                     previous=run.status_detail,
                 ),
-            )
+            },
         )
-        result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
-        if result.rowcount > 0:
+        if marked:
             # The UPDATE above bypasses the ORM object; sync it so telemetry
             # derives run_status/failure_kind from the persisted values.
             run.status = AutomationRunStatus.FAILED
@@ -287,7 +304,7 @@ async def _verify_and_mark_run(
             await record_first_run_outcome(
                 run, AutomationRunStatus.FAILED, "watchdog", session=session
             )
-        return result.rowcount > 0
+        return marked
 
     if verification.outcome in (
         VerificationOutcome.COMPLETED,
@@ -304,18 +321,11 @@ async def _verify_and_mark_run(
                 exit_code,
                 extra=extra,
             )
-            stmt = (
-                update(AutomationRun)
-                .where(
-                    AutomationRun.id == run.id,
-                    AutomationRun.status == AutomationRunStatus.RUNNING,
-                )
-                .values(
-                    status=AutomationRunStatus.COMPLETED,
-                    completed_at=now,
-                    status_detail=None,
-                )
-            )
+            values: dict = {
+                "status": AutomationRunStatus.COMPLETED,
+                "completed_at": now,
+                "status_detail": None,
+            }
 
         # exit_code == -1 or None: Command was killed/timed out by bash service
         elif exit_code is None or exit_code == -1:
@@ -329,29 +339,22 @@ async def _verify_and_mark_run(
                 extra=extra,
             )
             error_detail = f"Timed out: {error_msg}"
-            stmt = (
-                update(AutomationRun)
-                .where(
-                    AutomationRun.id == run.id,
-                    AutomationRun.status == AutomationRunStatus.RUNNING,
-                )
-                .values(
-                    status=AutomationRunStatus.FAILED,
-                    completed_at=now,
-                    error_detail=error_detail,
-                    status_detail=make_run_status_detail(
-                        phase=RunStatusPhase.EXECUTION,
-                        kind=RunStatusDetailKind.TIMEOUT,
-                        detail=error_msg,
-                        transient=False,
-                        source="agent_server",
-                        operation="verify_run",
-                        code=str(exit_code) if exit_code is not None else None,
-                        previous=run.status_detail,
-                        extra={"formatted_detail": error_detail},
-                    ),
-                )
-            )
+            values = {
+                "status": AutomationRunStatus.FAILED,
+                "completed_at": now,
+                "error_detail": error_detail,
+                "status_detail": make_run_status_detail(
+                    phase=RunStatusPhase.EXECUTION,
+                    kind=RunStatusDetailKind.TIMEOUT,
+                    detail=error_msg,
+                    transient=False,
+                    source="agent_server",
+                    operation="verify_run",
+                    code=str(exit_code) if exit_code is not None else None,
+                    previous=run.status_detail,
+                    extra={"formatted_detail": error_detail},
+                ),
+            }
 
         # Any other exit code: Command failed with an actual error
         else:
@@ -367,31 +370,24 @@ async def _verify_and_mark_run(
                 exit_code,
                 extra=extra,
             )
-            stmt = (
-                update(AutomationRun)
-                .where(
-                    AutomationRun.id == run.id,
-                    AutomationRun.status == AutomationRunStatus.RUNNING,
-                )
-                .values(
-                    status=AutomationRunStatus.FAILED,
-                    completed_at=now,
-                    error_detail=error_detail,
-                    status_detail=make_run_status_detail(
-                        phase=RunStatusPhase.EXECUTION,
-                        kind=RunStatusDetailKind.EXECUTION_ERROR,
-                        detail=error_detail,
-                        transient=False,
-                        source="agent_server",
-                        operation="verify_run",
-                        code=str(exit_code),
-                        previous=run.status_detail,
-                    ),
-                )
-            )
+            values = {
+                "status": AutomationRunStatus.FAILED,
+                "completed_at": now,
+                "error_detail": error_detail,
+                "status_detail": make_run_status_detail(
+                    phase=RunStatusPhase.EXECUTION,
+                    kind=RunStatusDetailKind.EXECUTION_ERROR,
+                    detail=error_detail,
+                    transient=False,
+                    source="agent_server",
+                    operation="verify_run",
+                    code=str(exit_code),
+                    previous=run.status_detail,
+                ),
+            }
 
-        result = await session.execute(stmt)  # type: ignore[assignment]
-        if result.rowcount > 0:
+        marked = await _mark_running_run_terminal(session, run, values)
+        if marked:
             run.status = (
                 AutomationRunStatus.COMPLETED
                 if exit_code == 0
@@ -419,7 +415,7 @@ async def _verify_and_mark_run(
                 "watchdog",
                 session=session,
             )
-        if result.rowcount > 0:
+        if marked:
             keep_alive = await _get_automation_keep_alive(session, run)
             if _should_cleanup_after_terminal(run, keep_alive, backend):
                 if settings.sandbox_cleanup_delay_seconds > 0 and run.sandbox_id:
@@ -433,7 +429,7 @@ async def _verify_and_mark_run(
                             e,
                             extra=extra,
                         )
-        return result.rowcount > 0
+        return marked
 
     # Verification failed - execution environment not available or command still running
     if verification.outcome == VerificationOutcome.TRANSIENT_ERROR:
@@ -517,17 +513,14 @@ async def _verify_and_mark_run(
         extra=extra,
     )
 
-    stmt = (
-        update(AutomationRun)
-        .where(
-            AutomationRun.id == run.id,
-            AutomationRun.status == AutomationRunStatus.RUNNING,
-        )
-        .values(
-            status=AutomationRunStatus.FAILED,
-            completed_at=now,
-            error_detail=f"Timed out: {error_msg}",
-            status_detail=make_run_status_detail(
+    marked = await _mark_running_run_terminal(
+        session,
+        run,
+        {
+            "status": AutomationRunStatus.FAILED,
+            "completed_at": now,
+            "error_detail": f"Timed out: {error_msg}",
+            "status_detail": make_run_status_detail(
                 phase=RunStatusPhase.VERIFICATION,
                 kind=(
                     RunStatusDetailKind.ENVIRONMENT_UNAVAILABLE
@@ -548,10 +541,9 @@ async def _verify_and_mark_run(
                     )
                 },
             ),
-        )
+        },
     )
-    result = await session.execute(stmt)  # type: ignore[assignment]
-    if result.rowcount > 0:
+    if marked:
         run.status = AutomationRunStatus.FAILED
         run.error_detail = f"Timed out: {error_msg}"
         await capture_automation_event(
@@ -567,7 +559,7 @@ async def _verify_and_mark_run(
         await record_first_run_outcome(
             run, AutomationRunStatus.FAILED, "watchdog", session=session
         )
-    return result.rowcount > 0
+    return marked
 
 
 async def mark_stale_runs(
