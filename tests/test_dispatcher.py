@@ -3676,6 +3676,7 @@ class TestExecuteRunDerivedConversationId:
                 subject_key=None,
             )
             assert "AUTOMATION_KV_TOKEN" in plain
+            assert "AUTOMATION_OUTCOME_TOKEN" not in plain
             assert "AUTOMATION_OUTCOME_URL" not in plain
             assert "AUTOMATION_OUTCOME_SCHEMA" not in plain
 
@@ -3690,6 +3691,8 @@ class TestExecuteRunDerivedConversationId:
                 outcome_parsers=[parser],
             )
             assert grouped["AUTOMATION_KV_TOKEN"]
+            assert grouped["AUTOMATION_OUTCOME_TOKEN"]
+            assert grouped["AUTOMATION_OUTCOME_TOKEN"] != grouped["AUTOMATION_KV_TOKEN"]
             assert grouped["AUTOMATION_OUTCOME_URL"].endswith("/v1/outcomes")
             assert json.loads(grouped["AUTOMATION_OUTCOME_SCHEMA"])["required"] == [
                 "payload"

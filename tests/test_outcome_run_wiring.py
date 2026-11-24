@@ -17,13 +17,14 @@ from openhands.automation.presets.outcome_prompt import (
 )
 
 
-def test_outcome_env_is_factory_gated_and_uses_existing_run_token():
+def test_outcome_env_is_factory_gated_and_uses_scoped_outcome_token():
     factory_id = uuid.uuid4()
     parser = {"key": "score", "expression": "result.score", "value_type": "number"}
     assert outcome_run_env(None, [parser], "https://api.example", "run-token") == {}
     assert outcome_run_env(factory_id, [parser], "https://api.example", None) == {}
     assert outcome_run_env(factory_id, None, "https://api.example", "run-token") == {
-        "AUTOMATION_OUTCOME_URL": "https://api.example/v1/outcomes"
+        "AUTOMATION_OUTCOME_TOKEN": "run-token",
+        "AUTOMATION_OUTCOME_URL": "https://api.example/v1/outcomes",
     }
     env = outcome_run_env(factory_id, [parser], "https://api.example/", "run-token")
     schema = json.loads(env["AUTOMATION_OUTCOME_SCHEMA"])
@@ -40,7 +41,7 @@ def test_prompt_guidance_is_credential_safe_and_describes_both_workflows(monkeyp
     ).build_user_prompt
     env = {
         "AUTOMATION_OUTCOME_URL": "https://api.example/v1/outcomes",
-        "AUTOMATION_KV_TOKEN": "very-secret",
+        "AUTOMATION_OUTCOME_TOKEN": "very-secret",
         "AUTOMATION_ID": "automation-1",
     }
     assert outcome_context_section({}) is None
@@ -53,7 +54,7 @@ def test_prompt_guidance_is_credential_safe_and_describes_both_workflows(monkeyp
     assert outcome_secret_env({}) == {}
     assert outcome_secret_env(env) == {
         "AUTOMATION_OUTCOME_URL": env["AUTOMATION_OUTCOME_URL"],
-        "AUTOMATION_KV_TOKEN": env["AUTOMATION_KV_TOKEN"],
+        "AUTOMATION_OUTCOME_TOKEN": env["AUTOMATION_OUTCOME_TOKEN"],
     }
     section = outcome_context_section(env)
     assert section is not None
@@ -61,7 +62,7 @@ def test_prompt_guidance_is_credential_safe_and_describes_both_workflows(monkeyp
     assert '"values"' in section
     assert '"payload"' in section
     assert "flat JSON object" in section
-    assert "$AUTOMATION_KV_TOKEN" in section
+    assert "$AUTOMATION_OUTCOME_TOKEN" in section
     env["AUTOMATION_OUTCOME_SCHEMA"] = '{"required":["payload"]}'
     section = outcome_context_section(env)
     assert section is not None

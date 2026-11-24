@@ -189,6 +189,7 @@ class TestKVTokenAuth:
         result = verify_kv_token(TEST_KV_SECRET, token)
         assert result.automation_id == TEST_AUTOMATION_ID
         assert result.run_id == TEST_RUN_ID
+        assert result.scope is None
 
     def test_token_without_run_id_remains_valid(self):
         """Legacy KV tokens without run scope can still access KV state."""
@@ -202,6 +203,22 @@ class TestKVTokenAuth:
         result = verify_kv_token(TEST_KV_SECRET, token)
         assert result.automation_id == TEST_AUTOMATION_ID
         assert result.run_id is None
+
+    def test_scoped_token_verifies_scope(self):
+        """Scoped tokens preserve their scope claim."""
+        from openhands.automation.utils.kv import create_kv_token, verify_kv_token
+
+        token = create_kv_token(
+            secret=TEST_KV_SECRET,
+            automation_id=TEST_AUTOMATION_ID,
+            run_id=TEST_RUN_ID,
+            scope="outcomes",
+        )
+
+        result = verify_kv_token(TEST_KV_SECRET, token)
+        assert result.automation_id == TEST_AUTOMATION_ID
+        assert result.run_id == TEST_RUN_ID
+        assert result.scope == "outcomes"
 
     def test_invalid_token_raises_error(self):
         """Invalid token raises KVTokenError."""

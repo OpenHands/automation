@@ -14,10 +14,6 @@ def build_user_prompt(
     environ: Mapping[str, str] | None = None,
 ) -> str:
     context_sections: list[str] = []
-    if outcome_section := outcome_context_section(
-        os.environ if environ is None else environ
-    ):
-        context_sections.append(outcome_section)
 
     if event_context and "event" in event_context:
         event_json = json.dumps(event_context["event"], indent=2)
@@ -39,6 +35,11 @@ that variable, but your terminal does not inherit it.
 More activity arrived on the same subject while this run was queued:
 
 {follow_ups}""")
+
+    if outcome_section := outcome_context_section(
+        os.environ if environ is None else environ
+    ):
+        context_sections.append(outcome_section)
 
     if not context_sections:
         return base_prompt

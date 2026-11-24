@@ -593,6 +593,24 @@ class TestKVTokenAuthStillWorks:
         assert resp.status_code == 200
         assert resp.json()["keys"] == ["real"]
 
+    async def test_scoped_token_cannot_access_kv_store(
+        self, kv_token_client, test_automation
+    ):
+        """Outcome-scoped tokens are refused by the general KV routes."""
+        token = create_kv_token(
+            secret=TEST_KV_SECRET,
+            automation_id=TEST_AUTOMATION_ID,
+            run_id=TEST_RUN_ID,
+            scope="outcomes",
+        )
+
+        resp = await kv_token_client.get(
+            _KV, headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert resp.status_code == 403
+        assert "does not permit KV store access" in resp.json()["detail"]
+
 
 class TestKVTokenUnknownAutomation:
     """A validly signed token whose automation has no row is refused with 404.

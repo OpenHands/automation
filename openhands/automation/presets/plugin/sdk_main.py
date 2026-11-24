@@ -395,7 +395,10 @@ def _users_me_mcp_config():
     response = httpx.get(
         f"{api_url}/api/v1/users/me",
         params={"expose_secrets": "true"},
-        headers={"Authorization": f"Bearer {api_key}", "X-Session-API-Key": session_key},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "X-Session-API-Key": session_key,
+        },
         timeout=60.0,
     )
     response.raise_for_status()
@@ -901,12 +904,13 @@ More activity arrived on the same subject while this run was queued:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
+    if outcome_env := outcome_secret_env(os.environ):
+        conversation.update_secrets(outcome_env)
+
     report_phase("Agent is working on the task")
     threading.Thread(target=_phase_poster, name="phase-poster", daemon=True).start()
 
     cost = None
-    if outcome_env := outcome_secret_env(os.environ):
-        conversation.update_secrets(outcome_env)
 
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")

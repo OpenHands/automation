@@ -923,11 +923,14 @@ def outcome_run_env(
     factory_id: uuid.UUID | None,
     parsers: list[dict] | None,
     base_url: str,
-    run_token: str | None,
+    outcome_token: str | None,
 ) -> dict[str, str]:
-    if factory_id is None or not run_token:
+    if factory_id is None or not outcome_token:
         return {}
-    env = {"AUTOMATION_OUTCOME_URL": f"{base_url.rstrip('/')}/v1/outcomes"}
+    env = {
+        "AUTOMATION_OUTCOME_TOKEN": outcome_token,
+        "AUTOMATION_OUTCOME_URL": f"{base_url.rstrip('/')}/v1/outcomes",
+    }
     if schema := build_outcome_payload_schema(parsers):
         env["AUTOMATION_OUTCOME_SCHEMA"] = json.dumps(schema)
     return env
@@ -1341,11 +1344,18 @@ async def _execute_run(
     # disabled service-wide.
     kv_config = get_config().kv
     run_token = None
+    outcome_token = None
     if kv_config.kv_secret:
         run_token = create_kv_token(
             secret=kv_config.kv_secret,
             automation_id=automation.id,
             run_id=run.id,
+        )
+        outcome_token = create_kv_token(
+            secret=kv_config.kv_secret,
+            automation_id=automation.id,
+            run_id=run.id,
+            scope="outcomes",
         )
         env_vars["AUTOMATION_KV_TOKEN"] = run_token
     env_vars.update(
@@ -1353,7 +1363,7 @@ async def _execute_run(
             automation.factory_id,
             automation.outcome_parsers,
             settings.resolved_base_url,
-            run_token,
+            outcome_token,
         )
     )
 
