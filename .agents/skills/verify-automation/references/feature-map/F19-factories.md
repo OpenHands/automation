@@ -93,8 +93,8 @@ Preconditions:
   Requires: `F19.create`
   ```sh
   control-automation api GET "/v1/factories/$F1/outcome-keys" --expect 200 --check outcome_keys type object --save F19.outcome-keys/list-empty
-  control-automation api PUT "/v1/factories/$F1/outcome-keys/score" --json '{"type":"number"}' --expect 200 --check outcome_keys.score eq number --save F19.outcome-keys/put
-  control-automation api GET "/v1/factories/$F1/outcome-keys" --expect 200 --check outcome_keys.score eq number
+  control-automation api PUT "/v1/factories/$F1/outcome-keys/score" --json '{"type":"number"}' --expect 200 --check outcome_keys.score.type eq number --save F19.outcome-keys/put
+  control-automation api GET "/v1/factories/$F1/outcome-keys" --expect 200 --check outcome_keys.score.type eq number
   control-automation api DELETE "/v1/factories/$F1/outcome-keys/score" --expect 204 --save F19.outcome-keys/delete
   control-automation api PUT "/v1/factories/$F1/outcome-keys/bad key" --json '{"type":"number"}' --expect 422
   control-automation api PUT "/v1/factories/$F1/outcome-keys/score" --json '{"type":"invalid"}' --expect 422

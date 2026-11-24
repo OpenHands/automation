@@ -55,7 +55,7 @@ async def test_factory_writes_validate_registry_and_keep_history(
     factory = Factory(
         org_id=mock_authenticated_user.org_id,
         name="Review factory",
-        outcome_keys={"score": "number", "approved": "boolean"},
+        outcome_keys={"score": {"type": "number"}, "approved": {"type": "boolean"}},
     )
     async_session.add(factory)
     await async_session.commit()
@@ -129,7 +129,7 @@ async def test_run_token_cannot_impersonate_or_submit_without_factory(
     factory = Factory(
         org_id=mock_authenticated_user.org_id,
         name="Factory",
-        outcome_keys={"score": "number"},
+        outcome_keys={"score": {"type": "number"}},
     )
     async_session.add(factory)
     await async_session.commit()
@@ -183,7 +183,7 @@ async def test_run_row_limit_rejects_additional_submissions(
     factory = Factory(
         org_id=mock_authenticated_user.org_id,
         name="Limited factory",
-        outcome_keys={"score": "number"},
+        outcome_keys={"score": {"type": "number"}},
     )
     async_session.add(factory)
     await async_session.commit()
@@ -226,7 +226,7 @@ async def test_nested_parser_payload_and_typed_values_share_factory_writer(
     factory = Factory(
         org_id=mock_authenticated_user.org_id,
         name="Parser factory",
-        outcome_keys={"score": "number"},
+        outcome_keys={"score": {"type": "number"}},
     )
     async_session.add(factory)
     await async_session.commit()
@@ -266,7 +266,7 @@ async def test_optional_parser_allows_partial_payload_without_storing_missing_fa
     factory = Factory(
         org_id=mock_authenticated_user.org_id,
         name="Partial parser factory",
-        outcome_keys={"score": "number", "passed": "boolean"},
+        outcome_keys={"score": {"type": "number"}, "passed": {"type": "boolean"}},
     )
     async_session.add(factory)
     await async_session.commit()

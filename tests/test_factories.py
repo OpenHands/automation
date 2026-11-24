@@ -402,7 +402,7 @@ async def test_admin_can_edit_an_automation_in_a_factory(async_client):
 
 async def test_parsers_must_match_factory_registry_on_create_and_update(async_client):
     factory = await _create_factory(
-        async_client, "Parser factory", outcome_keys={"score": "number"}
+        async_client, "Parser factory", outcome_keys={"score": {"type": "number"}}
     )
     parser = {"key": "score", "expression": "result.score", "value_type": "number"}
     response = await async_client.post(
@@ -433,7 +433,7 @@ async def test_parsers_must_match_factory_registry_on_create_and_update(async_cl
     assert fetched["outcome_parsers"] == [parser]
 
     mismatched = await _create_factory(
-        async_client, "Mismatched", outcome_keys={"score": "string"}
+        async_client, "Mismatched", outcome_keys={"score": {"type": "string"}}
     )
     response = await async_client.patch(url, json={"factory_id": mismatched["id"]})
     assert response.status_code == 422
@@ -990,7 +990,7 @@ async def test_git_sync_update_leaves_the_factory_unchanged(
     async_session: AsyncSession,
 ):
     factory = Factory(
-        org_id=TEST_ORG_ID, name="First", outcome_keys={"score": "number"}
+        org_id=TEST_ORG_ID, name="First", outcome_keys={"score": {"type": "number"}}
     )
     async_session.add(factory)
     await async_session.flush()
@@ -1049,16 +1049,18 @@ async def test_outcome_keys_are_managed_as_subresource(async_client):
 
     added = await async_client.put(f"{url}/outcome-keys/score", json={"type": "number"})
     assert added.status_code == 200, added.text
-    assert added.json()["outcome_keys"] == {"score": "number"}
-    assert (await async_client.get(f"{url}/outcome-keys")).json() == {"score": "number"}
+    assert added.json()["outcome_keys"] == {"score": {"type": "number"}}
+    assert (await async_client.get(f"{url}/outcome-keys")).json() == {
+        "score": {"type": "number"}
+    }
 
     renamed = await async_client.patch(url, json={"name": "Renamed"})
     assert renamed.status_code == 200, renamed.text
     assert renamed.json()["name"] == "Renamed"
-    assert renamed.json()["outcome_keys"] == {"score": "number"}
+    assert renamed.json()["outcome_keys"] == {"score": {"type": "number"}}
 
     rejected = await async_client.patch(
-        url, json={"name": "Renamed", "outcome_keys": {"score": "string"}}
+        url, json={"name": "Renamed", "outcome_keys": {"score": {"type": "string"}}}
     )
     assert rejected.status_code == 422, rejected.text
 
@@ -1067,11 +1069,36 @@ async def test_outcome_keys_are_managed_as_subresource(async_client):
     assert (await async_client.get(f"{url}/outcome-keys")).json() == {}
 
 
+# DELETE-ME(flat-outcome-keys): remove with _tolerate_flat_outcome_keys in models.py.
+async def test_flat_outcome_keys_are_still_read(async_client, async_session):
+    factory = Factory(org_id=TEST_ORG_ID, name="Flat", outcome_keys={"score": "number"})
+    async_session.add(factory)
+    await async_session.flush()
+    url = f"{FACTORIES}/{factory.id}"
+
+    assert (await async_client.get(url)).json()["outcome_keys"] == {
+        "score": {"type": "number"}
+    }
+    assert (await async_client.get(f"{url}/outcome-keys")).json() == {
+        "score": {"type": "number"}
+    }
+
+    added = await async_client.put(
+        f"{url}/outcome-keys/passed", json={"type": "boolean"}
+    )
+    assert added.status_code == 200, added.text
+    await async_session.refresh(factory)
+    assert factory.outcome_keys == {
+        "score": {"type": "number"},
+        "passed": {"type": "boolean"},
+    }
+
+
 async def test_used_outcome_key_cannot_be_retyped_or_removed(
     async_client, async_session
 ):
     created = await _create_factory(
-        async_client, "Software Factory", outcome_keys={"score": "number"}
+        async_client, "Software Factory", outcome_keys={"score": {"type": "number"}}
     )
     factory_id = uuid.UUID(created["id"])
     automation = _automation_row(
@@ -1104,4 +1131,4 @@ async def test_used_outcome_key_cannot_be_retyped_or_removed(
     assert removed.status_code == 409, removed.text
     assert (
         await async_client.get(f"{FACTORIES}/{created['id']}/outcome-keys")
-    ).json() == {"score": "number"}
+    ).json() == {"score": {"type": "number"}}

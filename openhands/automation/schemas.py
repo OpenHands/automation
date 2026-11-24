@@ -1396,19 +1396,27 @@ class AutomationListResponse(BaseModel):
     total: int
 
 
+class OutcomeKeyDefinition(BaseModel):
+    """A registered outcome key. Grows by optional fields, never by reshaping."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    value_type: OutcomeValueType = Field(alias="type")
+
+
 class FactoryCreate(BaseModel):
     """Request to create a factory."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=255)
-    outcome_keys: dict[str, OutcomeValueType] = Field(default_factory=dict)
+    outcome_keys: dict[str, OutcomeKeyDefinition] = Field(default_factory=dict)
 
     @field_validator("outcome_keys")
     @classmethod
     def validate_outcome_keys(
-        cls, value: dict[str, OutcomeValueType]
-    ) -> dict[str, OutcomeValueType]:
+        cls, value: dict[str, OutcomeKeyDefinition]
+    ) -> dict[str, OutcomeKeyDefinition]:
         if len(value) > MAX_OUTCOME_KEYS:
             raise ValueError(f"At most {MAX_OUTCOME_KEYS} outcome keys are allowed")
         for key in value:
@@ -1440,18 +1448,10 @@ class FactoryUpdate(BaseModel):
         return stripped
 
 
-class FactoryOutcomeKeyUpdate(BaseModel):
-    """Request to add or update a factory outcome key."""
-
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    value_type: OutcomeValueType = Field(alias="type")
-
-
 class FactoryResponse(BaseModel):
     id: uuid.UUID
     name: str
-    outcome_keys: dict[str, OutcomeValueType] = Field(default_factory=dict)
+    outcome_keys: dict[str, OutcomeKeyDefinition] = Field(default_factory=dict)
     automation_count: int = Field(
         ..., description="Live (not soft-deleted) automations in this factory"
     )
