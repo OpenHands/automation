@@ -61,6 +61,11 @@ from openhands.automation.models import (
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
+from openhands.automation.outcome_parser_registry import validate_parser_registry
+from openhands.automation.outcome_parsers import (
+    OutcomeParserDefinition,
+    validate_outcome_parsers,
+)
 from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
     PluginSecretLookup,
@@ -248,6 +253,7 @@ class CreatePromptAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    outcome_parsers: list[OutcomeParserDefinition] | None = None
     timeout: int | None = Field(
         default=None,
         description=build_automation_timeout_description(include_default=True),
@@ -295,6 +301,13 @@ class CreatePromptAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("outcome_parsers")
+    @classmethod
+    def validate_parser_definitions(
+        cls, value: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(value)
 
     @field_validator("timeout")
     @classmethod
@@ -671,6 +684,9 @@ async def create_automation_from_prompt(
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
     await authorize_factory_for_create(session, user, body.factory_id)
+    await validate_parser_registry(
+        session, user.org_id, body.factory_id, body.outcome_parsers
+    )
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -767,6 +783,9 @@ async def create_automation_from_prompt(
             agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
+            outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+            if body.outcome_parsers is not None
+            else None,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
@@ -921,6 +940,7 @@ class CreatePluginAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    outcome_parsers: list[OutcomeParserDefinition] | None = None
     timeout: int | None = Field(
         default=None,
         description=build_automation_timeout_description(include_default=True),
@@ -968,6 +988,13 @@ class CreatePluginAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("outcome_parsers")
+    @classmethod
+    def validate_parser_definitions(
+        cls, value: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(value)
 
     @field_validator("timeout")
     @classmethod
@@ -1211,6 +1238,9 @@ async def create_automation_from_plugin(
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
     await authorize_factory_for_create(session, user, body.factory_id)
+    await validate_parser_registry(
+        session, user.org_id, body.factory_id, body.outcome_parsers
+    )
 
     # Idempotent creation: enabling the same extension template twice returns
     # the existing automation unchanged instead of creating a duplicate.
@@ -1337,6 +1367,9 @@ async def create_automation_from_plugin(
             agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             observability_associations=body.observability_associations,
+            outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+            if body.outcome_parsers is not None
+            else None,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),

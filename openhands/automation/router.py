@@ -59,6 +59,7 @@ from openhands.automation.observability import (
     current_span_context,
     span,
 )
+from openhands.automation.outcome_parser_registry import validate_parser_registry
 from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
     AutomationPluginSource,
@@ -270,6 +271,9 @@ async def create_automation(
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
     await authorize_factory_for_create(session, user, body.factory_id)
+    await validate_parser_registry(
+        session, user.org_id, body.factory_id, body.outcome_parsers
+    )
 
     # Enabling the same template twice returns the existing automation rather
     # than a duplicate. Before tarball validation, so a repeat enable costs one
@@ -326,6 +330,9 @@ async def create_automation(
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
+        outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+        if body.outcome_parsers is not None
+        else None,
         tags=body.tags,
         factory_id=body.factory_id,
         tarball_path=body.tarball_path,
@@ -375,6 +382,9 @@ async def create_automation_from_plugin_spec(
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""
     await authorize_factory_for_create(session, user, body.factory_id)
+    await validate_parser_registry(
+        session, user.org_id, body.factory_id, body.outcome_parsers
+    )
     if body.template is not None:
         existing = await find_existing_template_automation(
             session, user.org_id, user.user_id, body.template.id
@@ -432,6 +442,9 @@ async def create_automation_from_plugin_spec(
         agent_profile_id=runtime_fields["agent_profile_id"],
         trigger=trigger.model_dump(),
         observability_associations=body.observability_associations,
+        outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
+        if body.outcome_parsers is not None
+        else None,
         tarball_path=runtime_fields["tarball_path"],
         setup_script_path=runtime_fields["setup_script_path"],
         entrypoint=runtime_fields["entrypoint"],
@@ -941,6 +954,15 @@ async def update_automation(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A draft automation cannot change its factory",
+            )
+    if "outcome_parsers" in update_data or factory_changing:
+        parser_factory_id = update_data.get("factory_id", auto.factory_id)
+        if parser_factory_id is not None or not factory_changing:
+            await validate_parser_registry(
+                session,
+                user.org_id,
+                parser_factory_id,
+                update_data.get("outcome_parsers", auto.outcome_parsers),
             )
     # Same ownership check as create. Only a new value is checked: resending the
     # stored path cannot grant anything the row does not already have, and that

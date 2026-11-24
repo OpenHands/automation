@@ -29,6 +29,10 @@ from openhands.automation.models import (
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
+from openhands.automation.outcome_parsers import (
+    OutcomeParserDefinition,
+    validate_outcome_parsers,
+)
 from openhands.automation.outcome_values import (
     MAX_OUTCOME_KEYS,
     OutcomeValueType,
@@ -627,6 +631,7 @@ class CreateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    outcome_parsers: list[OutcomeParserDefinition] | None = None
     tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     factory_id: uuid.UUID | None = Field(
         default=None, description=FACTORY_ID_DESCRIPTION
@@ -726,6 +731,13 @@ class CreateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("outcome_parsers")
+    @classmethod
+    def validate_parser_definitions(
+        cls, value: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(value)
 
     @field_validator("tags")
     @classmethod
@@ -835,6 +847,7 @@ class UpdateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    outcome_parsers: list[OutcomeParserDefinition] | None = None
     tags: list[str] | None = Field(
         default=None,
         description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
@@ -915,6 +928,13 @@ class UpdateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("outcome_parsers")
+    @classmethod
+    def validate_parser_definitions(
+        cls, value: list[OutcomeParserDefinition] | None
+    ) -> list[OutcomeParserDefinition] | None:
+        return validate_outcome_parsers(value)
 
     @field_validator("tags")
     @classmethod
@@ -1345,6 +1365,7 @@ class AutomationResponse(BaseModel):
     plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
+    outcome_parsers: list[OutcomeParserDefinition] | None = None
     tags: list[str] = Field(default_factory=list)
     factory_id: uuid.UUID | None = None
     tarball_path: str

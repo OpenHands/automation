@@ -101,15 +101,25 @@ async def get_org_factory(
 async def factory_outcome_key_in_use(
     session: AsyncSession, factory_id: uuid.UUID, key: str
 ) -> bool:
-    return bool(
-        await session.scalar(
-            select(
-                exists().where(
-                    AutomationOutcomeValue.factory_id == factory_id,
-                    AutomationOutcomeValue.key == key,
-                )
+    has_values = await session.scalar(
+        select(
+            exists().where(
+                AutomationOutcomeValue.factory_id == factory_id,
+                AutomationOutcomeValue.key == key,
             )
         )
+    )
+    if has_values:
+        return True
+    parser_rows = await session.scalars(
+        select(Automation.outcome_parsers).where(
+            Automation.factory_id == factory_id,
+            Automation.outcome_parsers.is_not(None),
+        )
+    )
+    return any(
+        any(parser.get("key") == key for parser in (parsers or []))
+        for parsers in parser_rows
     )
 
 
@@ -120,7 +130,7 @@ def _outcome_keys(factory: Factory) -> dict[str, str]:
 def _key_conflict(key: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
-        detail=f"Outcome key {key!r} is already used by stored values",
+        detail=f"Outcome key {key!r} is already in use",
     )
 
 

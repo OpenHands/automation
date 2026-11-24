@@ -62,6 +62,9 @@ def test_existing_rows_survive_the_upgrade_with_no_factory(tmp_path):
         runs = session.scalars(select(AutomationRun)).all()
     inspector = inspect(engine)
     indexes = {index["name"] for index in inspector.get_indexes("automations")}
+    automation_columns = {
+        column["name"] for column in inspector.get_columns("automations")
+    }
     foreign_keys = inspector.get_foreign_keys("automations")
     factory_columns = {c["name"] for c in inspector.get_columns("factories")}
     outcome_indexes = {
@@ -77,6 +80,7 @@ def test_existing_rows_survive_the_upgrade_with_no_factory(tmp_path):
     assert automation.factory_id is None
     assert len(runs) == 1
     assert "ix_automations_factory_id" in indexes
+    assert "outcome_parsers" in automation_columns
     assert [
         (fk["referred_table"], fk.get("options", {}).get("ondelete"))
         for fk in foreign_keys
