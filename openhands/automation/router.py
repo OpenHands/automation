@@ -956,12 +956,14 @@ async def update_automation(
                 detail="A draft automation cannot change its factory",
             )
     if "outcome_parsers" in update_data or factory_changing:
-        await validate_parser_registry(
-            session,
-            user.org_id,
-            update_data.get("factory_id", auto.factory_id),
-            update_data.get("outcome_parsers", auto.outcome_parsers),
-        )
+        parser_factory_id = update_data.get("factory_id", auto.factory_id)
+        if parser_factory_id is not None or not factory_changing:
+            await validate_parser_registry(
+                session,
+                user.org_id,
+                parser_factory_id,
+                update_data.get("outcome_parsers", auto.outcome_parsers),
+            )
     # Same ownership check as create. Only a new value is checked: resending the
     # stored path cannot grant anything the row does not already have, and that
     # upload need not be owned by the editor or still be live.

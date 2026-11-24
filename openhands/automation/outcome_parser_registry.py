@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.factory_router import _get_org_factory
+from openhands.automation.factory_router import get_org_factory
 from openhands.automation.outcome_parsers import OutcomeParserDefinition
 
 
@@ -21,7 +21,7 @@ async def validate_parser_registry(
         return
     if factory_id is None:
         raise HTTPException(409, "Outcome parsers require a factory")
-    factory = await _get_org_factory(session, org_id, factory_id)
+    factory = await get_org_factory(session, org_id, factory_id)
     for raw in parsers:
         parser = OutcomeParserDefinition.model_validate(raw)
         if factory.outcome_keys.get(parser.key) != parser.value_type:

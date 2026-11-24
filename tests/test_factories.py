@@ -427,8 +427,18 @@ async def test_parsers_must_match_factory_registry_on_create_and_update(async_cl
     response = await async_client.patch(url, json={"outcome_parsers": [invalid]})
     assert response.status_code == 422
     response = await async_client.patch(url, json={"factory_id": None})
-    assert response.status_code == 409
-    assert (await async_client.get(url)).json()["outcome_parsers"] == [parser]
+    assert response.status_code == 200, response.text
+    fetched = (await async_client.get(url)).json()
+    assert fetched["factory_id"] is None
+    assert fetched["outcome_parsers"] == [parser]
+
+    mismatched = await _create_factory(
+        async_client, "Mismatched", outcome_keys={"score": "string"}
+    )
+    response = await async_client.patch(url, json={"factory_id": mismatched["id"]})
+    assert response.status_code == 422
+    response = await async_client.patch(url, json={"factory_id": factory["id"]})
+    assert response.status_code == 200, response.text
 
     optional = {**parser, "required": False}
     created = await _create_automation(
@@ -1064,7 +1074,13 @@ async def test_used_outcome_key_cannot_be_retyped_or_removed(
         async_client, "Software Factory", outcome_keys={"score": "number"}
     )
     factory_id = uuid.UUID(created["id"])
-    automation = _automation_row("Member", factory_id=factory_id)
+    automation = _automation_row(
+        "Member",
+        factory_id=factory_id,
+        outcome_parsers=[
+            {"key": "score", "expression": "result.score", "value_type": "number"}
+        ],
+    )
     async_session.add(automation)
     await async_session.flush()
     async_session.add(
