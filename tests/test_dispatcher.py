@@ -20,7 +20,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import CloudSandboxBackend
-from openhands.automation.config import get_config
+from openhands.automation.config import clear_config_cache, get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
     _build_event_payload,
@@ -45,6 +45,7 @@ from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
+    Factory,
 )
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
@@ -3577,15 +3578,29 @@ class TestExecuteRunDerivedConversationId:
         subject_key: str | None,
         agent_profile_id: uuid.UUID | None = None,
         run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER,
+        factory: bool = False,
+        outcome_parsers: list[dict] | None = None,
     ):
         """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
         async with async_session_factory() as session:
+            factory_id = None
+            if factory:
+                factory_row = Factory(
+                    org_id=TEST_ORG_ID,
+                    name="Outcome factory",
+                    outcome_keys={"score": "number"},
+                )
+                session.add(factory_row)
+                await session.flush()
+                factory_id = factory_row.id
             automation = Automation(
                 user_id=TEST_USER_ID,
                 run_as_kind=run_as_kind,
                 org_id=TEST_ORG_ID,
                 name="Mention Responder",
                 agent_profile_id=agent_profile_id,
+                factory_id=factory_id,
+                outcome_parsers=outcome_parsers,
                 trigger=trigger,
                 tarball_path="https://example.com/code.tar.gz",
                 entrypoint="uv run main.py",
@@ -3637,6 +3652,53 @@ class TestExecuteRunDerivedConversationId:
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         return mock_execute.await_args.kwargs["env_vars"], org_id, automation_id
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_outcome_env_only_for_factory_runs(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("AUTOMATION_KV_SECRET", "run-secret-for-testing-0123456789")
+        clear_config_cache()
+        trigger = {"type": "cron", "schedule": "0 9 * * *"}
+        parser = {"key": "score", "expression": "result.score", "value_type": "number"}
+        try:
+            plain, _, _ = await self._dispatch(
+                mock_execute,
+                async_session_factory,
+                mock_settings,
+                mock_client,
+                trigger=trigger,
+                subject_key=None,
+            )
+            assert "AUTOMATION_KV_TOKEN" in plain
+            assert "AUTOMATION_OUTCOME_TOKEN" not in plain
+            assert "AUTOMATION_OUTCOME_URL" not in plain
+            assert "AUTOMATION_OUTCOME_SCHEMA" not in plain
+
+            grouped, _, _ = await self._dispatch(
+                mock_execute,
+                async_session_factory,
+                mock_settings,
+                mock_client,
+                trigger=trigger,
+                subject_key=None,
+                factory=True,
+                outcome_parsers=[parser],
+            )
+            assert grouped["AUTOMATION_KV_TOKEN"]
+            assert grouped["AUTOMATION_OUTCOME_TOKEN"]
+            assert grouped["AUTOMATION_OUTCOME_TOKEN"] != grouped["AUTOMATION_KV_TOKEN"]
+            assert grouped["AUTOMATION_OUTCOME_URL"].endswith("/v1/outcomes")
+            assert json.loads(grouped["AUTOMATION_OUTCOME_SCHEMA"])["required"] == [
+                "payload"
+            ]
+        finally:
+            clear_config_cache()
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_subject_run_gets_the_id_continue_will_address(
