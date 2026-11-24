@@ -71,6 +71,7 @@ def test_parser_output_still_obeys_shared_numeric_guard():
 
 def test_parser_schema_describes_extracted_keys():
     schema = build_outcome_payload_schema(PARSERS)
+    assert schema is not None
     assert schema["required"] == ["payload"]
     values = schema["properties"]["payload"]["x-openhands-outcome-values"]
     assert values["required"] == ["score", "passed"]
