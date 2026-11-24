@@ -430,6 +430,15 @@ async def test_parsers_must_match_factory_registry_on_create_and_update(async_cl
     assert response.status_code == 409
     assert (await async_client.get(url)).json()["outcome_parsers"] == [parser]
 
+    optional = {**parser, "required": False}
+    created = await _create_automation(
+        async_client, "Optional", factory_id=factory["id"], outcome_parsers=[optional]
+    )
+    assert created["outcome_parsers"] == [optional]
+    response = await async_client.patch(url, json={"outcome_parsers": [optional]})
+    assert response.status_code == 200, response.text
+    assert (await async_client.get(url)).json()["outcome_parsers"] == [optional]
+
 
 async def test_each_factory_change_appears_in_the_change_audit(
     async_client, async_session

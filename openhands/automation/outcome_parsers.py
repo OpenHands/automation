@@ -27,6 +27,7 @@ class OutcomeParserDefinition(BaseModel):
     key: str = Field(..., min_length=1, max_length=100, pattern=OUTCOME_KEY_PATTERN)
     expression: str = Field(..., min_length=1, max_length=MAX_OUTCOME_EXPRESSION_LENGTH)
     value_type: OutcomeValueType
+    required: bool = Field(default=True, exclude_if=lambda value: value)
 
     @field_validator("expression")
     @classmethod
@@ -68,6 +69,8 @@ def parse_outcome_payload(
         except FilterEvaluationError as exc:
             raise ValueError(f"Outcome parser '{parser.key}' failed: {exc}") from exc
         if value is None:
+            if not parser.required:
+                continue
             raise ValueError(
                 f"Outcome parser '{parser.key}' returned null or missing value"
             )
@@ -83,8 +86,11 @@ def build_outcome_payload_schema(
     if not parsers:
         return None
     properties: dict[str, dict[str, Any]] = {}
+    required: list[str] = []
     for raw in parsers:
         parser = OutcomeParserDefinition.model_validate(raw)
+        if parser.required:
+            required.append(parser.key)
         property_schema: dict[str, Any] = {
             "type": (
                 "string"
@@ -116,7 +122,7 @@ def build_outcome_payload_schema(
                 "x-openhands-outcome-values": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": list(properties),
+                    "required": required,
                     "properties": properties,
                 },
             }

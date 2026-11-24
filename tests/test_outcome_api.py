@@ -258,3 +258,48 @@ async def test_nested_parser_payload_and_typed_values_share_factory_writer(
         params={"key": "score", "operation": "sum"},
     )
     assert response.json()["value"] == 7
+
+
+async def test_optional_parser_allows_partial_payload_without_storing_missing_fact(
+    async_client, async_session, mock_authenticated_user, outcome_auth
+):
+    factory = Factory(
+        org_id=mock_authenticated_user.org_id,
+        name="Partial parser factory",
+        outcome_keys={"score": "number", "passed": "boolean"},
+    )
+    async_session.add(factory)
+    await async_session.commit()
+    automation = await make_automation(
+        async_session, mock_authenticated_user, factory=factory
+    )
+    automation.outcome_parsers = [
+        {"key": "score", "expression": "result.score", "value_type": "number"},
+        {
+            "key": "passed",
+            "expression": "result.passed",
+            "value_type": "boolean",
+            "required": False,
+        },
+    ]
+    await async_session.commit()
+    url = "/api/automation/v1/outcomes"
+    params = {"automation_id": str(automation.id)}
+    response = await async_client.post(
+        url, params=params, json={"payload": {"result": {"score": 3}}}
+    )
+    assert response.status_code == 201, response.text
+    assert response.json() == {"stored": 1}
+    response = await async_client.post(
+        url,
+        params=params,
+        json={"payload": {"result": {"score": 4, "passed": True}}},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json() == {"stored": 2}
+    response = await async_client.get(
+        f"/api/automation/v1/factories/{factory.id}/outcomes/values"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 3
+    assert [value["key"] for value in response.json()["values"]].count("passed") == 1
