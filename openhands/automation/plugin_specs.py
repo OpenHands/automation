@@ -32,10 +32,6 @@ from pydantic import (
     model_validator,
 )
 
-from openhands.automation.impact_metrics import (
-    ImpactMetricDefinition,
-    validate_impact_metrics,
-)
 from openhands.automation.models import AutomationVisibility
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,

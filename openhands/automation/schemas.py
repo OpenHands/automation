@@ -21,11 +21,6 @@ from pydantic.alias_generators import to_camel
 
 from openhands.automation.acknowledgements import DEFAULT_ACKNOWLEDGEMENT
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.impact_metrics import (
-    ImpactAggregation,
-    ImpactMetricDefinition,
-    validate_impact_metrics,
-)
 from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationState,
