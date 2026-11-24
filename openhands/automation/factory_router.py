@@ -6,7 +6,7 @@ factories themselves.
 """
 
 import uuid
-from typing import Literal, cast
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -20,17 +20,13 @@ from openhands.automation.auth import (
 )
 from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.models import Automation, AutomationOutcomeValue, Factory
-from openhands.automation.outcome_values import (
-    MAX_OUTCOME_KEYS,
-    OutcomeValueType,
-    validate_outcome_key,
-)
+from openhands.automation.outcome_values import MAX_OUTCOME_KEYS, validate_outcome_key
 from openhands.automation.schemas import (
     FactoryCreate,
     FactoryListResponse,
-    FactoryOutcomeKeyUpdate,
     FactoryResponse,
     FactoryUpdate,
+    OutcomeKeyDefinition,
 )
 from openhands.automation.utils.enterprise_client import notify_factory_deleted
 
@@ -65,7 +61,7 @@ def _to_response(factory: Factory, automation_count: int) -> FactoryResponse:
     return FactoryResponse(
         id=factory.id,
         name=factory.name,
-        outcome_keys=cast(dict[str, OutcomeValueType], factory.outcome_keys),
+        outcome_keys=_outcome_key_definitions(factory),
         automation_count=automation_count,
         created_at=factory.created_at,
         updated_at=factory.updated_at,
@@ -123,8 +119,15 @@ async def factory_outcome_key_in_use(
     )
 
 
-def _outcome_keys(factory: Factory) -> dict[str, str]:
-    return dict(factory.outcome_keys or {})
+def _outcome_keys(factory: Factory) -> dict[str, dict[str, Any]]:
+    return dict(factory.outcome_key_definitions)
+
+
+def _outcome_key_definitions(factory: Factory) -> dict[str, OutcomeKeyDefinition]:
+    return {
+        key: OutcomeKeyDefinition.model_validate(spec)
+        for key, spec in factory.outcome_key_definitions.items()
+    }
 
 
 def _key_conflict(key: str) -> HTTPException:
@@ -227,7 +230,10 @@ async def create_factory(
     factory = Factory(
         org_id=user.org_id,
         name=data.name,
-        outcome_keys={key: str(value) for key, value in data.outcome_keys.items()},
+        outcome_keys={
+            key: definition.model_dump(by_alias=True)
+            for key, definition in data.outcome_keys.items()
+        },
     )
     session.add(factory)
     await session.flush()
@@ -295,24 +301,24 @@ async def get_factory_outcome_keys(
     factory_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
-) -> dict[str, OutcomeValueType]:
+) -> dict[str, OutcomeKeyDefinition]:
     factory = await get_org_factory(session, user.org_id, factory_id)
-    return cast(dict[str, OutcomeValueType], factory.outcome_keys)
+    return _outcome_key_definitions(factory)
 
 
 @router.put("/{factory_id}/outcome-keys/{key}")
 async def put_factory_outcome_key(
     factory_id: uuid.UUID,
     key: str,
-    data: FactoryOutcomeKeyUpdate,
+    data: OutcomeKeyDefinition,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
     validate_outcome_key(key)
     factory = await get_org_factory(session, user.org_id, factory_id, lock="update")
     keys = _outcome_keys(factory)
-    current_type = keys.get(key)
-    requested_type = str(data.value_type)
+    current_type = keys.get(key, {}).get("type")
+    requested_type = data.value_type
     if (
         current_type is not None
         and current_type != requested_type
@@ -323,7 +329,7 @@ async def put_factory_outcome_key(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "Too many outcome keys"
         )
-    keys[key] = requested_type
+    keys[key] = data.model_dump(by_alias=True)
     factory.outcome_keys = keys
     await session.flush()
     await session.refresh(factory)

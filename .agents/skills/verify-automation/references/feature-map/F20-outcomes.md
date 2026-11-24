@@ -34,7 +34,7 @@ Preconditions:
 
 - **Submit flat and typed (`F20.submit-flat`, `F20.submit-typed`, `F20.run-scope`).** Register keys before creating the automation.
   ```sh
-  FID=$(control-automation api POST /v1/factories --json '{"name":"QA Outcomes","outcome_keys":{"score":"number","passed":"boolean","metadata":"json"}}' --expect 201 --field id)
+  FID=$(control-automation api POST /v1/factories --json '{"name":"QA Outcomes","outcome_keys":{"score":{"type":"number"},"passed":{"type":"boolean"},"metadata":{"type":"json"}}}' --expect 201 --field id)
   OID=$(control-automation api POST /v1 --json "{\"name\":\"qa-outcomes\",\"factory_id\":\"$FID\",\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"},\"tarball_path\":\"https://qa.invalid/x.tgz\",\"entrypoint\":\"bash run.sh\"}" --expect 201 --field id)
   control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"score":2,"passed":true}}' --expect 201 --check stored eq 2 --save F20.submit-flat/submit
   control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"values":[{"key":"metadata","type":"json","value":{"review":"complete"}}]}' --expect 201 --check stored eq 1 --save F20.submit-typed/submit

@@ -96,7 +96,8 @@ class Factory(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    outcome_keys: Mapped[dict[str, str]] = mapped_column(
+    # key -> {"type": ...}; the object leaves room for more fields per key.
+    outcome_keys: Mapped[dict[str, dict[str, Any]]] = mapped_column(
         JSON, nullable=False, default=dict, server_default=text("'{}'")
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -112,6 +113,30 @@ class Factory(Base):
         onupdate=utcnow,
         nullable=False,
     )
+
+    @property
+    def outcome_key_definitions(self) -> dict[str, dict[str, Any]]:
+        """The registered keys, each as ``{"type": ...}``. Read keys only here."""
+        return _tolerate_flat_outcome_keys(self.outcome_keys)
+
+    @property
+    def outcome_key_types(self) -> dict[str, str]:
+        return {key: spec["type"] for key, spec in self.outcome_key_definitions.items()}
+
+
+# DELETE-ME(flat-outcome-keys): temporary. Delete this function, its one call in
+# Factory.outcome_key_definitions, and test_flat_outcome_keys_are_still_read once
+# the release that contains this change is out. Until then, main briefly stored
+# keys flat ({"score": "number"}) before they became objects
+# ({"score": {"type": "number"}}). A flat row is read as an object, and any write
+# to the keys stores the object form. Nothing else needs to change when it goes.
+def _tolerate_flat_outcome_keys(
+    raw: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    return {
+        key: spec if isinstance(spec, dict) else {"type": spec}
+        for key, spec in (raw or {}).items()
+    }
 
 
 class Automation(Base):

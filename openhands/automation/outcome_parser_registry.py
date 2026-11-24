@@ -24,7 +24,7 @@ async def validate_parser_registry(
     factory = await get_org_factory(session, org_id, factory_id)
     for raw in parsers:
         parser = OutcomeParserDefinition.model_validate(raw)
-        if factory.outcome_keys.get(parser.key) != parser.value_type:
+        if factory.outcome_key_types.get(parser.key) != parser.value_type:
             raise HTTPException(
                 422,
                 f"Outcome parser key {parser.key!r} must match the factory registry",

@@ -3588,7 +3588,7 @@ class TestExecuteRunDerivedConversationId:
                 factory_row = Factory(
                     org_id=TEST_ORG_ID,
                     name="Outcome factory",
-                    outcome_keys={"score": "number"},
+                    outcome_keys={"score": {"type": "number"}},
                 )
                 session.add(factory_row)
                 await session.flush()

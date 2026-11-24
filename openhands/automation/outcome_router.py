@@ -117,7 +117,7 @@ async def submit_outcome(
         else:
             raise ValueError("An outcome submission needs values or payload")
         for columns in columns_list:
-            if factory.outcome_keys.get(columns["key"]) != columns["value_type"]:
+            if factory.outcome_key_types.get(columns["key"]) != columns["value_type"]:
                 raise ValueError(
                     f"Outcome key {columns['key']!r} is not registered "
                     f"with type {columns['value_type']!r}"
