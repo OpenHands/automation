@@ -16,6 +16,9 @@ Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 `GET /api/automation/v1/factories/{factory_id}`,
 `PATCH /api/automation/v1/factories/{factory_id}`,
 `DELETE /api/automation/v1/factories/{factory_id}`,
+`GET /api/automation/v1/factories/{factory_id}/outcome-keys`,
+`PUT /api/automation/v1/factories/{factory_id}/outcome-keys/{key}`,
+`DELETE /api/automation/v1/factories/{factory_id}/outcome-keys/{key}`,
 `GET /api/automation/v1/service/factories`
 
 ## Sub-features
@@ -23,6 +26,7 @@ Routes: `POST /api/automation/v1/factories`, `GET /api/automation/v1/factories`,
 - `F19.create`: `POST /v1/factories` with only a `name` answers 201 with `id`, `name`, `automation_count: 0`, `created_at` and `updated_at`; a GET by id returns the same record, and a fresh install lists none.
 - `F19.create-in`: `factory_id` on each create endpoint assigns the new automation; an unknown factory answers 404 `Factory not found`. A blank name, an unknown field (including `slug`) answer 422, and two factories may share a name.
 - `F19.rename`: `PATCH /v1/factories/{factory_id}` changes `name` and bumps `updated_at`; the id stays, and a body that carries `slug` answers 422.
+- `F19.outcome-keys`: `GET /v1/factories/{factory_id}/outcome-keys` reads the key registry, `PUT /v1/factories/{factory_id}/outcome-keys/{key}` creates or retypes a key, and `DELETE /v1/factories/{factory_id}/outcome-keys/{key}` removes an unused key; malformed keys or types answer 422 and in-use keys answer 409.
 - `F19.assign`: `PATCH /v1/{id}` with `factory_id` assigns the automation, a second factory moves it, `null` removes it, and omitting the field leaves it; every automation response carries `factory_id`, and an unknown factory id answers 404 `Factory not found`.
 - `F19.list-filter`: `GET /v1?factory_id=<id>` returns only that factory's live automations, and the factory's `automation_count` counts the same ones.
 - `F19.delete`: `DELETE /v1/factories/{factory_id}` answers 409 `Factory has N live automations; remove them from it first` while any live automation belongs to it, and 204 once none does; the factory is then 404 and a new factory with the same name gets a new id.
@@ -84,6 +88,16 @@ Preconditions:
   control-automation api PATCH "/v1/factories/$F2" --json '{"name":"x","slug":"other"}' --expect 422 --check detail.0.type eq extra_forbidden
   control-automation api GET "/v1/factories/$F2" --expect 200 --check name eq 'QA Two Renamed'
   control-automation api GET /v1/factories/other --expect 422
+  ```
+- **Outcome-key registry (`F19.outcome-keys`).** Keys are managed through the factory subresource, not through factory rename.
+  Requires: `F19.create`
+  ```sh
+  control-automation api GET "/v1/factories/$F1/outcome-keys" --expect 200 --check outcome_keys type object --save F19.outcome-keys/list-empty
+  control-automation api PUT "/v1/factories/$F1/outcome-keys/score" --json '{"type":"number"}' --expect 200 --check outcome_keys.score eq number --save F19.outcome-keys/put
+  control-automation api GET "/v1/factories/$F1/outcome-keys" --expect 200 --check outcome_keys.score eq number
+  control-automation api DELETE "/v1/factories/$F1/outcome-keys/score" --expect 204 --save F19.outcome-keys/delete
+  control-automation api PUT "/v1/factories/$F1/outcome-keys/bad key" --json '{"type":"number"}' --expect 422
+  control-automation api PUT "/v1/factories/$F1/outcome-keys/score" --json '{"type":"invalid"}' --expect 422
   ```
 - **Assign, move and clear (`F19.assign`).** Membership is a PATCH of the automation; the response and a GET carry it.
   Requires: `F19.create`, `F19.create-in`
