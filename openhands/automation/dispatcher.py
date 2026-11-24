@@ -1741,11 +1741,13 @@ async def dispatch_pending_runs(
 
     # Expire deferred runs past their max age on every poll, independent of
     # available capacity: a poll that finds every slot occupied returns before
-    # claiming, so it must still reap aged deferred rows.
+    # claiming, so it must still reap aged deferred rows. Two poll intervals of
+    # grace leave a run that just came due to the claim below first.
     if config.service.defer_max_age_seconds > 0:
         await expire_aged_deferred_runs(
             session_factory,
             max_age_seconds=config.service.defer_max_age_seconds,
+            claim_grace_seconds=2 * config.service.dispatcher_interval_seconds,
             status_detail=make_run_status_detail(
                 phase=RunStatusPhase.DISPATCH,
                 kind=RunStatusDetailKind.DEFER_EXPIRED,

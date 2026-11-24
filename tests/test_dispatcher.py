@@ -2648,7 +2648,8 @@ class TestDispatchConcurrencyGate:
                     .where(AutomationRun.id == ids[0])
                     .values(
                         created_at=utcnow() - timedelta(hours=7),
-                        deferred_until=utcnow() - timedelta(seconds=1),
+                        # Due long enough ago that the claim grace has passed.
+                        deferred_until=utcnow() - timedelta(minutes=5),
                     )
                 )
                 await session.commit()
@@ -3297,6 +3298,205 @@ class TestExpireAgedDeferredRuns:
         async with async_session_factory() as session:
             updated = await session.get(AutomationRun, run_id)
             assert updated.status == AutomationRunStatus.PENDING
+
+
+class TestExpireAgedDeferredRunsClaimGrace:
+    """The sweep leaves a just-due run to the dispatch claim for a grace period."""
+
+    async def _seed(self, async_session_factory, *, due_seconds_ago: int):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+                created_at=utcnow() - timedelta(hours=7),
+                deferred_until=utcnow() - timedelta(seconds=due_seconds_ago),
+            )
+            session.add(run)
+            await session.commit()
+            return run.id
+
+    @pytest.mark.parametrize(
+        ("due_seconds_ago", "expected_status"),
+        [(5, AutomationRunStatus.PENDING), (30, AutomationRunStatus.SKIPPED)],
+    )
+    async def test_grace_delays_only_just_due_runs(
+        self, async_session_factory, due_seconds_ago, expected_status
+    ):
+        run_id = await self._seed(
+            async_session_factory, due_seconds_ago=due_seconds_ago
+        )
+
+        await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+            claim_grace_seconds=20,
+        )
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == expected_status
+
+
+class TestDeferredRunFinalAttempt:
+    """A run whose last deferral is capped at the max age still gets that attempt.
+
+    Runs the real ``dispatch_pending_runs``, ``_execute_run``, deferral and
+    expiry sweep with the default deferral settings. Only the sandbox API and
+    the key mint are stubbed. "Time passing" moves the run's timestamps back.
+    """
+
+    @pytest.fixture
+    def sandbox_api(self, monkeypatch):
+        state = {"capacity": False, "creates": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and request.url.path == "/api/v1/sandboxes":
+                state["creates"] += 1
+                if not state["capacity"]:
+                    return httpx.Response(
+                        429,
+                        json={
+                            "detail": {
+                                "error": "CONCURRENCY_LIMIT_REACHED",
+                                "message": "Concurrency limit reached",
+                            }
+                        },
+                    )
+                return httpx.Response(200, json={"id": "sb-ok"})
+            if request.method == "GET" and request.url.path == "/api/v1/sandboxes":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": "sb-ok",
+                            "status": "RUNNING",
+                            "session_api_key": "sess",
+                            "exposed_urls": [
+                                {"name": "AGENT_SERVER", "url": "http://agent.test"}
+                            ],
+                        }
+                    ],
+                )
+            return httpx.Response(200, json={})
+
+        async def mint(_run):
+            return "sk-user"
+
+        monkeypatch.setattr(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run", mint
+        )
+        monkeypatch.setattr(get_config().sandbox, "sandbox_poll_interval", 0)
+        monkeypatch.setattr(
+            "openhands.automation.dispatcher.get_backend",
+            lambda run: CloudSandboxBackend(api_url="https://api.test", run=run),
+        )
+        state["transport"] = httpx.MockTransport(handler)
+        return state
+
+    async def _poll(self, async_session_factory, mock_settings, transport):
+        async with httpx.AsyncClient(transport=transport) as client:
+            await dispatch_pending_runs(async_session_factory, mock_settings, client)
+            tasks = [
+                t
+                for t in asyncio.all_tasks()
+                if t.get_name().startswith("execute-run-")
+            ]
+            await asyncio.gather(*tasks)
+
+    async def _seed_late_run(self, async_session_factory, max_age: int):
+        """A run blocked for most of its window: its next backoff is past the
+        deadline, so this deferral is capped at it."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+                created_at=utcnow() - timedelta(seconds=max_age - 600),
+                deferral_count=8,
+            )
+            session.add(run)
+            await session.commit()
+            return run.id
+
+    async def _defer_to_deadline_then_let_it_pass(
+        self, async_session_factory, mock_settings, sandbox_api
+    ):
+        max_age = get_config().service.defer_max_age_seconds
+        run_id = await self._seed_late_run(async_session_factory, max_age)
+
+        await self._poll(async_session_factory, mock_settings, sandbox_api["transport"])
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.PENDING
+            assert run.status_detail["kind"] == "concurrency_limit"
+            deadline = run.created_at + timedelta(seconds=max_age)
+            assert abs(run.deferred_until - deadline) < timedelta(seconds=1)
+            # The deadline passes: shift the run back as far as the clock moved.
+            elapsed = run.deferred_until - utcnow() + timedelta(seconds=1)
+            run.created_at -= elapsed
+            run.deferred_until -= elapsed
+            await session.commit()
+        assert sandbox_api["creates"] == 1
+        return run_id
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_starts_when_capacity_is_back_at_its_deadline(
+        self, mock_execute, async_session_factory, mock_settings, sandbox_api
+    ):
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+        run_id = await self._defer_to_deadline_then_let_it_pass(
+            async_session_factory, mock_settings, sandbox_api
+        )
+        sandbox_api["capacity"] = True
+
+        await self._poll(async_session_factory, mock_settings, sandbox_api["transport"])
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.RUNNING, run.status_detail["kind"]
+            assert run.sandbox_id == "sb-ok"
+        assert sandbox_api["creates"] == 2
+        mock_execute.assert_awaited_once()
+
+    async def test_still_blocked_final_attempt_expires_the_run(
+        self, async_session_factory, mock_settings, sandbox_api
+    ):
+        run_id = await self._defer_to_deadline_then_let_it_pass(
+            async_session_factory, mock_settings, sandbox_api
+        )
+
+        await self._poll(async_session_factory, mock_settings, sandbox_api["transport"])
+
+        assert sandbox_api["creates"] == 2, "no final sandbox attempt was made"
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.SKIPPED
+            assert run.status_detail["kind"] == "defer_expired"
 
 
 class TestExecuteRunProvisioningRetry:

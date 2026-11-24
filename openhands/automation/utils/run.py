@@ -543,6 +543,7 @@ async def expire_aged_deferred_runs(
     *,
     max_age_seconds: int,
     status_detail: dict,
+    claim_grace_seconds: int = 0,
     limit: int = 100,
 ) -> int:
     """Terminally SKIP deferred runs whose max deferral age has passed.
@@ -552,6 +553,11 @@ async def expire_aged_deferred_runs(
     dispatch attempt, but a poll that finds every slot occupied returns before
     claiming, so a deferred run can sit PENDING indefinitely behind a full cap.
     This sweep reaps those rows on every poll regardless of available capacity.
+
+    A run is only reaped once its retry date is ``claim_grace_seconds`` old.
+    The last deferral is capped at the max age, so the run comes due at the
+    same moment it ages out; the grace lets a dispatch poll claim it for its
+    final attempt before the sweep, which runs first, takes it.
 
     Selects PENDING runs whose retry date and max age have both passed and
     updates them in one guarded statement, so a run cancelled or claimed
@@ -577,7 +583,8 @@ async def expire_aged_deferred_runs(
             .where(
                 AutomationRun.status == AutomationRunStatus.PENDING,
                 AutomationRun.deferred_until.is_not(None),
-                AutomationRun.deferred_until <= now,
+                AutomationRun.deferred_until
+                <= now - timedelta(seconds=claim_grace_seconds),
                 AutomationRun.created_at <= deadline,
             )
             .order_by(AutomationRun.created_at.asc())
