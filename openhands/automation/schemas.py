@@ -37,7 +37,7 @@ from openhands.automation.observability_associations import (
 from openhands.automation.outcome_values import (
     MAX_OUTCOME_KEYS,
     OutcomeValueType,
-    _validate_key,
+    validate_outcome_key,
 )
 from openhands.automation.providers import (
     DEFAULT_VERIFIER,
@@ -1396,7 +1396,7 @@ class FactoryCreate(BaseModel):
         if len(value) > MAX_OUTCOME_KEYS:
             raise ValueError(f"At most {MAX_OUTCOME_KEYS} outcome keys are allowed")
         for key in value:
-            _validate_key(key)
+            validate_outcome_key(key)
         return value
 
     @field_validator("name")
@@ -1408,8 +1408,28 @@ class FactoryCreate(BaseModel):
         return stripped
 
 
-class FactoryUpdate(FactoryCreate):
+class FactoryUpdate(BaseModel):
     """Request to rename a factory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
+
+
+class FactoryOutcomeKeyUpdate(BaseModel):
+    """Request to add or update a factory outcome key."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    value_type: OutcomeValueType = Field(alias="type")
 
 
 class FactoryResponse(BaseModel):

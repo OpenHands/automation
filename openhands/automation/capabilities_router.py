@@ -77,7 +77,6 @@ _STATIC_FEATURES = (
     "customTarball",
     # Factories can be created, and automations created in or moved into one.
     "factories",
-    "outcomes",
     "mcpTools",
     "presetPlugin",
     "presetPrompt",
@@ -141,7 +140,7 @@ async def get_capabilities(
     if webhook_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
-        features.append("kvStore")
+        features.extend(["kvStore", "outcomes"])
 
     return CapabilitiesResponse(
         ready=True,

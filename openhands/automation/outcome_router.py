@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session
-from openhands.automation.factory_router import _get_org_factory
+from openhands.automation.factory_router import get_org_factory
 from openhands.automation.kv_router import KVAuthContext, get_kv_auth_context
 from openhands.automation.models import (
     Automation,
@@ -151,7 +151,7 @@ async def submit_outcome(
 
 
 @router.get("/factories/{factory_id}/outcomes/values")
-async def list_automation_outcome_values(
+async def list_factory_outcome_values(
     factory_id: uuid.UUID,
     automation_id: uuid.UUID | None = None,
     key: str | None = Query(default=None, min_length=1, max_length=100),
@@ -164,7 +164,7 @@ async def list_automation_outcome_values(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> OutcomeValuesResponse:
-    await _get_org_factory(session, user.org_id, factory_id)
+    await get_org_factory(session, user.org_id, factory_id)
 
     conditions = [
         AutomationOutcomeValue.factory_id == factory_id,
@@ -217,7 +217,7 @@ def _outcome_bucket(created_at: datetime, group_by: str) -> str:
 
 
 @router.get("/factories/{factory_id}/outcomes/aggregate")
-async def aggregate_automation_outcome_values(
+async def aggregate_factory_outcome_values(
     factory_id: uuid.UUID,
     key: str = Query(..., min_length=1, max_length=100),
     operation: OutcomeAggregation = Query(...),
@@ -230,7 +230,7 @@ async def aggregate_automation_outcome_values(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> OutcomeAggregateResponse:
-    await _get_org_factory(session, user.org_id, factory_id)
+    await get_org_factory(session, user.org_id, factory_id)
 
     conditions = [
         AutomationOutcomeValue.factory_id == factory_id,

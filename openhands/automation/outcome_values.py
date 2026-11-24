@@ -1,4 +1,4 @@
-"""Typed outcome value validation and aggregation."""
+"""Typed outcome value validation."""
 
 import json
 import math
@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any, Literal
 
 
+# Persisted factory registries and parser configs depend on this cap; lowering it
+# would make existing saved outcome definitions invalid.
 MAX_OUTCOME_KEYS = 50
 MAX_OUTCOME_PAYLOAD_BYTES = 64 * 1024
 MAX_OUTCOME_STRING_LENGTH = 2048
@@ -31,7 +33,7 @@ def validate_outcome_payload_size(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _validate_key(key: str) -> str:
+def validate_outcome_key(key: str) -> str:
     if len(key) > 100 or not re.fullmatch(OUTCOME_KEY_PATTERN, key):
         raise ValueError(f"Invalid outcome key: {key!r}")
     return key
@@ -130,7 +132,7 @@ def extract_outcome_value_columns(payload: dict[str, Any]) -> list[dict[str, Any
     if len(payload) > MAX_OUTCOME_KEYS:
         raise ValueError(f"At most {MAX_OUTCOME_KEYS} outcome keys are allowed")
     return [
-        _typed_columns(_validate_key(key), value, _flat_value_type(value, key))
+        _typed_columns(validate_outcome_key(key), value, _flat_value_type(value, key))
         for key, value in payload.items()
     ]
 
@@ -144,6 +146,8 @@ def normalize_outcome_values(values: Sequence[dict[str, Any]]) -> list[dict[str,
     if len(keys) != len(set(keys)):
         raise ValueError("Outcome keys must be unique within a submission")
     return [
-        _typed_columns(_validate_key(item["key"]), item["value"], item["value_type"])
+        _typed_columns(
+            validate_outcome_key(item["key"]), item["value"], item["value_type"]
+        )
         for item in values
     ]
