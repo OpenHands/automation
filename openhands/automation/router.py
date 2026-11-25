@@ -828,6 +828,13 @@ async def list_automations(
     factory_id: uuid.UUID | None = Query(
         default=None, description="Only automations in this factory"
     ),
+    in_factory: bool | None = Query(
+        default=None,
+        description=(
+            "True: only automations in a factory. False: only automations in "
+            "no factory. Omitted: both."
+        ),
+    ),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
@@ -857,6 +864,10 @@ async def list_automations(
         base_query = base_query.where(Automation.user_id == run_as_user_id)
     if factory_id is not None:
         base_query = base_query.where(Automation.factory_id == factory_id)
+    if in_factory is True:
+        base_query = base_query.where(Automation.factory_id.is_not(None))
+    elif in_factory is False:
+        base_query = base_query.where(Automation.factory_id.is_(None))
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
