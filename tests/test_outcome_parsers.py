@@ -114,10 +114,6 @@ def test_duplicate_parser_keys_rejected():
                 "trigger": {"type": "cron", "schedule": "0 9 * * *"},
             },
         ),
-        (
-            CreatePluginSpecAutomationRequest,
-            {"name": "Plugin spec", "plugin": {"source": "github:example/plugin"}},
-        ),
     ],
 )
 def test_each_create_request_validates_parser_keys(request_type, body):
@@ -132,3 +128,12 @@ def test_each_create_request_validates_parser_keys(request_type, body):
     assert optional_request.outcome_parsers[0].model_dump()["required"] is False
     with pytest.raises(ValidationError, match="unique"):
         request_type.model_validate({**body, "outcome_parsers": [parser, parser]})
+
+
+def test_plugin_spec_request_takes_no_outcome_parsers():
+    body = {"name": "Plugin spec", "plugin": {"source": "github:example/plugin"}}
+    CreatePluginSpecAutomationRequest.model_validate(body)
+    with pytest.raises(ValidationError, match="outcome_parsers"):
+        CreatePluginSpecAutomationRequest.model_validate(
+            {**body, "outcome_parsers": [PARSERS[0]]}
+        )

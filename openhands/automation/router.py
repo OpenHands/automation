@@ -382,9 +382,6 @@ async def create_automation_from_plugin_spec(
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""
     await authorize_factory_for_create(session, user, body.factory_id)
-    await validate_parser_registry(
-        session, user.org_id, body.factory_id, body.outcome_parsers
-    )
     if body.template is not None:
         existing = await find_existing_template_automation(
             session, user.org_id, user.user_id, body.template.id
@@ -442,9 +439,6 @@ async def create_automation_from_plugin_spec(
         agent_profile_id=runtime_fields["agent_profile_id"],
         trigger=trigger.model_dump(),
         observability_associations=body.observability_associations,
-        outcome_parsers=[parser.model_dump() for parser in body.outcome_parsers]
-        if body.outcome_parsers is not None
-        else None,
         tarball_path=runtime_fields["tarball_path"],
         setup_script_path=runtime_fields["setup_script_path"],
         entrypoint=runtime_fields["entrypoint"],
@@ -955,6 +949,12 @@ async def update_automation(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A draft automation cannot change its factory",
             )
+    if auto.plugin_spec is not None and update_data.get("outcome_parsers") is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "A plugin-spec automation takes its outcomes from the plugin manifest, "
+            "not outcome_parsers",
+        )
     if "outcome_parsers" in update_data or factory_changing:
         parser_factory_id = update_data.get("factory_id", auto.factory_id)
         if parser_factory_id is not None or not factory_changing:
