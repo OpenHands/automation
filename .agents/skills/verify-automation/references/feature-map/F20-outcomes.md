@@ -70,7 +70,7 @@ Preconditions:
 
 - `since` is inclusive and `until` is exclusive on both read routes, so adjacent windows (`[a, b)` then `[b, c)`) never count a row twice.
 - `since`, `until` and the day, week and month buckets use the time a fact counts at (`effective_at`): the start of its period, the `effective_at` the submission sent, or the time it was received. Rows from before `effective_at` existed count when they were received.
-- A total needs `period` in the format of its grain: `2026-11-24T14` (hour), `2026-11-24` (day), `2026-W48` (ISO week) or `2026-11` (month), in UTC. A wrong format, a period that has not begun, or `effective_at` or `dedupe_key` on a total answer 422. An increment refuses `period`. A time more than five minutes ahead answers 422.
+- A total needs `period` in the format of its grain: `2026-11-24T14` (hour), `2026-11-24` (day), `2026-W48` (ISO week) or `2026-11` (month), in UTC. Digits must be ASCII 0-9. A wrong format, a period that has not begun, or `effective_at` or `dedupe_key` on a total answer 422. An increment refuses `period`. A time more than five minutes ahead answers 422.
 - `PUT /outcome-keys/{key}` with a different type, `semantics` or `grain` answers 409 once the key has facts. A total must be a number and must have a grain.
 - The history stays: `GET .../outcomes/values` lists every report, including replaced totals. Aggregates count only the latest report for each automation, dimensions and period.
 - Outcome tokens are intentionally the same scoped token family as KV tokens, so a run gets one secret with an automation and run claim rather than a second auth system.

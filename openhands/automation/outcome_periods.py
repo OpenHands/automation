@@ -10,12 +10,17 @@ from openhands.automation.utils import utcnow
 # A clock a few minutes ahead is normal. A time further ahead is a typo.
 MAX_CLOCK_SKEW = timedelta(minutes=5)
 
-# grain -> (pattern, format, example)
+# grain -> (pattern, format, example). [0-9], not \d: \d also matches digits of
+# other scripts, which int() converts, so one period would have several spellings.
 _PERIODS: dict[str, tuple[str, str, str]] = {
-    "hour": (r"(\d{4})-(\d{2})-(\d{2})T(\d{2})", "YYYY-MM-DDTHH", "2026-11-24T14"),
-    "day": (r"(\d{4})-(\d{2})-(\d{2})", "YYYY-MM-DD", "2026-11-24"),
-    "week": (r"(\d{4})-W(\d{2})", "YYYY-Www, an ISO week", "2026-W48"),
-    "month": (r"(\d{4})-(\d{2})", "YYYY-MM", "2026-11"),
+    "hour": (
+        r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2})",
+        "YYYY-MM-DDTHH",
+        "2026-11-24T14",
+    ),
+    "day": (r"([0-9]{4})-([0-9]{2})-([0-9]{2})", "YYYY-MM-DD", "2026-11-24"),
+    "week": (r"([0-9]{4})-W([0-9]{2})", "YYYY-Www, an ISO week", "2026-W48"),
+    "month": (r"([0-9]{4})-([0-9]{2})", "YYYY-MM", "2026-11"),
 }
 
 

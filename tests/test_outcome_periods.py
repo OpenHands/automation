@@ -45,6 +45,11 @@ def test_a_period_starts_at_the_beginning_of_its_utc_hour_day_week_or_month(
         ("day", "2026-02-30", "YYYY-MM-DD"),
         ("hour", "2026-11-24T24", "YYYY-MM-DDTHH"),
         ("day", " 2026-11-24", "YYYY-MM-DD"),
+        ("week", "\uff12\uff10\uff12\uff16-W48", "YYYY-Www"),
+        ("week", "2026-W\uff14\uff18", "YYYY-Www"),
+        ("day", "\u0662\u0660\u0662\u0666-11-24", "YYYY-MM-DD"),
+        ("month", "2026-\u0967\u0967", "YYYY-MM"),
+        ("hour", "2026-11-24T\u0967\u096a", "YYYY-MM-DDTHH"),
     ],
 )
 def test_a_period_that_does_not_match_the_grain_names_the_expected_format(
