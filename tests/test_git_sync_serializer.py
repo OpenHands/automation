@@ -19,7 +19,7 @@ from openhands.automation.git_sync.serializer import (
     rebuild_tarball,
     serialize_automation,
 )
-from openhands.automation.models import Automation
+from openhands.automation.models import Automation, AutomationState
 
 
 def _make_tarball(files: dict[str, bytes]) -> bytes:
@@ -168,6 +168,18 @@ class TestSerializeAutomation:
 
         fields = yaml.safe_load(files["automation.yaml"])
         assert "description" not in fields
+
+    def test_keeping_activation_local_still_exports_a_draft(self):
+        # Arrange
+        automation = _make_automation(state=AutomationState.DRAFT, enabled=False)
+
+        # Act
+        files = serialize_automation(automation, None, keep_activation_local=True)
+
+        # Assert
+        fields = yaml.safe_load(files["automation.yaml"])
+        assert fields["state"] == "DRAFT"
+        assert fields["enabled"] is False
 
     def test_external_url_skips_tarball_dir(self):
         automation = _make_automation(tarball_path="https://example.com/x.tar.gz")

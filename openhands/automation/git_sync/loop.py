@@ -45,6 +45,7 @@ from openhands.automation.git_sync.config_override import (
     effective_interval_for,
     effective_settings_for,
     get_or_create_org_config,
+    resolve_effective_git_sync_settings,
 )
 from openhands.automation.git_sync.plugin_spec import (
     PLUGIN_SPEC_RUNTIME,
@@ -151,7 +152,9 @@ class SyncCycleResult:
 # --- CRUD hook -------------------------------------------------------------
 
 
-async def mark_git_sync_dirty(session: AsyncSession, automation: Automation) -> None:
+async def mark_git_sync_dirty(
+    session: AsyncSession, automation: Automation, *, activation_only: bool = False
+) -> None:
     """Flag an automation as needing (re)export on the next sync cycle.
 
     Best-effort: swallows errors inside a SAVEPOINT so the caller's pending
@@ -163,9 +166,23 @@ async def mark_git_sync_dirty(session: AsyncSession, automation: Automation) -> 
     effective `enabled` would drop every edit made while sync is paused; both
     silently lose changes a later cycle should export. An org that never
     configures sync just carries one small state row per automation.
+
+    `activation_only` says the change did nothing but switch the automation
+    between ACTIVE and INACTIVE. An org that keeps activation local never
+    exports that, so there is nothing to flag -- and flagging it would make
+    the next cycle prefer this copy over a git-side edit for no reason.
     """
     try:
         async with session.begin_nested():
+            if (
+                activation_only
+                and (
+                    await resolve_effective_git_sync_settings(
+                        session, automation.org_id
+                    )
+                ).git_sync_keep_activation_local
+            ):
+                return
             await _mark_git_sync_dirty_inner(session, automation)
     except Exception:
         logger.exception(
@@ -517,12 +534,15 @@ async def _validate_and_resolve_fields(
     pending_storage_deletes: list[str],
     owner: _Owner,
     existing: Automation | None = None,
+    keep_activation_local: bool = False,
 ) -> dict:
     """Validate automation.yaml fields and resolve a tarball_path, mirroring
     the API request schemas (schemas.py).
 
     Returns a dict rather than mutating an Automation field by field, so a
     failure partway through can't leave a half-applied automation.
+
+    `keep_activation_local` is the org's `git_sync_keep_activation_local`.
     """
     name = fields.get("name")
     raw_entrypoint = fields.get("entrypoint")
@@ -595,6 +615,17 @@ async def _validate_and_resolve_fields(
         and requested_enabled != enabled
     ):
         raise ValueError("enabled must be true only when state is ACTIVE")
+    if (
+        keep_activation_local
+        and state != AutomationState.DRAFT
+        and (existing is None or existing.state != AutomationState.DRAFT)
+    ):
+        # Whether it runs is this org's call, whatever git says: an update
+        # keeps the current status and a new folder starts INACTIVE. Applied
+        # after the checks above so invalid values are still refused, and not
+        # to drafts, whose transitions are not an activation status.
+        state = existing.state if existing is not None else AutomationState.INACTIVE
+        enabled = automation_state_enabled(state)
 
     agent_profile_id = (
         uuid.UUID(fields["agent_profile_id"])
@@ -661,6 +692,7 @@ async def _create_automation_from_git(
     head: str,
     pending_storage_deletes: list[str],
     commit_author: CommitAuthor = _unknown_author,
+    keep_activation_local: bool = False,
 ) -> None:
     if owner is None:
         # A ValueError skips just this directory (see the import loop) rather
@@ -670,7 +702,13 @@ async def _create_automation_from_git(
             "configuration once so imports have an owner to run as"
         )
     values = await _validate_and_resolve_fields(
-        session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
+        session,
+        deserialized.fields,
+        deserialized,
+        slug,
+        pending_storage_deletes,
+        owner,
+        keep_activation_local=keep_activation_local,
     )
     # The admin who saved the Git Sync config both creates it and is its
     # run-as identity.
@@ -717,6 +755,7 @@ async def _update_automation_from_git(
     head: str,
     pending_storage_deletes: list[str],
     commit_author: CommitAuthor = _unknown_author,
+    keep_activation_local: bool = False,
 ) -> None:
     new_hash = compute_content_hash(dir_files)
     if new_hash == state.content_hash:
@@ -739,6 +778,7 @@ async def _update_automation_from_git(
         pending_storage_deletes,
         _Owner(automation.user_id, automation.org_id),
         existing=automation,
+        keep_activation_local=keep_activation_local,
     )
     for column, value in values.items():
         if column == "trigger" and _same_trigger(automation.trigger, value):
@@ -829,6 +869,7 @@ async def _import_from_git(
     head: str,
     timeout: float,
     encryption_key: str,
+    keep_activation_local: bool,
     result: SyncCycleResult,
     pending_storage_deletes: list[str],
 ) -> None:
@@ -895,6 +936,7 @@ async def _import_from_git(
                         head,
                         pending_storage_deletes,
                         commit_author,
+                        keep_activation_local,
                     )
                     result.imported += 1
                 else:
@@ -906,6 +948,7 @@ async def _import_from_git(
                         head,
                         pending_storage_deletes,
                         commit_author,
+                        keep_activation_local,
                     )
         except (ValidationError, ValueError) as e:
             del pending_storage_deletes[pending_snapshot:]
@@ -1090,6 +1133,7 @@ async def _export_dirty_automations(
     org_id: uuid.UUID,
     sync_root: Path,
     encryption_key: str,
+    keep_activation_local: bool,
     result: SyncCycleResult,
 ) -> bool:
     # Repair exports from versions that silently omitted plugin_spec.
@@ -1152,7 +1196,9 @@ async def _export_dirty_automations(
 
         try:
             tarball_bytes = await _read_tarball_bytes(automation, session)
-            files = serialize_automation(automation, tarball_bytes)
+            files = serialize_automation(
+                automation, tarball_bytes, keep_activation_local=keep_activation_local
+            )
         except Exception:
             logger.exception(
                 "Failed to serialize automation %s for git sync", automation.id
@@ -1324,6 +1370,7 @@ async def _run_sync_cycle_leased(
     token = git_settings.git_sync_token
     branch = git_settings.git_sync_branch.strip()
     encryption_key = git_settings.git_sync_encryption_key
+    keep_activation_local = git_settings.git_sync_keep_activation_local
 
     # Re-validated here, not only at the API boundary, since this also covers a
     # misconfigured AUTOMATION_GIT_SYNC_PATH and `sync_root` is what the export
@@ -1380,6 +1427,7 @@ async def _run_sync_cycle_leased(
                 head,
                 timeout,
                 encryption_key,
+                keep_activation_local,
                 result,
                 pending_storage_deletes,
             )
@@ -1391,7 +1439,7 @@ async def _run_sync_cycle_leased(
         # Return value unused: the counters land on `result`, and the push must
         # run regardless of whether anything was exported (see below).
         await _export_dirty_automations(
-            session, org_id, sync_root, encryption_key, result
+            session, org_id, sync_root, encryption_key, keep_activation_local, result
         )
         await session.commit()
 

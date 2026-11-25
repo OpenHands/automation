@@ -52,16 +52,21 @@ from openhands.automation.models import (
     AutomationChangeEvent,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
+    AutomationRun,
+    AutomationRunStatus,
     AutomationState,
     Base,
     CustomWebhook,
     TarballUpload,
     UploadStatus,
 )
+from openhands.automation.scheduler import poll_and_schedule
 from openhands.automation.schemas import CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR
 from openhands.automation.storage.local import LocalFileStore
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.run import disable_automation
 from openhands.automation.utils.tarball_validation import parse_internal_upload_id
+from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 
 
 # The one org local mode syncs. `run_sync_cycle` is per org, so the
@@ -1428,6 +1433,156 @@ class TestEncryptionKeyChangeReExports:
         assert result.pushed_commit is None
 
 
+async def _disable_after_a_permanent_error(session_factory, automation_id) -> None:
+    await disable_automation(session_factory, automation_id, "tarball not found")
+
+
+async def _disable_after_repeated_failures(session_factory, automation_id) -> None:
+    async with session_factory() as session:
+        for index in range(3):
+            at = utcnow() + timedelta(seconds=index)
+            session.add(
+                AutomationRun(
+                    automation_id=automation_id,
+                    status=AutomationRunStatus.FAILED,
+                    status_detail={"permanent": True},
+                    created_at=at,
+                    completed_at=at,
+                )
+            )
+        await session.flush()
+        await maybe_disable_unhealthy_automation(session, automation_id, threshold=3)
+        await session.commit()
+
+
+async def _disable_for_an_impossible_schedule(session_factory, automation_id) -> None:
+    async with session_factory() as session:
+        automation = await session.get(Automation, automation_id)
+        assert automation is not None
+        # A stored schedule that can never fire: February has no 31st.
+        automation.trigger = {"type": "cron", "schedule": "0 0 31 2 *"}
+        await session.commit()
+    await poll_and_schedule(session_factory)
+
+
+class TestKeepActivationLocal:
+    """An org can keep whether an automation is on out of its repository.
+
+    Git then records what each automation does, and turning one on or off is
+    neither exported nor a reason to export it.
+    """
+
+    @staticmethod
+    def _committed_fields(origin: Path, slug: str = "my-first-automation") -> dict:
+        """The automation.yaml of `slug` at the remote's HEAD."""
+        content = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(origin),
+                "show",
+                f"main:automations/{slug}/automation.yaml",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        return yaml.safe_load(content)
+
+    async def _save_option(self, session_factory, keep_local: bool) -> GitSyncSettings:
+        """Save the option as `PUT /config` does; return the settings a cycle uses."""
+        async with session_factory() as session:
+            await _apply_override(
+                session, {"git_sync_keep_activation_local": keep_local}
+            )
+            await session.commit()
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            return effective_settings_for(org_config)
+
+    async def _sync(self, session_factory, settings, service_settings):
+        return await run_sync_cycle(
+            session_factory, LOCAL_ORG_ID, settings, service_settings
+        )
+
+    async def test_export_leaves_activation_out_of_the_repository(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        # Arrange
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        keep_local = await self._save_option(sqlite_session_factory, True)
+
+        # Act
+        await self._sync(sqlite_session_factory, keep_local, service_settings)
+
+        # Assert
+        fields = self._committed_fields(origin)
+        assert fields["name"] == "My First Automation"
+        assert "enabled" not in fields
+        assert "state" not in fields
+
+    @pytest.mark.parametrize(
+        "disable",
+        [
+            _disable_after_a_permanent_error,
+            _disable_after_repeated_failures,
+            _disable_for_an_impossible_schedule,
+        ],
+    )
+    async def test_an_automatic_disable_pushes_nothing(
+        self, sqlite_session_factory, file_store, service_settings, disable
+    ):
+        # Arrange
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        keep_local = await self._save_option(sqlite_session_factory, True)
+        await self._sync(sqlite_session_factory, keep_local, service_settings)
+
+        # Act
+        await disable(sqlite_session_factory, automation_id)
+        result = await self._sync(sqlite_session_factory, keep_local, service_settings)
+
+        # Assert
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+        assert automation is not None and automation.enabled is False
+        assert result.exported == 0
+        assert result.pushed_commit is None
+
+    async def test_turning_it_on_does_not_rewrite_the_repository(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        # Arrange
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        await self._sync(sqlite_session_factory, git_settings, service_settings)
+
+        # Act
+        keep_local = await self._save_option(sqlite_session_factory, True)
+        result = await self._sync(sqlite_session_factory, keep_local, service_settings)
+
+        # Assert
+        assert result.exported == 0
+        assert result.pushed_commit is None
+        assert self._committed_fields(origin)["enabled"] is True
+
+    async def test_turning_it_off_writes_the_current_status_back(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        # Arrange
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        keep_local = await self._save_option(sqlite_session_factory, True)
+        await self._sync(sqlite_session_factory, keep_local, service_settings)
+
+        # Act
+        synced = await self._save_option(sqlite_session_factory, False)
+        result = await self._sync(sqlite_session_factory, synced, service_settings)
+
+        # Assert
+        assert result.pushed_commit is not None
+        fields = self._committed_fields(origin)
+        assert fields["enabled"] is True
+        assert fields["state"] == "ACTIVE"
+
+
 class TestLastError:
     async def test_failed_cycle_records_last_error(
         self, sqlite_session_factory, git_settings, service_settings, monkeypatch
@@ -2710,6 +2865,84 @@ class TestImportedAutomationDefaults:
             automation = (await session.execute(select(Automation))).scalars().one()
         assert automation.entrypoint == "python main.py --flag"
         assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    @pytest.fixture
+    def keep_local_settings(self, git_settings):
+        """The cycle settings of an org that keeps activation out of its repo."""
+        return git_settings.model_copy(update={"git_sync_keep_activation_local": True})
+
+    async def test_new_folder_imports_inactive_when_activation_is_local(
+        self, sqlite_session_factory, keep_local_settings, service_settings, origin
+    ):
+        # Arrange
+        await self._push_hand_written(origin, self._YAML + "enabled: true\n")
+
+        # Act
+        await self._cycle(sqlite_session_factory, keep_local_settings, service_settings)
+
+        # Assert
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    async def test_update_keeps_the_current_value_when_activation_is_local(
+        self, sqlite_session_factory, keep_local_settings, service_settings, origin
+    ):
+        # Arrange
+        await self._push_hand_written(origin)
+        await self._cycle(sqlite_session_factory, keep_local_settings, service_settings)
+        await self._push_hand_written(
+            origin,
+            self._YAML.replace("main.py", "main.py --flag") + "enabled: true\n",
+        )
+
+        # Act
+        await self._cycle(sqlite_session_factory, keep_local_settings, service_settings)
+
+        # Assert
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py --flag"
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    async def test_update_still_activates_a_draft_when_activation_is_local(
+        self, sqlite_session_factory, keep_local_settings, service_settings, origin
+    ):
+        # Arrange
+        await self._push_hand_written(origin, self._YAML + "state: DRAFT\n")
+        await self._cycle(sqlite_session_factory, keep_local_settings, service_settings)
+        await self._push_hand_written(origin, self._YAML + "state: ACTIVE\n")
+
+        # Act
+        await self._cycle(sqlite_session_factory, keep_local_settings, service_settings)
+
+        # Assert
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.state.value == "ACTIVE"
+        assert automation.enabled is True
+
+    async def test_update_still_cannot_move_to_draft_when_activation_is_local(
+        self, sqlite_session_factory, keep_local_settings, service_settings, origin
+    ):
+        # Arrange
+        await self._push_hand_written(origin)
+        await self._cycle(sqlite_session_factory, keep_local_settings, service_settings)
+        await self._push_hand_written(
+            origin,
+            self._YAML.replace("main.py", "main.py --flag") + "state: DRAFT\n",
+        )
+
+        # Act
+        await self._cycle(sqlite_session_factory, keep_local_settings, service_settings)
+
+        # Assert
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py"
         assert automation.state.value == "INACTIVE"
 
     async def test_import_and_update_log_the_commit_author(

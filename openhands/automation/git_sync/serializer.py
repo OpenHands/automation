@@ -21,7 +21,7 @@ import yaml
 from pydantic import SecretStr
 
 from openhands.automation.git_sync.plugin_spec import validate_synced_plugin_spec
-from openhands.automation.models import Automation
+from openhands.automation.models import Automation, AutomationState
 from openhands.automation.utils.tarball_validation import is_internal_url
 from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 
@@ -131,6 +131,7 @@ def _automation_yaml_fields(
     *,
     tarball_is_internal: bool,
     tarball_executables: list[str],
+    keep_activation_local: bool,
 ) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "name": automation.name,
@@ -154,6 +155,10 @@ def _automation_yaml_fields(
             "url": None if tarball_is_internal else automation.tarball_path,
         },
     }
+    # With activation kept local the repo records what an automation does, not
+    # whether it runs. DRAFT is not an activation status, so a draft keeps both.
+    if keep_activation_local and fields["state"] != AutomationState.DRAFT:
+        del fields["enabled"], fields["state"]
     # Omit null descriptions so enabling this field does not rewrite every
     # existing automation on the first sync cycle.
     if automation.description is not None:
@@ -171,12 +176,18 @@ def _automation_yaml_fields(
 
 
 def serialize_automation(
-    automation: Automation, tarball_bytes: bytes | None
+    automation: Automation,
+    tarball_bytes: bytes | None,
+    *,
+    keep_activation_local: bool = False,
 ) -> dict[str, bytes]:
     """Serialize an automation to a `{relative_path: content}` file tree.
 
     Does no I/O -- the caller fetches `tarball_bytes`, passing `None` when
     there is nothing to extract (external URL, or unavailable).
+
+    `keep_activation_local` leaves `enabled` and `state` out of automation.yaml
+    for anything but a draft (see `git_sync_keep_activation_local`).
     """
     tarball_is_internal = is_internal_url(automation.tarball_path)
 
@@ -189,6 +200,7 @@ def serialize_automation(
         automation,
         tarball_is_internal=tarball_is_internal,
         tarball_executables=executables,
+        keep_activation_local=keep_activation_local,
     )
 
     files: dict[str, bytes] = {

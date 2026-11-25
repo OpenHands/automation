@@ -577,6 +577,18 @@ exactly one org, the deterministic local org from `auth.py`'s
   disk, not against `state.content_hash`: a git-side edit leaves the DB row
   untouched, so a hash comparison would skip the write and strand the two
   versions.
+- **Keeping activation local**: with an org's `keep_activation_local` on
+  (`PUT /v1/git-sync/config`; default off, env default
+  `AUTOMATION_GIT_SYNC_KEEP_ACTIVATION_LOCAL`), whether an automation is ACTIVE
+  or INACTIVE stays out of the repo. A change that only switches it on or off
+  (`mark_git_sync_dirty(..., activation_only=True)`: the PATCH toggle and the
+  automatic disables) does not mark it dirty; the export omits `enabled` and
+  `state`; and the import keeps an existing automation's status and starts a
+  new folder INACTIVE, whatever the YAML says. Drafts are exempt from all
+  three: DRAFT exports, imports and validates as before. Turning the option
+  off marks the org's automations dirty, so the next cycle writes their
+  current status back; turning it on rewrites nothing, and activation lines
+  already in the repo are ignored until that automation is next exported.
 - Automations that predate git sync being switched on have no state row, and the
   export only reads dirty ones. `_backfill_missing_states` creates them (dirty)
   for the org at the start of every cycle, so the first sync exports everything
