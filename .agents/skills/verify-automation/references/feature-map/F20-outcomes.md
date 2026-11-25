@@ -53,6 +53,7 @@ Preconditions:
 
 ## Gotchas
 
+- `since` is inclusive and `until` is exclusive on both read routes, so adjacent windows (`[a, b)` then `[b, c)`) never count a row twice.
 - Outcome tokens are intentionally the same scoped token family as KV tokens, so a run gets one secret with an automation and run claim rather than a second auth system.
 - Typed items use `type`, not the storage column `value_type`. Source is derived from authentication, never the request body. Use typed values for datetime or JSON; parser-based nested payloads are a separate layer.
 - A plugin-spec automation takes no `outcome_parsers`: the create request rejects the field (422), `PATCH` rejects it, and git sync refuses a `plugin_spec` directory that carries it. Outcome declarations for plugin-spec automations belong in the plugin manifest. It can still report with typed `values` or a flat `payload`.

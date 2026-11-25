@@ -163,8 +163,16 @@ async def list_factory_outcome_values(
     key: str | None = Query(default=None, min_length=1, max_length=100),
     run_id: uuid.UUID | None = None,
     source: Literal["agent", "user", "platform"] | None = None,
-    since: datetime | None = None,
-    until: datetime | None = None,
+    since: datetime | None = Query(
+        default=None, description="Inclusive lower bound on the submission time."
+    ),
+    until: datetime | None = Query(
+        default=None,
+        description=(
+            "Exclusive upper bound on the submission time, so adjacent windows "
+            "never count the same row."
+        ),
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: AuthenticatedUser = Depends(_require_view_automations),
@@ -187,7 +195,7 @@ async def list_factory_outcome_values(
     if since is not None:
         conditions.append(AutomationOutcomeValue.created_at >= since)
     if until is not None:
-        conditions.append(AutomationOutcomeValue.created_at <= until)
+        conditions.append(AutomationOutcomeValue.created_at < until)
 
     total_result = await session.execute(
         select(func.count()).select_from(AutomationOutcomeValue).where(*conditions)
@@ -230,8 +238,16 @@ async def aggregate_factory_outcome_values(
     automation_id: uuid.UUID | None = None,
     run_id: uuid.UUID | None = None,
     source: Literal["agent", "user", "platform"] | None = None,
-    since: datetime | None = None,
-    until: datetime | None = None,
+    since: datetime | None = Query(
+        default=None, description="Inclusive lower bound on the submission time."
+    ),
+    until: datetime | None = Query(
+        default=None,
+        description=(
+            "Exclusive upper bound on the submission time, so adjacent windows "
+            "never count the same row."
+        ),
+    ),
     group_by: Literal["none", "day", "week", "month"] = "none",
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
@@ -256,7 +272,7 @@ async def aggregate_factory_outcome_values(
     if since is not None:
         conditions.append(AutomationOutcomeValue.created_at >= since)
     if until is not None:
-        conditions.append(AutomationOutcomeValue.created_at <= until)
+        conditions.append(AutomationOutcomeValue.created_at < until)
 
     result = await session.execute(
         select(AutomationOutcomeValue)
