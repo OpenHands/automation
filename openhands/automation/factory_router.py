@@ -130,6 +130,13 @@ def _outcome_key_definitions(factory: Factory) -> dict[str, OutcomeKeyDefinition
     }
 
 
+def _checked_outcome_key(key: str) -> str:
+    try:
+        return validate_outcome_key(key)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
 def _key_conflict(key: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
@@ -314,7 +321,7 @@ async def put_factory_outcome_key(
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> FactoryResponse:
-    validate_outcome_key(key)
+    _checked_outcome_key(key)
     factory = await get_org_factory(session, user.org_id, factory_id, lock="update")
     keys = _outcome_keys(factory)
     current_type = keys.get(key, {}).get("type")
@@ -347,7 +354,7 @@ async def delete_factory_outcome_key(
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
-    validate_outcome_key(key)
+    _checked_outcome_key(key)
     factory = await get_org_factory(session, user.org_id, factory_id, lock="update")
     keys = _outcome_keys(factory)
     if key not in keys:

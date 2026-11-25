@@ -3,6 +3,7 @@ import pytest
 from openhands.automation.outcome_values import (
     extract_outcome_value_columns,
     normalize_outcome_values,
+    validate_outcome_key,
 )
 
 
@@ -64,3 +65,20 @@ def test_direct_typed_values_reject_duplicate_keys():
                 {"key": "score", "value_type": "number", "value": 2},
             ]
         )
+
+
+@pytest.mark.parametrize(
+    "key", ["platform.cost", "Platform.cost", "PLATFORM.run.count"]
+)
+def test_platform_prefix_is_reserved(key):
+    with pytest.raises(ValueError, match="reserved for the platform"):
+        validate_outcome_key(key)
+    with pytest.raises(ValueError, match="reserved for the platform"):
+        extract_outcome_value_columns({key: 1})
+    with pytest.raises(ValueError, match="reserved for the platform"):
+        normalize_outcome_values([{"key": key, "value_type": "number", "value": 1}])
+
+
+@pytest.mark.parametrize("key", ["platform", "platforms.cost", "my.platform.cost"])
+def test_only_the_platform_dot_prefix_is_reserved(key):
+    assert validate_outcome_key(key) == key
