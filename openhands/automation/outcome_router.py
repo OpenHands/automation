@@ -2,11 +2,11 @@
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
@@ -19,7 +19,7 @@ from openhands.automation.models import (
     AutomationRun,
     Factory,
 )
-from openhands.automation.outcome_aggregation import aggregate_outcome_values
+from openhands.automation.outcome_aggregation import aggregate_buckets, aggregate_total
 from openhands.automation.outcome_parsers import parse_outcome_payload
 from openhands.automation.outcome_schemas import (
     OutcomeAggregateBucket,
@@ -156,6 +156,36 @@ async def submit_outcome(
     return SubmitOutcomeResponse(stored=len(columns_list))
 
 
+def _fact_conditions(
+    org_id: uuid.UUID,
+    factory_id: uuid.UUID,
+    *,
+    key: str | None,
+    automation_id: uuid.UUID | None,
+    run_id: uuid.UUID | None,
+    source: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[ColumnElement[bool]]:
+    conditions = [
+        AutomationOutcomeValue.factory_id == factory_id,
+        AutomationOutcomeValue.org_id == org_id,
+    ]
+    if key is not None:
+        conditions.append(AutomationOutcomeValue.key == key)
+    if automation_id is not None:
+        conditions.append(AutomationOutcomeValue.automation_id == automation_id)
+    if run_id is not None:
+        conditions.append(AutomationOutcomeValue.run_id == run_id)
+    if source is not None:
+        conditions.append(AutomationOutcomeValue.source == source)
+    if since is not None:
+        conditions.append(AutomationOutcomeValue.created_at >= since)
+    if until is not None:
+        conditions.append(AutomationOutcomeValue.created_at < until)
+    return conditions
+
+
 @router.get("/factories/{factory_id}/outcomes/values")
 async def list_factory_outcome_values(
     factory_id: uuid.UUID,
@@ -180,22 +210,16 @@ async def list_factory_outcome_values(
 ) -> OutcomeValuesResponse:
     await get_org_factory(session, user.org_id, factory_id)
 
-    conditions = [
-        AutomationOutcomeValue.factory_id == factory_id,
-        AutomationOutcomeValue.org_id == user.org_id,
-    ]
-    if key is not None:
-        conditions.append(AutomationOutcomeValue.key == key)
-    if automation_id is not None:
-        conditions.append(AutomationOutcomeValue.automation_id == automation_id)
-    if run_id is not None:
-        conditions.append(AutomationOutcomeValue.run_id == run_id)
-    if source is not None:
-        conditions.append(AutomationOutcomeValue.source == source)
-    if since is not None:
-        conditions.append(AutomationOutcomeValue.created_at >= since)
-    if until is not None:
-        conditions.append(AutomationOutcomeValue.created_at < until)
+    conditions = _fact_conditions(
+        user.org_id,
+        factory_id,
+        key=key,
+        automation_id=automation_id,
+        run_id=run_id,
+        source=source,
+        since=since,
+        until=until,
+    )
 
     total_result = await session.execute(
         select(func.count()).select_from(AutomationOutcomeValue).where(*conditions)
@@ -217,17 +241,6 @@ async def list_factory_outcome_values(
         ],
         total=total,
     )
-
-
-def _outcome_bucket(created_at: datetime, group_by: str) -> str:
-    if group_by == "day":
-        return created_at.date().isoformat()
-    if group_by == "week":
-        start = created_at.date() - timedelta(days=created_at.weekday())
-        return start.isoformat()
-    if group_by == "month":
-        return f"{created_at.year:04d}-{created_at.month:02d}"
-    raise ValueError(f"Unsupported outcome aggregate group_by: {group_by}")
 
 
 @router.get("/factories/{factory_id}/outcomes/aggregate")
@@ -254,47 +267,27 @@ async def aggregate_factory_outcome_values(
 ) -> OutcomeAggregateResponse:
     await get_org_factory(session, user.org_id, factory_id)
 
-    conditions = [
-        AutomationOutcomeValue.factory_id == factory_id,
-        AutomationOutcomeValue.org_id == user.org_id,
-        AutomationOutcomeValue.key == key,
-    ]
-    if operation in {"sum", "avg", "min", "max"}:
-        conditions.append(AutomationOutcomeValue.numeric_value.is_not(None))
-    elif operation in {"count_true", "count_false"}:
-        conditions.append(AutomationOutcomeValue.value_type == "boolean")
-    if automation_id is not None:
-        conditions.append(AutomationOutcomeValue.automation_id == automation_id)
-    if run_id is not None:
-        conditions.append(AutomationOutcomeValue.run_id == run_id)
-    if source is not None:
-        conditions.append(AutomationOutcomeValue.source == source)
-    if since is not None:
-        conditions.append(AutomationOutcomeValue.created_at >= since)
-    if until is not None:
-        conditions.append(AutomationOutcomeValue.created_at < until)
-
-    result = await session.execute(
-        select(AutomationOutcomeValue)
-        .where(*conditions)
-        .order_by(AutomationOutcomeValue.created_at.asc())
+    conditions = _fact_conditions(
+        user.org_id,
+        factory_id,
+        key=key,
+        automation_id=automation_id,
+        run_id=run_id,
+        source=source,
+        since=since,
+        until=until,
     )
-    values = list(result.scalars())
     if group_by == "none":
+        total = await aggregate_total(session, conditions, operation)
         return OutcomeAggregateResponse(
             key=key,
             operation=operation,
-            value=aggregate_outcome_values(values, operation),
-            count=len(values),
+            value=total.value,
+            count=total.count,
             since=since,
             until=until,
         )
-
-    grouped: dict[str, list[AutomationOutcomeValue]] = {}
-    for value in values:
-        grouped.setdefault(_outcome_bucket(value.created_at, group_by), []).append(
-            value
-        )
+    buckets = await aggregate_buckets(session, conditions, operation, group_by)
     return OutcomeAggregateResponse(
         key=key,
         operation=operation,
@@ -303,10 +296,8 @@ async def aggregate_factory_outcome_values(
         until=until,
         buckets=[
             OutcomeAggregateBucket(
-                bucket=bucket,
-                value=aggregate_outcome_values(bucket_values, operation),
-                count=len(bucket_values),
+                bucket=item.bucket, value=item.value, count=item.count
             )
-            for bucket, bucket_values in sorted(grouped.items())
+            for item in buckets
         ],
     )
