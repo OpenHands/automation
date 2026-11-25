@@ -115,28 +115,8 @@ class Factory(Base):
     )
 
     @property
-    def outcome_key_definitions(self) -> dict[str, dict[str, Any]]:
-        """The registered keys, each as ``{"type": ...}``. Read keys only here."""
-        return _tolerate_flat_outcome_keys(self.outcome_keys)
-
-    @property
     def outcome_key_types(self) -> dict[str, str]:
-        return {key: spec["type"] for key, spec in self.outcome_key_definitions.items()}
-
-
-# DELETE-ME(flat-outcome-keys): temporary. Delete this function, its one call in
-# Factory.outcome_key_definitions, and test_flat_outcome_keys_are_still_read once
-# the release that contains this change is out. Until then, main briefly stored
-# keys flat ({"score": "number"}) before they became objects
-# ({"score": {"type": "number"}}). A flat row is read as an object, and any write
-# to the keys stores the object form. Nothing else needs to change when it goes.
-def _tolerate_flat_outcome_keys(
-    raw: dict[str, Any] | None,
-) -> dict[str, dict[str, Any]]:
-    return {
-        key: spec if isinstance(spec, dict) else {"type": spec}
-        for key, spec in (raw or {}).items()
-    }
+        return {key: spec["type"] for key, spec in (self.outcome_keys or {}).items()}
 
 
 class Automation(Base):

@@ -1069,31 +1069,6 @@ async def test_outcome_keys_are_managed_as_subresource(async_client):
     assert (await async_client.get(f"{url}/outcome-keys")).json() == {}
 
 
-# DELETE-ME(flat-outcome-keys): remove with _tolerate_flat_outcome_keys in models.py.
-async def test_flat_outcome_keys_are_still_read(async_client, async_session):
-    factory = Factory(org_id=TEST_ORG_ID, name="Flat", outcome_keys={"score": "number"})
-    async_session.add(factory)
-    await async_session.flush()
-    url = f"{FACTORIES}/{factory.id}"
-
-    assert (await async_client.get(url)).json()["outcome_keys"] == {
-        "score": {"type": "number"}
-    }
-    assert (await async_client.get(f"{url}/outcome-keys")).json() == {
-        "score": {"type": "number"}
-    }
-
-    added = await async_client.put(
-        f"{url}/outcome-keys/passed", json={"type": "boolean"}
-    )
-    assert added.status_code == 200, added.text
-    await async_session.refresh(factory)
-    assert factory.outcome_keys == {
-        "score": {"type": "number"},
-        "passed": {"type": "boolean"},
-    }
-
-
 async def test_used_outcome_key_cannot_be_retyped_or_removed(
     async_client, async_session
 ):
