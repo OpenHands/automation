@@ -974,6 +974,31 @@ def test_local_api_key_holds_manage_automations():
     assert "manage_automations" in _get_local_user().permissions
 
 
+async def test_plugin_spec_automation_rejects_outcome_parsers_on_patch(
+    async_client, async_session
+):
+    factory = await _create_factory(
+        async_client, "Parser factory", outcome_keys={"score": {"type": "number"}}
+    )
+    parser = {"key": "score", "expression": "result.score", "value_type": "number"}
+    automation = _automation_row(
+        "Plugin spec",
+        factory_id=uuid.UUID(factory["id"]),
+        tarball_path="plugin-spec://runtime",
+        plugin_spec={"plugin": {"source": "github:example/plugin"}, "config": {}},
+    )
+    async_session.add(automation)
+    await async_session.flush()
+    url = f"{BASE}/{automation.id}"
+
+    response = await async_client.patch(url, json={"outcome_parsers": [parser]})
+    assert response.status_code == 422, response.text
+    assert "plugin manifest" in response.text
+
+    cleared = await async_client.patch(url, json={"outcome_parsers": None})
+    assert cleared.status_code == 200, cleared.text
+
+
 # --- Git Sync ---
 
 
@@ -1107,3 +1132,33 @@ async def test_used_outcome_key_cannot_be_retyped_or_removed(
     assert (
         await async_client.get(f"{FACTORIES}/{created['id']}/outcome-keys")
     ).json() == {"score": {"type": "number"}}
+
+
+async def test_git_sync_import_rejects_outcome_parsers_on_a_plugin_spec(
+    async_session: AsyncSession,
+):
+    row = _automation_row(
+        "Plugin spec",
+        id=uuid.uuid4(),
+        tarball_path="plugin-spec://runtime",
+        plugin_spec={"plugin": {"source": "github:example/plugin"}, "config": {}},
+    )
+    files = serialize_automation(row, None)
+    fields = yaml.safe_load(files["automation.yaml"].decode())
+    fields["outcome_parsers"] = [
+        {"key": "score", "expression": "result.score", "value_type": "number"}
+    ]
+    files = {**files, "automation.yaml": yaml.safe_dump(fields).encode()}
+    deserialized = deserialize_automation(files)
+    assert deserialized is not None
+
+    with pytest.raises(ValueError, match="not allowed with 'plugin_spec'"):
+        await _create_automation_from_git(
+            async_session,
+            _Owner(TEST_USER_ID, TEST_ORG_ID),
+            "plugin-spec",
+            deserialized,
+            files,
+            "head-1",
+            [],
+        )

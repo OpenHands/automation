@@ -542,6 +542,10 @@ async def _validate_and_resolve_fields(
     raw_parsers = fields.get("outcome_parsers")
     if raw_parsers is not None and not isinstance(raw_parsers, list):
         raise ValueError("automation.yaml 'outcome_parsers' must be a list")
+    if raw_parsers is not None and fields.get("plugin_spec") is not None:
+        raise ValueError(
+            "automation.yaml 'outcome_parsers' is not allowed with 'plugin_spec'"
+        )
     parsers = (
         validate_outcome_parsers(
             [OutcomeParserDefinition.model_validate(item) for item in raw_parsers]
