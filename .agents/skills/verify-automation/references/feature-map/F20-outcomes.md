@@ -53,5 +53,6 @@ Preconditions:
 
 ## Gotchas
 
+- `since` is inclusive and `until` is exclusive on both read routes, so adjacent windows (`[a, b)` then `[b, c)`) never count a row twice.
 - Outcome tokens are intentionally the same scoped token family as KV tokens, so a run gets one secret with an automation and run claim rather than a second auth system.
 - Typed items use `type`, not the storage column `value_type`. Source is derived from authentication, never the request body. Use typed values for datetime or JSON; parser-based nested payloads are a separate layer.

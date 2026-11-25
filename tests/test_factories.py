@@ -7,6 +7,7 @@ delete transaction and the foreign key's SET NULL are SQL behavior.
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 import yaml
@@ -1067,6 +1068,44 @@ async def test_outcome_keys_are_managed_as_subresource(async_client):
     removed = await async_client.delete(f"{url}/outcome-keys/score")
     assert removed.status_code == 204, removed.text
     assert (await async_client.get(f"{url}/outcome-keys")).json() == {}
+
+
+async def test_outcome_until_is_exclusive_so_adjacent_windows_do_not_overlap(
+    async_client, async_session
+):
+    created = await _create_factory(
+        async_client, "Windows", outcome_keys={"score": {"type": "number"}}
+    )
+    boundary = datetime(2026, 11, 10, tzinfo=UTC)
+    for created_at in (
+        datetime(2026, 11, 9, 12, tzinfo=UTC),
+        boundary,
+        datetime(2026, 11, 10, 12, tzinfo=UTC),
+    ):
+        async_session.add(
+            AutomationOutcomeValue(
+                org_id=TEST_ORG_ID,
+                factory_id=uuid.UUID(created["id"]),
+                source="user",
+                key="score",
+                value_type="number",
+                numeric_value=1.0,
+                created_at=created_at,
+            )
+        )
+    await async_session.commit()
+    reads = f"{FACTORIES}/{created['id']}/outcomes"
+    previous = {"since": "2026-11-03T00:00:00Z", "until": boundary.isoformat()}
+    current = {"since": boundary.isoformat(), "until": "2026-11-17T00:00:00Z"}
+
+    for route, field in (("values", "total"), ("aggregate", "count")):
+        extra = {"key": "score", "operation": "count"} if route == "aggregate" else {}
+        before = await async_client.get(
+            f"{reads}/{route}", params={**previous, **extra}
+        )
+        after = await async_client.get(f"{reads}/{route}", params={**current, **extra})
+        assert before.json()[field] == 1, (route, before.text)
+        assert after.json()[field] == 2, (route, after.text)
 
 
 async def test_used_outcome_key_cannot_be_retyped_or_removed(
