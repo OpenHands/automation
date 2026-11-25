@@ -120,13 +120,13 @@ async def factory_outcome_key_in_use(
 
 
 def _outcome_keys(factory: Factory) -> dict[str, dict[str, Any]]:
-    return dict(factory.outcome_key_definitions)
+    return dict(factory.outcome_keys or {})
 
 
 def _outcome_key_definitions(factory: Factory) -> dict[str, OutcomeKeyDefinition]:
     return {
         key: OutcomeKeyDefinition.model_validate(spec)
-        for key, spec in factory.outcome_key_definitions.items()
+        for key, spec in _outcome_keys(factory).items()
     }
 
 
