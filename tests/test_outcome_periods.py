@@ -59,7 +59,7 @@ def resolve(
     grain: OutcomeGrain | None = None,
     **fields,
 ):
-    fields = {"period": None, "occurred_at": None, "dedupe_key": None, **fields}
+    fields = {"period": None, "effective_at": None, "dedupe_key": None, **fields}
     return resolve_effective_at("score", semantics, grain, now=NOW, **fields)
 
 
@@ -79,8 +79,8 @@ def test_a_period_that_has_begun_is_accepted_even_if_it_is_not_over():
     ("fields", "message"),
     [
         ({}, "Send period as YYYY-Www"),
-        ({"period": "2026-W47", "occurred_at": NOW}, "occurred_at and dedupe_key"),
-        ({"period": "2026-W47", "dedupe_key": "pr-1"}, "occurred_at and dedupe_key"),
+        ({"period": "2026-W47", "effective_at": NOW}, "effective_at and dedupe_key"),
+        ({"period": "2026-W47", "dedupe_key": "pr-1"}, "effective_at and dedupe_key"),
         ({"period": "2026-W49"}, "future"),
         ({"period": "2026-11-24"}, "not a week period"),
     ],
@@ -93,23 +93,25 @@ def test_a_total_needs_exactly_a_period_of_its_grain_that_has_begun(fields, mess
 def test_an_increment_counts_now_unless_it_says_when_it_happened():
     assert resolve() == NOW
     happened = datetime(2025, 3, 1, 9, 30, tzinfo=UTC)
-    assert resolve(occurred_at=happened) == happened
+    assert resolve(effective_at=happened) == happened
 
 
 def test_an_increment_time_is_converted_to_utc():
     offset = timezone(timedelta(hours=5))
-    assert resolve(occurred_at=datetime(2026, 11, 24, 5, 30, tzinfo=offset)) == (
+    assert resolve(effective_at=datetime(2026, 11, 24, 5, 30, tzinfo=offset)) == (
         datetime(2026, 11, 24, 0, 30, tzinfo=UTC)
     )
-    assert resolve(occurred_at=datetime(2026, 11, 24, 5, 30)) == datetime(
+    assert resolve(effective_at=datetime(2026, 11, 24, 5, 30)) == datetime(
         2026, 11, 24, 5, 30, tzinfo=UTC
     )
 
 
 def test_an_increment_may_be_a_few_minutes_ahead_but_not_further():
-    assert resolve(occurred_at=NOW + timedelta(minutes=5)) == NOW + timedelta(minutes=5)
+    assert resolve(effective_at=NOW + timedelta(minutes=5)) == NOW + timedelta(
+        minutes=5
+    )
     with pytest.raises(ValueError, match="future"):
-        resolve(occurred_at=NOW + timedelta(minutes=6))
+        resolve(effective_at=NOW + timedelta(minutes=6))
 
 
 def test_an_increment_has_no_period():

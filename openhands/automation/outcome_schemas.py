@@ -41,9 +41,12 @@ class SubmitOutcomeRequest(BaseModel):
             "match the grain of the key."
         ),
     )
-    occurred_at: UtcDatetime | None = Field(
+    effective_at: UtcDatetime | None = Field(
         default=None,
-        description="When an increment happened. Defaults to now.",
+        description=(
+            "The time an increment counts at, usually when it happened. "
+            "Defaults to now. A total takes its time from period."
+        ),
     )
     dedupe_key: str | None = Field(
         default=None,

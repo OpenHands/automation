@@ -55,14 +55,14 @@ def resolve_effective_at(
     grain: OutcomeGrain | None,
     *,
     period: str | None,
-    occurred_at: datetime | None,
+    effective_at: datetime | None,
     dedupe_key: str | None,
     now: datetime | None = None,
 ) -> datetime:
     """The time a fact counts at, after checking the fields fit the key.
 
     A ``total`` fact counts at the start of its period. An ``increment`` fact
-    counts when it happened, or now.
+    counts at the ``effective_at`` it was sent with, or now.
     """
     now = now or utcnow()
     if semantics == "total":
@@ -74,19 +74,19 @@ def resolve_effective_at(
                 f"Outcome key {key!r} is a total. Send period as {form}, "
                 f"for example {example}"
             )
-        if occurred_at is not None or dedupe_key is not None:
+        if effective_at is not None or dedupe_key is not None:
             raise ValueError(
                 f"Outcome key {key!r} is a total. A later report for the same "
-                "period replaces the earlier one, so occurred_at and "
+                "period replaces the earlier one, so effective_at and "
                 "dedupe_key do not apply"
             )
-        effective_at = parse_period(period, grain)
+        counts_at = parse_period(period, grain)
     else:
         if period is not None:
             raise ValueError(
                 f"Outcome key {key!r} is an increment. period applies only to totals"
             )
-        effective_at = _utc(occurred_at) if occurred_at is not None else now
-    if effective_at > now + MAX_CLOCK_SKEW:
+        counts_at = _utc(effective_at) if effective_at is not None else now
+    if counts_at > now + MAX_CLOCK_SKEW:
         raise ValueError(f"Outcome key {key!r} cannot count at a future time")
-    return effective_at
+    return counts_at

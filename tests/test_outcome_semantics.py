@@ -138,13 +138,13 @@ async def test_a_total_must_carry_a_period_that_fits_its_grain(async_client, wor
             {
                 "payload": {"merged": 1},
                 "period": "2025-W48",
-                "occurred_at": "2025-11-24T10:00:00Z",
+                "effective_at": "2025-11-24T10:00:00Z",
             },
-            "occurred_at and dedupe_key",
+            "effective_at and dedupe_key",
         ),
         (
             {"payload": {"merged": 1}, "period": "2025-W48", "dedupe_key": "pr-1"},
-            "occurred_at and dedupe_key",
+            "effective_at and dedupe_key",
         ),
     ]
     for body, message in cases:
@@ -160,7 +160,7 @@ async def test_an_increment_counts_when_it_happened_and_not_when_it_arrived(
     factory, automation, _ = world
     for value, happened in [(2, "2025-11-23T23:30:00Z"), (3, "2025-11-24T00:30:00Z")]:
         response = await submit(
-            async_client, automation, payload={"lines": value}, occurred_at=happened
+            async_client, automation, payload={"lines": value}, effective_at=happened
         )
         assert response.status_code == 201, response.text
     await submit(async_client, automation, payload={"lines": 10})
@@ -190,7 +190,7 @@ async def test_an_increment_refuses_a_period_and_a_future_time(async_client, wor
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     for body, message in [
         ({"payload": {"lines": 1}, "period": "2025-W48"}, "period applies only"),
-        ({"payload": {"lines": 1}, "occurred_at": future}, "future"),
+        ({"payload": {"lines": 1}, "effective_at": future}, "future"),
     ]:
         response = await submit(async_client, automation, **body)
         assert response.status_code == 422, (body, response.text)

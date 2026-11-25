@@ -131,7 +131,7 @@ async def submit_outcome(
                 semantics,
                 grain,
                 period=body.period,
-                occurred_at=body.occurred_at,
+                effective_at=body.effective_at,
                 dedupe_key=body.dedupe_key,
                 now=now,
             )
