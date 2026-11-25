@@ -42,10 +42,13 @@ def effective_facts(conditions: Sequence[ColumnElement[bool]]) -> Subquery:
 def _bucket(at: ColumnElement, group_by: str, dialect: str) -> ColumnElement:
     """The UTC day, Monday-start week or month of ``at`` as an ISO label."""
     if dialect == "sqlite":
+        # Older SQLite rounds fractions to the millisecond, so 23:59:59.9996
+        # would land in the next day. Cut at whole seconds first.
+        whole_seconds = func.substr(at, 1, 19)
         return {
-            "day": func.strftime("%Y-%m-%d", at),
-            "week": func.date(at, "+1 day", "weekday 1", "-7 days"),
-            "month": func.strftime("%Y-%m", at),
+            "day": func.strftime("%Y-%m-%d", whole_seconds),
+            "week": func.date(whole_seconds, "+1 day", "weekday 1", "-7 days"),
+            "month": func.strftime("%Y-%m", whole_seconds),
         }[group_by]
     if dialect == "postgresql":
         utc = func.timezone("UTC", at)
