@@ -69,7 +69,7 @@ async def test_factory_writes_validate_registry_and_keep_history(
         json={"values": [{"key": "score", "type": "number", "value": 42}]},
     )
     assert submitted.status_code == 201, submitted.text
-    assert submitted.json() == {"stored": 1}
+    assert submitted.json() == {"stored": 1, "duplicates": 0}
     for body in (
         {"payload": {"unregistered": 1}},
         {"values": [{"key": "score", "type": "string", "value": "bad"}]},
@@ -289,14 +289,14 @@ async def test_optional_parser_allows_partial_payload_without_storing_missing_fa
         url, params=params, json={"payload": {"result": {"score": 3}}}
     )
     assert response.status_code == 201, response.text
-    assert response.json() == {"stored": 1}
+    assert response.json() == {"stored": 1, "duplicates": 0}
     response = await async_client.post(
         url,
         params=params,
         json={"payload": {"result": {"score": 4, "passed": True}}},
     )
     assert response.status_code == 201, response.text
-    assert response.json() == {"stored": 2}
+    assert response.json() == {"stored": 2, "duplicates": 0}
     response = await async_client.get(
         f"/api/automation/v1/factories/{factory.id}/outcomes/values"
     )

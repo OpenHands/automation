@@ -5,7 +5,7 @@ The factory registers the type of each accepted key. User credentials and run
 tokens submit flat payloads or explicit typed facts; the credential determines
 whether the source is a user or an agent. Analytics reads the factory's history.
 
-Source: `openhands/automation/outcome_router.py`, `openhands/automation/outcome_schemas.py`, `openhands/automation/outcome_values.py`, `openhands/automation/router.py`, `openhands/automation/schemas.py`
+Source: `openhands/automation/outcome_router.py`, `openhands/automation/outcome_schemas.py`, `openhands/automation/outcome_values.py`, `openhands/automation/outcome_periods.py`, `openhands/automation/outcome_aggregation.py`, `openhands/automation/router.py`, `openhands/automation/schemas.py`
 
 Routes: `POST /api/automation/v1/outcomes`,
 `GET /api/automation/v1/factories/{factory_id}/outcomes/values`,
@@ -18,6 +18,8 @@ Routes: `POST /api/automation/v1/outcomes`,
 - `F20.run-scope`: run tokens derive `source=agent` and the run claim; user credentials require `automation_id` and record `source=user`. An automation without a factory answers 409.
 - `F20.list-values`: factory-scoped newest-first rows, filtered by key, automation, run, source or time. Other organizations cannot read them.
 - `F20.aggregate-values`: per-factory count, numeric and boolean aggregates, optionally grouped by day, week or month; the same filters apply.
+- `F20.totals`: a key registered with `semantics: total` and a `grain` holds one number per period. Submit it with `period`; a later report for the same automation, dimensions and period replaces the earlier one in every read.
+- `F20.increments`: a key with the default `semantics: increment` counts every fact. `occurred_at` says when it happened, and `dedupe_key` makes a repeated submission count once (`duplicates` in the answer).
 
 ## How to get to it (agent POV)
 
@@ -51,10 +53,26 @@ Preconditions:
   control-automation api GET "/v1/factories/$FID/outcomes/aggregate" --query key=score --query operation=sum --expect 200 --check value eq 2 --save F20.aggregate-values/sum
   control-automation api GET "/v1/factories/$FID/outcomes/aggregate" --query key=passed --query operation=count_true --expect 200 --check value eq 1
   ```
+- **Totals and increments (`F20.totals`, `F20.increments`).** A total keeps the latest report for a period. An increment counts once per `dedupe_key`.
+  Requires: `F20.submit-flat`
+  ```sh
+  control-automation api PUT "/v1/factories/$FID/outcome-keys/merged" --json '{"type":"number","semantics":"total","grain":"week"}' --expect 200
+  control-automation api PUT "/v1/factories/$FID/outcome-keys/lines" --json '{"type":"number"}' --expect 200
+  control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"merged":3},"period":"2025-W48"}' --expect 201 --save F20.totals/first
+  control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"merged":7},"period":"2025-W48"}' --expect 201 --save F20.totals/replace
+  control-automation api GET "/v1/factories/$FID/outcomes/aggregate" --query key=merged --query operation=sum --expect 200 --check value eq 7 --check count eq 1 --save F20.totals/sum
+  control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"merged":1}}' --expect 422
+  control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"lines":4},"occurred_at":"2025-11-20T10:00:00Z","dedupe_key":"pr-1"}' --expect 201 --check stored eq 1 --save F20.increments/first
+  control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"lines":4},"occurred_at":"2025-11-20T10:00:00Z","dedupe_key":"pr-1"}' --expect 201 --check duplicates eq 1 --save F20.increments/repeat
+  ```
 
 ## Gotchas
 
 - `since` is inclusive and `until` is exclusive on both read routes, so adjacent windows (`[a, b)` then `[b, c)`) never count a row twice.
+- `since`, `until` and the day, week and month buckets use the time a fact counts at (`effective_at`): the start of its period, `occurred_at`, or the time it was received. Rows from before `effective_at` existed count when they were received.
+- A total needs `period` in the format of its grain: `2026-11-24T14` (hour), `2026-11-24` (day), `2026-W48` (ISO week) or `2026-11` (month), in UTC. A wrong format, a period that has not begun, or `occurred_at` or `dedupe_key` on a total answer 422. An increment refuses `period`. A time more than five minutes ahead answers 422.
+- `PUT /outcome-keys/{key}` with a different type, `semantics` or `grain` answers 409 once the key has facts. A total must be a number and must have a grain.
+- The history stays: `GET .../outcomes/values` lists every report, including replaced totals. Aggregates count only the latest report for each automation, dimensions and period.
 - Outcome tokens are intentionally the same scoped token family as KV tokens, so a run gets one secret with an automation and run claim rather than a second auth system.
 - Typed items use `type`, not the storage column `value_type`. Source is derived from authentication, never the request body. Use typed values for datetime or JSON; parser-based nested payloads are a separate layer.
 - A plugin-spec automation takes no `outcome_parsers`: the create request rejects the field (422), `PATCH` rejects it, and git sync refuses a `plugin_spec` directory that carries it. Outcome declarations for plugin-spec automations belong in the plugin manifest. It can still report with typed `values` or a flat `payload`.

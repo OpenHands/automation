@@ -6,6 +6,7 @@ bucket edges and checks every operation, grouping and filter against them on
 both supported databases.
 """
 
+import json
 import random
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -35,12 +36,25 @@ def reference_aggregate(rows, operation):
     return {"sum": sum, "avg": mean, "min": min, "max": max}[operation](numbers)
 
 
-def reference_bucket(created_at, group_by):
+def reference_bucket(at, group_by):
     if group_by == "day":
-        return created_at.date().isoformat()
+        return at.date().isoformat()
     if group_by == "week":
-        return (created_at.date() - timedelta(days=created_at.weekday())).isoformat()
-    return f"{created_at.year:04d}-{created_at.month:02d}"
+        return (at.date() - timedelta(days=at.weekday())).isoformat()
+    return f"{at.year:04d}-{at.month:02d}"
+
+
+def reference_latest_reports(rows):
+    """For a total, the last report received per automation, dimensions and period."""
+    winners = {}
+    for row in rows:
+        series = (row.automation_id, json.dumps(row.dimensions), row.effective_at)
+        if series not in winners or (row.created_at, str(row.id)) > (
+            winners[series].created_at,
+            str(winners[series].id),
+        ):
+            winners[series] = row
+    return list(winners.values())
 
 
 def utc(*args, **kwargs):
@@ -84,6 +98,7 @@ def seed(org_id, factory_id, automations):
                 source=("agent", "user")[index % 5 == 0],
                 key=kind,
                 created_at=at,
+                effective_at=at,
                 **columns,
             )
         )
@@ -97,18 +112,9 @@ KEY_OPERATIONS = [
 ]
 
 
-async def test_sql_aggregation_matches_the_python_reference(
-    async_client, async_session, mock_authenticated_user
+async def assert_matches_reference(
+    client, factory, rows, key_operations, automations, *, latest_reports=False
 ):
-    org_id = mock_authenticated_user.org_id
-    factory = Factory(org_id=org_id, name="Aggregation factory")
-    async_session.add(factory)
-    await async_session.commit()
-    automations = [uuid.uuid4(), uuid.uuid4()]
-    rows = seed(org_id, factory.id, automations)
-    async_session.add_all(rows)
-    await async_session.commit()
-
     window = {"since": utc(2026, 11, 1), "until": utc(2026, 11, 30)}
     filters = [
         {},
@@ -118,7 +124,7 @@ async def test_sql_aggregation_matches_the_python_reference(
     ]
     url = f"/api/automation/v1/factories/{factory.id}/outcomes/aggregate"
     checked = 0
-    for key, operations in KEY_OPERATIONS:
+    for key, operations in key_operations:
         for operation in operations:
             for group_by in ("none", "day", "week", "month"):
                 for extra in filters:
@@ -132,7 +138,7 @@ async def test_sql_aggregation_matches_the_python_reference(
                             for name, value in extra.items()
                         },
                     }
-                    response = await async_client.get(url, params=params)
+                    response = await client.get(url, params=params)
                     assert response.status_code == 200, (label, response.text)
                     body = response.json()
 
@@ -140,8 +146,8 @@ async def test_sql_aggregation_matches_the_python_reference(
                         row
                         for row in rows
                         if row.key == key
-                        and ("since" not in extra or row.created_at >= extra["since"])
-                        and ("until" not in extra or row.created_at < extra["until"])
+                        and ("since" not in extra or row.effective_at >= extra["since"])
+                        and ("until" not in extra or row.effective_at < extra["until"])
                         and (
                             "automation_id" not in extra
                             or str(row.automation_id) == extra["automation_id"]
@@ -156,6 +162,8 @@ async def test_sql_aggregation_matches_the_python_reference(
                             or row.value_type == "boolean"
                         )
                     ]
+                    if latest_reports:
+                        selected = reference_latest_reports(selected)
                     if group_by == "none":
                         expected = [(None, selected)]
                         actual = [(None, body["value"], body["count"])]
@@ -163,7 +171,7 @@ async def test_sql_aggregation_matches_the_python_reference(
                         grouped = {}
                         for row in selected:
                             grouped.setdefault(
-                                reference_bucket(row.created_at, group_by), []
+                                reference_bucket(row.effective_at, group_by), []
                             ).append(row)
                         expected = sorted(grouped.items())
                         actual = [
@@ -183,4 +191,73 @@ async def test_sql_aggregation_matches_the_python_reference(
                         else:
                             assert value == pytest.approx(reference), label
                     checked += 1
-    assert checked == 4 * 4 * 10
+    assert checked == 4 * 4 * sum(len(ops) for _, ops in key_operations)
+
+
+async def test_sql_aggregation_matches_the_python_reference(
+    async_client, async_session, mock_authenticated_user
+):
+    org_id = mock_authenticated_user.org_id
+    factory = Factory(org_id=org_id, name="Aggregation factory")
+    async_session.add(factory)
+    await async_session.commit()
+    automations = [uuid.uuid4(), uuid.uuid4()]
+    rows = seed(org_id, factory.id, automations)
+    async_session.add_all(rows)
+    await async_session.commit()
+
+    await assert_matches_reference(
+        async_client, factory, rows, KEY_OPERATIONS, automations
+    )
+
+
+def seed_reports(org_id, factory_id, automations):
+    """Several reports per period, from two automations and four dimension sets."""
+    rng = random.Random(11)
+    dimension_sets = [None, {"repo": "a"}, {"repo": "b"}, {"x": "1", "y": "2"}]
+    first_day = utc(2026, 10, 25)
+    rows = []
+    for index in range(400):
+        period = first_day + timedelta(days=rng.randrange(70))
+        rows.append(
+            AutomationOutcomeValue(
+                org_id=org_id,
+                factory_id=factory_id,
+                automation_id=automations[rng.randrange(2)],
+                source=("agent", "user")[index % 7 == 0],
+                key="t",
+                value_type="number",
+                numeric_value=float(rng.randrange(-20, 100)),
+                dimensions=rng.choice(dimension_sets),
+                # Each report is received a minute after the previous one.
+                created_at=utc(2027, 1, 10) + timedelta(minutes=index),
+                effective_at=period,
+            )
+        )
+    return rows
+
+
+async def test_total_aggregation_keeps_the_latest_report_for_each_period(
+    async_client, async_session, mock_authenticated_user
+):
+    org_id = mock_authenticated_user.org_id
+    factory = Factory(
+        org_id=org_id,
+        name="Totals factory",
+        outcome_keys={"t": {"type": "number", "semantics": "total", "grain": "day"}},
+    )
+    async_session.add(factory)
+    await async_session.commit()
+    automations = [uuid.uuid4(), uuid.uuid4()]
+    rows = seed_reports(org_id, factory.id, automations)
+    async_session.add_all(rows)
+    await async_session.commit()
+
+    await assert_matches_reference(
+        async_client,
+        factory,
+        rows,
+        [("t", ["sum", "avg", "min", "max", "count"])],
+        automations,
+        latest_reports=True,
+    )

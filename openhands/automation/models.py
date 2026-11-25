@@ -24,6 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from openhands.automation.outcome_values import OutcomeGrain, OutcomeSemantics
 from openhands.automation.providers import DEFAULT_VERIFIER as DEFAULT_SIGNATURE_SCHEME
 from openhands.automation.utils import utcnow
 
@@ -117,6 +118,13 @@ class Factory(Base):
     @property
     def outcome_key_types(self) -> dict[str, str]:
         return {key: spec["type"] for key, spec in (self.outcome_keys or {}).items()}
+
+    def outcome_semantics(
+        self, key: str
+    ) -> tuple[OutcomeSemantics, OutcomeGrain | None]:
+        """How the key's facts combine, and the period grain of a total."""
+        spec = (self.outcome_keys or {}).get(key, {})
+        return spec.get("semantics", "increment"), spec.get("grain")
 
 
 class Automation(Base):
@@ -316,6 +324,20 @@ class AutomationOutcomeValue(Base):
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+    # When the fact counts: the start of its period (totals), the time it
+    # happened, or created_at. Reads bucket and filter on this, not created_at.
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda context: context.get_current_parameters()["created_at"],
+        nullable=False,
+    )
+    # Facts with the same key and dedupe_key are one fact. Null never matches.
+    dedupe_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # A later total replaces an earlier one only with the same automation,
+    # period and dimensions. Stored with sorted keys so equal sets compare equal.
+    dimensions: Mapped[dict[str, str] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -360,6 +382,21 @@ class AutomationOutcomeValue(Base):
             "created_at",
         ),
         Index("ix_outcomes_run_id", "run_id"),
+        Index(
+            "ix_outcomes_factory_key_effective",
+            "factory_id",
+            "key",
+            "effective_at",
+        ),
+        Index(
+            "ux_outcomes_dedupe_key",
+            "factory_id",
+            "key",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("dedupe_key IS NOT NULL"),
+            sqlite_where=text("dedupe_key IS NOT NULL"),
+        ),
     )
 
 

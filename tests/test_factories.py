@@ -1087,6 +1087,9 @@ async def test_platform_prefix_and_invalid_keys_are_rejected_with_422(async_clie
 # --- outcome keys ---
 
 
+NUMBER_KEY = {"type": "number", "semantics": "increment", "grain": None}
+
+
 async def test_outcome_keys_are_managed_as_subresource(async_client):
     created = await _create_factory(async_client, "Software Factory")
     url = f"{FACTORIES}/{created['id']}"
@@ -1095,15 +1098,15 @@ async def test_outcome_keys_are_managed_as_subresource(async_client):
 
     added = await async_client.put(f"{url}/outcome-keys/score", json={"type": "number"})
     assert added.status_code == 200, added.text
-    assert added.json()["outcome_keys"] == {"score": {"type": "number"}}
+    assert added.json()["outcome_keys"] == {"score": NUMBER_KEY}
     assert (await async_client.get(f"{url}/outcome-keys")).json() == {
-        "score": {"type": "number"}
+        "score": NUMBER_KEY
     }
 
     renamed = await async_client.patch(url, json={"name": "Renamed"})
     assert renamed.status_code == 200, renamed.text
     assert renamed.json()["name"] == "Renamed"
-    assert renamed.json()["outcome_keys"] == {"score": {"type": "number"}}
+    assert renamed.json()["outcome_keys"] == {"score": NUMBER_KEY}
 
     rejected = await async_client.patch(
         url, json={"name": "Renamed", "outcome_keys": {"score": {"type": "string"}}}
@@ -1190,7 +1193,7 @@ async def test_used_outcome_key_cannot_be_retyped_or_removed(
     assert removed.status_code == 409, removed.text
     assert (
         await async_client.get(f"{FACTORIES}/{created['id']}/outcome-keys")
-    ).json() == {"score": {"type": "number"}}
+    ).json() == {"score": NUMBER_KEY}
 
 
 async def test_git_sync_import_rejects_outcome_parsers_on_a_plugin_spec(
