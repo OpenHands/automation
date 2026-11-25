@@ -497,6 +497,31 @@ async def test_list_filters_by_factory(async_client):
     assert other.json() == {"automations": [], "total": 0}
 
 
+async def test_list_filters_by_factory_membership(async_client):
+    factory = await _create_factory(async_client, "First")
+    for name, grouped in (("A", True), ("B", True), ("C", False)):
+        created = await _create_automation(async_client, name)
+        if grouped:
+            await async_client.patch(
+                f"{BASE}/{created['id']}", json={"factory_id": factory["id"]}
+            )
+
+    grouped = await async_client.get(BASE, params={"in_factory": "true"})
+    ungrouped = await async_client.get(BASE, params={"in_factory": "false"})
+    everything = await async_client.get(BASE)
+    contradiction = await async_client.get(
+        BASE, params={"in_factory": "false", "factory_id": factory["id"]}
+    )
+
+    assert ungrouped.status_code == 200, ungrouped.text
+    assert [a["name"] for a in ungrouped.json()["automations"]] == ["C"]
+    assert ungrouped.json()["total"] == 1
+    assert sorted(a["name"] for a in grouped.json()["automations"]) == ["A", "B"]
+    assert grouped.json()["total"] == 2
+    assert everything.json()["total"] == 3
+    assert contradiction.json() == {"automations": [], "total": 0}
+
+
 async def test_list_filter_excludes_soft_deleted_automations(
     async_client, async_session
 ):
