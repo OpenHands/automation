@@ -23,6 +23,7 @@ Routes: `POST /api/automation/v1/outcomes`,
 
 - Create a factory with `outcome_keys` and attach an automation before submitting.
 - POST a flat `{"payload":{"score":1}}` or typed `{"values":[{"key":"score","type":"number","value":1}]}`. Use a run token or normal user auth with `automation_id`.
+- Keys starting with `platform.` (any case) are reserved for metrics the platform computes. Registering one, putting one in `outcome_keys`, or submitting one answers 422; an invalid key on `PUT` or `DELETE /outcome-keys/{key}` answers 422 too.
 - Read the authenticated factory routes to fetch raw or aggregate facts across automations. The stored factory id is a snapshot, even if the automation later moves.
 
 ## Driving it with control-automation

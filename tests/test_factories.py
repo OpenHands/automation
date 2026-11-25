@@ -1038,6 +1038,26 @@ async def test_git_sync_update_leaves_the_factory_unchanged(
     )
 
 
+async def test_platform_prefix_and_invalid_keys_are_rejected_with_422(async_client):
+    rejected = await async_client.post(
+        FACTORIES,
+        json={
+            "name": "Reserved",
+            "outcome_keys": {"platform.cost": {"type": "number"}},
+        },
+    )
+    assert rejected.status_code == 422, rejected.text
+
+    created = await _create_factory(async_client, "Keys")
+    url = f"{FACTORIES}/{created['id']}/outcome-keys"
+    for key in ("platform.cost", "Platform.Cost", "bad%20key"):
+        put = await async_client.put(f"{url}/{key}", json={"type": "number"})
+        assert put.status_code == 422, (key, put.text)
+        delete = await async_client.delete(f"{url}/{key}")
+        assert delete.status_code == 422, (key, delete.text)
+    assert (await async_client.get(url)).json() == {}
+
+
 # --- outcome keys ---
 
 

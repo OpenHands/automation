@@ -14,6 +14,9 @@ MAX_OUTCOME_KEYS = 50
 MAX_OUTCOME_PAYLOAD_BYTES = 64 * 1024
 MAX_OUTCOME_STRING_LENGTH = 2048
 OUTCOME_KEY_PATTERN = r"^[a-zA-Z0-9_.-]+$"
+# Reserved for metrics the platform computes itself; users and agents may not
+# register or submit them.
+RESERVED_OUTCOME_KEY_PREFIX = "platform."
 
 OutcomeValueType = Literal["number", "string", "boolean", "datetime", "json"]
 OutcomeAggregation = Literal[
@@ -36,6 +39,11 @@ def validate_outcome_payload_size(payload: dict[str, Any]) -> dict[str, Any]:
 def validate_outcome_key(key: str) -> str:
     if len(key) > 100 or not re.fullmatch(OUTCOME_KEY_PATTERN, key):
         raise ValueError(f"Invalid outcome key: {key!r}")
+    if key.lower().startswith(RESERVED_OUTCOME_KEY_PREFIX):
+        raise ValueError(
+            f"Outcome keys starting with {RESERVED_OUTCOME_KEY_PREFIX!r} are "
+            f"reserved for the platform: {key!r}"
+        )
     return key
 
 
