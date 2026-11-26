@@ -24,6 +24,9 @@ OutcomeValueType = Literal["number", "string", "boolean", "datetime", "json"]
 # later report for the same period replaces the earlier one.
 OutcomeSemantics = Literal["increment", "total"]
 OutcomeGrain = Literal["hour", "day", "week", "month"]
+# A named, versioned contract for the value of a json key. The service checks
+# every write against it.
+OutcomeShape = Literal["table.v1"]
 MAX_OUTCOME_DEDUPE_KEY_LENGTH = 200
 MAX_OUTCOME_DIMENSIONS = 8
 MAX_OUTCOME_DIMENSION_VALUE_LENGTH = 64
@@ -78,7 +81,7 @@ def _validate_string(value: str, key: str) -> str:
     return value
 
 
-def _validate_number(value: Any, key: str) -> float:
+def validate_outcome_number(value: Any, key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"Outcome value '{key}' is not a number")
     if abs(value) > 2**53:
@@ -89,7 +92,7 @@ def _validate_number(value: Any, key: str) -> float:
     return numeric
 
 
-def _validate_datetime(value: Any, key: str) -> datetime:
+def validate_outcome_datetime(value: Any, key: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"Outcome value '{key}' is not an ISO datetime string")
     try:
@@ -123,7 +126,7 @@ def _typed_columns(
         "json_value": None,
     }
     if value_type == "number":
-        columns["numeric_value"] = _validate_number(value, key)
+        columns["numeric_value"] = validate_outcome_number(value, key)
     elif value_type == "string":
         if not isinstance(value, str):
             raise ValueError(f"Outcome value '{key}' is not a string")
@@ -133,7 +136,7 @@ def _typed_columns(
             raise ValueError(f"Outcome value '{key}' is not a boolean")
         columns["boolean_value"] = value
     elif value_type == "datetime":
-        columns["datetime_value"] = _validate_datetime(value, key)
+        columns["datetime_value"] = validate_outcome_datetime(value, key)
     elif value_type == "json":
         columns["json_value"] = _validate_json_value(value, key)
     else:
@@ -147,7 +150,7 @@ def _flat_value_type(value: Any, key: str) -> OutcomeValueType:
     if isinstance(value, bool):
         return "boolean"
     if isinstance(value, int | float):
-        _validate_number(value, key)
+        validate_outcome_number(value, key)
         return "number"
     if isinstance(value, str):
         _validate_string(value, key)

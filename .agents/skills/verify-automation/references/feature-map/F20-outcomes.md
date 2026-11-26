@@ -5,7 +5,7 @@ The factory registers the type of each accepted key. User credentials and run
 tokens submit flat payloads or explicit typed facts; the credential determines
 whether the source is a user or an agent. Analytics reads the factory's history.
 
-Source: `openhands/automation/outcome_router.py`, `openhands/automation/outcome_schemas.py`, `openhands/automation/outcome_values.py`, `openhands/automation/outcome_periods.py`, `openhands/automation/outcome_aggregation.py`, `openhands/automation/router.py`, `openhands/automation/schemas.py`
+Source: `openhands/automation/outcome_router.py`, `openhands/automation/outcome_schemas.py`, `openhands/automation/outcome_values.py`, `openhands/automation/outcome_periods.py`, `openhands/automation/outcome_shapes.py`, `openhands/automation/outcome_aggregation.py`, `openhands/automation/router.py`, `openhands/automation/schemas.py`
 
 Routes: `POST /api/automation/v1/outcomes`,
 `GET /api/automation/v1/factories/{factory_id}/outcomes/values`,
@@ -20,6 +20,7 @@ Routes: `POST /api/automation/v1/outcomes`,
 - `F20.aggregate-values`: per-factory count, numeric and boolean aggregates, optionally grouped by day, week or month; the same filters apply.
 - `F20.totals`: a key registered with `semantics: total` and a `grain` holds one number per period. Submit it with `period`; a later report for the same automation, dimensions and period replaces the earlier one in every read.
 - `F20.increments`: a key with the default `semantics: increment` counts every fact. `effective_at` says when it counts (default now), and `dedupe_key` makes a repeated submission count once (`duplicates` in the answer).
+- `F20.shapes`: a `json` key can declare `shape: "table.v1"` with `columns`. Every write to it is checked against the columns, and the key routes return the contract.
 
 ## How to get to it (agent POV)
 
@@ -65,6 +66,14 @@ Preconditions:
   control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"lines":4},"effective_at":"2025-11-20T10:00:00Z","dedupe_key":"pr-1"}' --expect 201 --check stored eq 1 --save F20.increments/first
   control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"payload":{"lines":4},"effective_at":"2025-11-20T10:00:00Z","dedupe_key":"pr-1"}' --expect 201 --check duplicates eq 1 --save F20.increments/repeat
   ```
+- **Table shape (`F20.shapes`).** A write that breaks the declared columns answers 422 and names the cell.
+  Requires: `F20.submit-typed`
+  ```sh
+  control-automation api PUT "/v1/factories/$FID/outcome-keys/open_prs" --json '{"type":"json","shape":"table.v1","columns":[{"name":"pr","type":"string"},{"name":"status","type":"string","constraints":{"required":true,"enum":["open","merged"]}}]}' --expect 200
+  control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"values":[{"key":"open_prs","type":"json","value":{"rows":[[{"v":"#818","href":"https://github.com/OpenHands/automation/pull/818"},"open"]],"total_rows":140}}]}' --expect 201 --check stored eq 1 --save F20.shapes/first
+  control-automation api POST "/v1/outcomes?automation_id=$OID" --json '{"values":[{"key":"open_prs","type":"json","value":{"rows":[["#818","closed"]]}}]}' --expect 422
+  control-automation api PUT "/v1/factories/$FID/outcome-keys/open_prs" --json '{"type":"json"}' --expect 409
+  ```
 
 ## Gotchas
 
@@ -76,3 +85,4 @@ Preconditions:
 - Outcome tokens are intentionally the same scoped token family as KV tokens, so a run gets one secret with an automation and run claim rather than a second auth system.
 - Typed items use `type`, not the storage column `value_type`. Source is derived from authentication, never the request body. Use typed values for datetime or JSON; parser-based nested payloads are a separate layer.
 - A plugin-spec automation takes no `outcome_parsers`: the create request rejects the field (422), `PATCH` rejects it, and git sync refuses a `plugin_spec` directory that carries it. Outcome declarations for plugin-spec automations belong in the plugin manifest. It can still report with typed `values` or a flat `payload`.
+- A shape applies only to a `json` key with `increment` semantics. A `table.v1` key needs `columns`, and `columns` need a shape. The shape and columns are fixed once the key has facts (409). A table value is `{"rows": [...], "total_rows"?: int}` with one cell per column. A cell is a plain value or `{"v", "f"?, "href"?}`. An `href` is an `https://` URL or a path starting `/`. The columns follow the Frictionless Table Schema `fields`, and the `{v, f}` cell follows the Google Charts `DataTable` JSON.
