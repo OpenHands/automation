@@ -1974,6 +1974,195 @@ class TestGitSyncLoop:
         assert not tracebacks, "past the threshold the per-cycle traceback must stop"
 
 
+@pytest.fixture
+async def git_sync_tick(sqlite_session_factory, git_settings, monkeypatch, caplog):
+    """Run one real scheduling tick at a specified time without sleeping."""
+    import openhands.automation.git_sync.loop as loop_module
+
+    async def run_one_tick(run_cycle, **kwargs):
+        await run_cycle()
+
+    monkeypatch.setattr(loop_module, "run_periodic_loop", run_one_tick)
+    async with sqlite_session_factory() as session:
+        await _apply_override(session, {"git_sync_interval_seconds": 60})
+        await session.commit()
+
+    async def tick(at):
+        monkeypatch.setattr(loop_module, "utcnow", lambda: at)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="automation.git_sync"):
+            await git_sync_loop(sqlite_session_factory)
+        return [r for r in caplog.records if r.name == "automation.git_sync"]
+
+    return tick
+
+
+async def test_repeated_transient_failure_goes_quiet_at_the_normal_interval(
+    sqlite_session_factory, git_settings, git_sync_tick, monkeypatch
+):
+    import openhands.automation.git_sync.loop as loop_module
+
+    async def fail_to_connect(*args):
+        raise GitSyncError("Could not resolve host")
+
+    monkeypatch.setattr(loop_module, "ensure_repo", fail_to_connect)
+    start = utcnow()
+    interval = timedelta(seconds=60)
+
+    for attempt in range(1, 6):
+        at = start + (attempt - 1) * interval
+        if attempt > 1:
+            records = await git_sync_tick(at - timedelta(seconds=1))
+            assert not [r for r in records if r.levelno >= logging.WARNING]
+
+        # Each tick re-enters git_sync_loop, as on a process restart.
+        records = await git_sync_tick(at)
+        (record,) = [r for r in records if r.levelno >= logging.WARNING]
+        if attempt <= 3:
+            assert record.levelno == logging.ERROR
+            assert record.exc_info
+        else:
+            assert record.levelno == logging.WARNING
+            assert record.exc_info is None
+            assert str(LOCAL_ORG_ID) in record.message
+            assert git_settings.git_sync_repo_url in record.message
+            assert f"{attempt} consecutive" in record.message
+
+        row = await _org_config(sqlite_session_factory)
+        assert row is not None
+        assert row.last_error == "Could not resolve host"
+        assert row.last_error_at == at.replace(tzinfo=None)
+        assert row.consecutive_auth_failures == 0
+        assert row.consecutive_transient_failures == attempt
+        assert row.transient_failure_fingerprint is not None
+
+
+@pytest.mark.parametrize("change", ["message", "type", "repo", "auth", "unexpected"])
+async def test_transient_failure_streak_starts_over_on_change(
+    sqlite_session_factory, git_sync_tick, monkeypatch, change
+):
+    import openhands.automation.git_sync.loop as loop_module
+
+    class OtherGitSyncError(GitSyncError):
+        pass
+
+    # A change beyond the status field's truncation still merits a traceback.
+    message = "remote: " + "x" * 2000
+    error_type = GitSyncError
+
+    async def fail(*args):
+        raise error_type(message)
+
+    monkeypatch.setattr(loop_module, "ensure_repo", fail)
+    start = utcnow()
+    interval = timedelta(seconds=60)
+    for attempt in range(3):
+        await git_sync_tick(start + attempt * interval)
+    records = await git_sync_tick(start + 3 * interval)
+    (quiet,) = [r for r in records if r.levelno >= logging.WARNING]
+    assert quiet.levelno == logging.WARNING
+
+    if change == "message":
+        message += " server returned 502"
+    elif change == "type":
+        error_type = OtherGitSyncError
+    elif change == "repo":
+        async with sqlite_session_factory() as session:
+            await _apply_override(
+                session, {"git_sync_repo_url": "https://example.test/other.git"}
+            )
+            await session.commit()
+    elif change == "auth":
+        error_type = GitAuthError
+    elif change == "unexpected":
+        error_type = RuntimeError
+
+    records = await git_sync_tick(start + 4 * interval)
+    (record,) = [r for r in records if r.levelno >= logging.WARNING]
+    assert record.levelno == logging.ERROR
+    assert record.exc_info
+    assert record.exc_info[0] is error_type
+    row = await _org_config(sqlite_session_factory)
+    assert row is not None
+    if change in {"auth", "unexpected"}:
+        assert row.consecutive_transient_failures == 0
+        assert row.transient_failure_fingerprint is None
+        assert row.consecutive_auth_failures == (1 if change == "auth" else 0)
+    else:
+        assert row.consecutive_transient_failures == 1
+        assert row.transient_failure_fingerprint is not None
+
+
+async def test_transient_failure_recovery_is_org_scoped(
+    sqlite_session_factory, git_settings, git_sync_tick, monkeypatch
+):
+    import openhands.automation.git_sync.loop as loop_module
+
+    local_repo = git_settings.git_sync_repo_url
+    other_org = uuid.uuid4()
+    other_repo = "https://user:secret@example.test/other.git?token=hidden"
+    recover_local = False
+    real_ensure_repo = loop_module.ensure_repo
+
+    async def fail_unless_recovered(workdir, repo_url, *args):
+        if recover_local and repo_url == local_repo:
+            return await real_ensure_repo(workdir, repo_url, *args)
+        raise GitSyncError("Could not resolve host")
+
+    monkeypatch.setattr(loop_module, "ensure_repo", fail_unless_recovered)
+    start = utcnow()
+    interval = timedelta(seconds=60)
+    for attempt in range(4):
+        await git_sync_tick(start + attempt * interval)
+
+    async with sqlite_session_factory() as session:
+        await apply_git_sync_config_override(
+            session,
+            other_org,
+            {"git_sync_repo_url": other_repo, "git_sync_interval_seconds": 60},
+            configured_by_user_id=LOCAL_USER_ID,
+        )
+        await session.commit()
+
+    records = await git_sync_tick(start + 4 * interval)
+    (other_error,) = [r for r in records if r.levelno == logging.ERROR]
+    assert str(other_org) in other_error.message
+    assert other_error.exc_info
+    (local_warning,) = [r for r in records if r.levelno == logging.WARNING]
+    assert str(LOCAL_ORG_ID) in local_warning.message
+
+    for attempt in range(5, 8):
+        await git_sync_tick(start + attempt * interval)
+    recover_local = True
+    records = await git_sync_tick(start + 8 * interval)
+    assert any(
+        r.levelno == logging.INFO
+        and "recovered" in r.message
+        and str(LOCAL_ORG_ID) in r.message
+        for r in records
+    )
+    (other_warning,) = [r for r in records if r.levelno >= logging.WARNING]
+    assert other_warning.levelno == logging.WARNING
+    assert str(other_org) in other_warning.message
+    assert "https://***@example.test/other.git" in other_warning.message
+    assert "secret" not in other_warning.message
+    assert "hidden" not in other_warning.message
+    assert "5 consecutive" in other_warning.message
+
+    row = await _org_config(sqlite_session_factory)
+    assert row is not None
+    assert row.last_error is None
+    assert row.last_error_at is None
+    assert row.consecutive_transient_failures == 0
+    assert row.transient_failure_fingerprint is None
+
+    recover_local = False
+    records = await git_sync_tick(start + 9 * interval)
+    (local_error,) = [r for r in records if r.levelno == logging.ERROR]
+    assert str(LOCAL_ORG_ID) in local_error.message
+    assert local_error.exc_info
+
+
 class TestBackfillsPreExistingAutomations:
     """Regression: nothing created state rows for automations predating git
     sync, and the export only reads dirty rows -- so the cycle reported success
