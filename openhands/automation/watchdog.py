@@ -45,7 +45,11 @@ from openhands.automation.models import (
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
-from openhands.automation.utils.agent_server import VerificationOutcome
+from openhands.automation.utils.agent_server import (
+    VerificationOutcome,
+    VerificationResult,
+)
+from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.change_events import SYSTEM_ACTOR, set_audit_actor
 from openhands.automation.utils.run import record_first_run_outcome
 from openhands.automation.utils.run_status_detail import (
@@ -58,6 +62,7 @@ from openhands.automation.utils.run_status_detail import (
 from openhands.automation.utils.sandbox import pause_sandbox
 from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.transient import classify_httpx_transient_error
 from openhands.automation.utils.unhealthy import (
     maybe_disable_unhealthy_automation_after_run,
 )
@@ -223,6 +228,35 @@ async def _defer_sandbox_cleanup(
         logger.warning("Pause after terminal verification failed: %s", e, extra=extra)
 
 
+async def _verify_run(backend: ExecutionBackend, run_id: str) -> VerificationResult:
+    """Verify a run, turning a transient error into a TRANSIENT_ERROR result.
+
+    The cloud backend mints a fresh API key before it reads the sandbox, so
+    one failed mint must not fail a run that may have finished.
+    """
+    try:
+        return await backend.verify_run(run_id)
+    except Exception as e:
+        cause = e.__cause__ if isinstance(e, APIKeyError) else e
+        if cause is None:
+            raise
+        source, operation = (
+            ("openhands_api", "create_api_key")
+            if isinstance(e, APIKeyError)
+            else ("automation_service", "verify_run")
+        )
+        error_info = classify_httpx_transient_error(
+            cause, source=source, operation=operation
+        )
+        if error_info is None:
+            raise
+        return VerificationResult(
+            outcome=VerificationOutcome.TRANSIENT_ERROR,
+            detail=error_info.detail,
+            error_info=error_info,
+        )
+
+
 async def _verify_and_mark_run(
     session: AsyncSession,
     run: AutomationRun,
@@ -245,7 +279,7 @@ async def _verify_and_mark_run(
     # Verify run status via backend
     try:
         logger.info("Verifying run status via backend", extra=extra)
-        verification = await backend.verify_run(run_id)
+        verification = await _verify_run(backend, run_id)
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
         error_detail = f"Timed out: verification failed: {e}"

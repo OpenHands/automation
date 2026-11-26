@@ -9,9 +9,11 @@ import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import select
 
+from openhands.automation.backends.cloud import CloudSandboxBackend
 from openhands.automation.config import Settings, clear_config_cache
 from openhands.automation.models import (
     Automation,
@@ -20,7 +22,11 @@ from openhands.automation.models import (
     IntegrationEvent,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.agent_server import VerificationResult
+from openhands.automation.utils.agent_server import (
+    BashCommandResult,
+    VerificationResult,
+)
+from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _should_cleanup_after_terminal,
@@ -621,6 +627,122 @@ class TestVerifyAndMarkRunVerificationFailed:
         assert params["status_detail"]["transient"] is True
         assert params["status_detail"]["detail"] == verification.detail
         mock_backend.cleanup_after_verification.assert_not_called()
+
+
+class TestVerifyAndMarkRunTransientKeyMint:
+    """A transient failure minting the verification API key is not terminal.
+
+    Runs the real watchdog scan and ``CloudSandboxBackend.verify_run``; only
+    the key mint and the sandbox/agent-server HTTP calls are stubbed.
+    """
+
+    @pytest.fixture
+    def cloud_verification(self, monkeypatch):
+        mint_errors: list[Exception] = []
+        mint_calls: list[uuid.UUID] = []
+
+        async def mint(run):
+            mint_calls.append(run.id)
+            if mint_errors:
+                raise mint_errors.pop(0)
+            return "sk-user"
+
+        async def agent_url(client, api_url, api_key, sandbox_id):
+            return ("http://agent.test", "sess")
+
+        async def bash_result(agent_url, session_key, command_id=None):
+            return BashCommandResult(found=True, exit_code=0)
+
+        monkeypatch.setattr(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run", mint
+        )
+        monkeypatch.setattr(
+            "openhands.automation.utils.sandbox.get_sandbox_agent_url", agent_url
+        )
+        monkeypatch.setattr(
+            "openhands.automation.utils.sandbox.get_last_bash_command_result",
+            bash_result,
+        )
+        monkeypatch.setattr(
+            "openhands.automation.backends.cloud.cleanup_sandbox", AsyncMock()
+        )
+        monkeypatch.setattr(
+            "openhands.automation.watchdog.get_backend",
+            lambda run: CloudSandboxBackend(api_url="https://api.test", run=run),
+        )
+        return mint_errors, mint_calls
+
+    @staticmethod
+    def _network_error() -> APIKeyError:
+        error = APIKeyError("Request failed: connection reset")
+        error.__cause__ = httpx.ConnectError("connection reset")
+        return error
+
+    @staticmethod
+    def _forbidden() -> APIKeyError:
+        request = httpx.Request("POST", "https://api.test/api/service/keys")
+        error = APIKeyError("HTTP 403: not a member", status_code=403)
+        error.__cause__ = httpx.HTTPStatusError(
+            "forbidden", request=request, response=httpx.Response(403)
+        )
+        return error
+
+    async def test_one_failed_key_mint_does_not_fail_a_finished_run(
+        self,
+        async_session_factory,
+        automation_with_run,
+        mock_settings,
+        cloud_verification,
+    ):
+        mint_errors, mint_calls = cloud_verification
+        mint_errors.append(self._network_error())
+        run_id = automation_with_run["run_id"]
+
+        marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.RUNNING, run.error_detail
+            assert marked == 0
+            assert run.status_detail["phase"] == "verification"
+            assert run.status_detail["transient"] is True
+            assert run.status_detail["kind"] == "transport"
+            assert run.status_detail["source"] == "openhands_api"
+            assert "connection reset" in run.status_detail["detail"]
+
+        marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 1
+        assert len(mint_calls) == 2
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+
+    @pytest.mark.parametrize("error_kind", ["forbidden", "bad_response"])
+    async def test_permanent_key_mint_failure_still_fails_the_run(
+        self,
+        error_kind,
+        async_session_factory,
+        automation_with_run,
+        mock_settings,
+        cloud_verification,
+    ):
+        mint_errors, _ = cloud_verification
+        mint_errors.append(
+            self._forbidden()
+            if error_kind == "forbidden"
+            else APIKeyError("API key not found in response: []")
+        )
+        run_id = automation_with_run["run_id"]
+
+        marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 1
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.FAILED
+            assert "verification failed" in run.error_detail
+            assert run.status_detail["transient"] is False
 
 
 class TestVerifyAndMarkRunStillRunning:
