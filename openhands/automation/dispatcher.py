@@ -121,6 +121,7 @@ from openhands.automation.utils.tarball_validation import (
 )
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.transient import classify_httpx_transient_error
 from openhands.automation.utils.unhealthy import (
     maybe_disable_unhealthy_automation_after_run,
 )
@@ -173,6 +174,13 @@ _RUN_AS_API_KEY_STATUS_CODES = frozenset({403, 404})
 _SERVICE_KEY_API_KEY_STATUS_CODES = frozenset({401})
 
 
+def _api_key_error_is_transient(exc: APIKeyError) -> bool:
+    """A 5xx, 408, 429 or network failure of the key mint may pass on retry."""
+    if exc.status_code is not None:
+        return _is_retryable_http_status(exc.status_code)
+    return isinstance(exc.__cause__, httpx.RequestError)
+
+
 def _api_key_error_status_detail(
     exc: APIKeyError, *, operation: str, error: str
 ) -> dict[str, Any]:
@@ -190,10 +198,13 @@ def _api_key_error_status_detail(
         kind, transient = RunStatusDetailKind.AUTH, False
     elif status_code in _SERVICE_KEY_API_KEY_STATUS_CODES:
         kind, transient = RunStatusDetailKind.UNKNOWN, False
-    elif status_code is not None and _is_retryable_http_status(status_code):
-        kind, transient = _run_status_kind_for_http_status(status_code), True
-    elif isinstance(exc.__cause__, httpx.RequestError):
-        kind, transient = RunStatusDetailKind.TRANSPORT, True
+    elif _api_key_error_is_transient(exc):
+        kind = (
+            RunStatusDetailKind.TRANSPORT
+            if status_code is None
+            else _run_status_kind_for_http_status(status_code)
+        )
+        transient = True
     else:
         kind, transient = RunStatusDetailKind.UNKNOWN, False
     return make_run_status_detail(
@@ -720,6 +731,23 @@ def _provisioning_deadline_seconds(run_timeout_seconds: int) -> int:
     )
 
 
+def _is_transient_provisioning_error(exc: BaseException) -> bool:
+    """Whether a fresh attempt may get the sandbox this attempt failed to get.
+
+    Raised before the entrypoint starts, so no automation code has run.
+    """
+    if isinstance(exc, SandboxProvisioningError):
+        return True
+    if isinstance(exc, APIKeyError):
+        return _api_key_error_is_transient(exc)
+    return (
+        classify_httpx_transient_error(
+            exc, source="sandbox_api", operation="get_execution_context"
+        )
+        is not None
+    )
+
+
 async def _acquire_execution_context(
     run: AutomationRun,
     backend: ExecutionBackend,
@@ -730,8 +758,9 @@ async def _acquire_execution_context(
 ) -> ExecutionContext | None:
     """Get an execution context, retrying sandboxes that fail to start.
 
-    Only ``SandboxProvisioningError`` is retried: no automation code has run
-    and the failed sandbox is already deleted. Before each retry the run must
+    Retries ``SandboxProvisioningError`` and transient sandbox-API or key-mint
+    errors: no automation code has run and a sandbox that never became ready
+    is already deleted. Before each retry the run must
     still be RUNNING; the same guarded write moves the watchdog deadline past
     the next attempt. Returns None if the run was cancelled or reaped while
     provisioning, after releasing any sandbox it got.
@@ -743,8 +772,11 @@ async def _acquire_execution_context(
         try:
             ctx = await backend.get_execution_context(client)
             break
-        except SandboxProvisioningError as exc:
-            exc.attempts = attempt
+        except Exception as exc:
+            if not _is_transient_provisioning_error(exc):
+                raise
+            if isinstance(exc, SandboxProvisioningError):
+                exc.attempts = attempt
             if attempt >= max_attempts:
                 raise
             delay = (

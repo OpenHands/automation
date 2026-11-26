@@ -1706,6 +1706,12 @@ class TestBuildEventPayload:
 class TestExecuteRunConcurrencyLimit:
     """Quota-limited runs are skipped without disabling their automation."""
 
+    @pytest.fixture(autouse=True)
+    def _fast_retries(self, monkeypatch):
+        sandbox_cfg = get_config().sandbox
+        monkeypatch.setattr(sandbox_cfg, "sandbox_provision_retry_delay", 0)
+        monkeypatch.setattr(sandbox_cfg, "sandbox_provision_max_attempts", 3)
+
     async def _make_running_run(self, async_session_factory):
         """Create an automation + a RUNNING run (as the dispatcher leaves it
         right before calling get_execution_context), with the automation
@@ -2109,10 +2115,11 @@ class TestExecuteRunConcurrencyLimit:
         transient,
         kind,
     ):
-        """A 401/403/404 from the key mint is a permanent run failure; a 5xx is
-        transient. The run fails either way and no sandbox is created. A 403/404
-        is kind ``auth`` (the run-as identity), which the unhealthy check counts;
-        a 401 (the shared service key) stays ``unknown``."""
+        """A 401/403/404 from the key mint is a permanent run failure; a 5xx or
+        429 is transient and retried before the run fails. No sandbox is created
+        either way. A 403/404 is kind ``auth`` (the run-as identity), which the
+        unhealthy check counts; a 401 (the shared service key) stays
+        ``unknown``."""
         from openhands.automation.utils.api_key import APIKeyError
 
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
@@ -2128,6 +2135,7 @@ class TestExecuteRunConcurrencyLimit:
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         backend.release_context.assert_not_called()
+        assert backend.get_execution_context.await_count == (3 if transient else 1)
         async with async_session_factory() as session:
             updated = await session.get(AutomationRun, run_id)
             assert updated.status == AutomationRunStatus.FAILED
@@ -2149,7 +2157,8 @@ class TestExecuteRunConcurrencyLimit:
     async def test_run_as_key_mint_network_error_is_transient(
         self, async_session_factory, mock_settings, mock_client
     ):
-        """A network failure reaching the key mint has no status and is transient."""
+        """A network failure reaching the key mint has no status, is transient
+        and is retried before the run fails."""
         import httpx
 
         from openhands.automation.utils.api_key import APIKeyError
@@ -2166,6 +2175,8 @@ class TestExecuteRunConcurrencyLimit:
         with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
+        attempts = backend.get_execution_context.await_count
+        assert attempts == 3, f"key mint attempts: {attempts}"
         async with async_session_factory() as session:
             updated = await session.get(AutomationRun, run_id)
             assert updated.status == AutomationRunStatus.FAILED
@@ -3562,6 +3573,85 @@ class TestExecuteRunProvisioningRetry:
         assert updated.status == AutomationRunStatus.FAILED
         assert updated.status_detail is not None
         assert updated.status_detail["kind"] == "unknown"
+
+    async def test_client_error_from_sandbox_api_is_not_retried(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        request = httpx.Request("POST", "https://api.test/api/v1/sandboxes")
+        error = httpx.HTTPStatusError(
+            "bad request", request=request, response=httpx.Response(400)
+        )
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(error)
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 1
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.FAILED
+
+    @pytest.mark.parametrize("fault", ["create_503", "create_connect", "poll_502"])
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_transient_sandbox_api_error_gets_a_fresh_sandbox(
+        self, mock_execute, fault, async_session_factory, mock_settings, monkeypatch
+    ):
+        """One 5xx or dropped connection from the sandbox API before the
+        entrypoint starts is retried through the real cloud backend."""
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            call = f"{request.method} {request.url.path}"
+            calls.append(call)
+            first = calls.count(call) == 1
+            if call == "POST /api/v1/sandboxes":
+                if first and fault == "create_503":
+                    return httpx.Response(503, text="unavailable")
+                if first and fault == "create_connect":
+                    raise httpx.ConnectError("connection reset", request=request)
+                return httpx.Response(200, json={"id": "sb-ok"})
+            if call == "GET /api/v1/sandboxes":
+                if first and fault == "poll_502":
+                    return httpx.Response(502, text="bad gateway")
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": "sb-ok",
+                            "status": "RUNNING",
+                            "session_api_key": "sess",
+                            "exposed_urls": [
+                                {"name": "AGENT_SERVER", "url": "http://agent.test"}
+                            ],
+                        }
+                    ],
+                )
+            return httpx.Response(200, json={})
+
+        async def mint(_run):
+            return "sk-user"
+
+        monkeypatch.setattr(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run", mint
+        )
+        monkeypatch.setattr(get_config().sandbox, "sandbox_poll_interval", 0)
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = CloudSandboxBackend(api_url="https://api.test", run=run)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch(
+                "openhands.automation.dispatcher.get_backend", return_value=backend
+            ):
+                await _execute_run(run, mock_settings, async_session_factory, client)
+
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.RUNNING, updated.error_detail
+        assert updated.sandbox_id == "sb-ok"
+        assert calls.count("POST /api/v1/sandboxes") == 2
+        mock_execute.assert_awaited_once()
 
 
 class TestExecuteRunDerivedConversationId:

@@ -212,7 +212,8 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
         AUTOMATION_SANDBOX_PROVISION_MAX_ATTEMPTS: Sandboxes tried per run when
-            one fails to start before the entrypoint runs; 1 disables retries
+            one fails to start, or the sandbox API or key mint fails
+            transiently, before the entrypoint runs; 1 disables retries
             (default: 3)
         AUTOMATION_SANDBOX_PROVISION_RETRY_DELAY: Base delay in seconds before
             the next attempt, doubled per attempt with +/-50% jitter
