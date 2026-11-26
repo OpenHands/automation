@@ -24,7 +24,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from openhands.automation.outcome_values import OutcomeGrain, OutcomeSemantics
+from openhands.automation.outcome_values import (
+    OutcomeGrain,
+    OutcomeSemantics,
+    OutcomeShape,
+)
 from openhands.automation.providers import DEFAULT_VERIFIER as DEFAULT_SIGNATURE_SCHEME
 from openhands.automation.utils import utcnow
 
@@ -125,6 +129,13 @@ class Factory(Base):
         """How the key's facts combine, and the period grain of a total."""
         spec = (self.outcome_keys or {}).get(key, {})
         return spec.get("semantics", "increment"), spec.get("grain")
+
+    def outcome_shape(
+        self, key: str
+    ) -> tuple[OutcomeShape | None, list[dict[str, Any]] | None]:
+        """The named shape of a json key and its table columns, if declared."""
+        spec = (self.outcome_keys or {}).get(key, {})
+        return spec.get("shape"), spec.get("columns")
 
 
 class Automation(Base):

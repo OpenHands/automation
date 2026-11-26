@@ -33,10 +33,12 @@ from openhands.automation.outcome_parsers import (
     OutcomeParserDefinition,
     validate_outcome_parsers,
 )
+from openhands.automation.outcome_shapes import TableColumn, check_table_columns
 from openhands.automation.outcome_values import (
     MAX_OUTCOME_KEYS,
     OutcomeGrain,
     OutcomeSemantics,
+    OutcomeShape,
     OutcomeValueType,
     validate_outcome_key,
 )
@@ -1416,9 +1418,21 @@ class OutcomeKeyDefinition(BaseModel):
         default=None,
         description="The period size of a total. Required for a total, and only then.",
     )
+    shape: OutcomeShape | None = Field(
+        default=None,
+        description=(
+            "A named contract for the value of a json key. table.v1: a table "
+            "whose columns the key declares. Every write is checked against it."
+        ),
+    )
+    columns: list[TableColumn] | None = Field(
+        default=None,
+        description="The columns of a table.v1 key. Required for it, and only then.",
+    )
 
     @model_validator(mode="after")
     def check_semantics(self) -> "OutcomeKeyDefinition":
+        self._check_shape()
         if self.semantics == "total":
             if self.grain is None:
                 raise ValueError("A total needs a grain: hour, day, week or month")
@@ -1427,6 +1441,19 @@ class OutcomeKeyDefinition(BaseModel):
         elif self.grain is not None:
             raise ValueError("grain applies only to a total")
         return self
+
+    def _check_shape(self) -> None:
+        if self.shape is None:
+            if self.columns is not None:
+                raise ValueError("columns apply only to a key with a shape")
+            return
+        if self.value_type != "json":
+            raise ValueError("A shape applies only to a json key")
+        if self.semantics != "increment":
+            raise ValueError("A key with a shape must use increment semantics")
+        if self.columns is None:
+            raise ValueError("A table.v1 key needs columns")
+        check_table_columns(self.columns)
 
 
 class FactoryCreate(BaseModel):

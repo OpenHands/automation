@@ -290,6 +290,8 @@ async def test_the_registry_checks_semantics_and_protects_keys_in_use(
         "type": "number",
         "semantics": "total",
         "grain": "month",
+        "shape": None,
+        "columns": None,
     }
     unused = await async_client.put(
         f"{url}/fresh", json={"type": "number", "semantics": "total", "grain": "day"}

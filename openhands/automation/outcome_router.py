@@ -31,6 +31,7 @@ from openhands.automation.outcome_schemas import (
     SubmitOutcomeRequest,
     SubmitOutcomeResponse,
 )
+from openhands.automation.outcome_shapes import validate_shape_value
 from openhands.automation.outcome_values import (
     OutcomeAggregation,
     extract_outcome_value_columns,
@@ -124,6 +125,11 @@ async def submit_outcome(
                 raise ValueError(
                     f"Outcome key {columns['key']!r} is not registered "
                     f"with type {columns['value_type']!r}"
+                )
+            shape, shape_columns = factory.outcome_shape(columns["key"])
+            if shape is not None:
+                validate_shape_value(
+                    shape, shape_columns, columns["json_value"], columns["key"]
                 )
             semantics, grain = factory.outcome_semantics(columns["key"])
             columns["effective_at"] = resolve_effective_at(

@@ -1087,7 +1087,13 @@ async def test_platform_prefix_and_invalid_keys_are_rejected_with_422(async_clie
 # --- outcome keys ---
 
 
-NUMBER_KEY = {"type": "number", "semantics": "increment", "grain": None}
+NUMBER_KEY = {
+    "type": "number",
+    "semantics": "increment",
+    "grain": None,
+    "shape": None,
+    "columns": None,
+}
 
 
 async def test_outcome_keys_are_managed_as_subresource(async_client):
