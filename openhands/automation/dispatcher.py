@@ -901,12 +901,13 @@ async def _skip_blocked_run(
         operation="get_execution_context",
         extra=extra,
     )
-    await mark_run_terminal(
+    if not await mark_run_terminal(
         session_factory,
         run,
         AutomationRunStatus.SKIPPED,
         status_detail=status_detail,
-    )
+    ):
+        return
     await capture_automation_event(
         "automation_run_skipped",
         automation=automation,
@@ -973,17 +974,13 @@ async def _execute_run(
         status_detail: dict | None = None,
     ) -> None:
         """Mark run as failed and optionally disable the automation."""
-        await mark_run_terminal(
+        transitioned = await mark_run_terminal(
             session_factory,
             run,
             AutomationRunStatus.FAILED,
             error,
             status_detail=status_detail,
         )
-        # mark_run_terminal updates a re-fetched row; sync this object so
-        # telemetry reports the persisted status instead of RUNNING.
-        run.status = AutomationRunStatus.FAILED
-        run.error_detail = error
         automation_disabled = disable
         if disable:
             automation_disabled = await disable_automation(
@@ -1002,6 +999,8 @@ async def _execute_run(
                 session_factory,
                 automation.id,
             )
+        if not transitioned:
+            return
         await capture_automation_event(
             "automation_run_failed",
             automation=automation,
@@ -1198,12 +1197,13 @@ async def _execute_run(
             source="sandbox_api",
             operation="get_execution_context",
         )
-        await mark_run_terminal(
+        if not await mark_run_terminal(
             session_factory,
             run,
             AutomationRunStatus.SKIPPED,
             status_detail=status_detail,
-        )
+        ):
+            return
         await capture_automation_event(
             "automation_run_skipped",
             automation=automation,
@@ -1881,7 +1881,7 @@ async def _execute_run_safe(
             await _execute_run(run, settings, session_factory, client)
     except Exception as exc:
         logger.exception("Background execution failed", extra=extra)
-        await mark_run_terminal(
+        if not await mark_run_terminal(
             session_factory,
             run,
             AutomationRunStatus.FAILED,
@@ -1892,9 +1892,8 @@ async def _execute_run_safe(
                 source="automation_service",
                 operation="execute_run_task",
             ),
-        )
-        run.status = AutomationRunStatus.FAILED
-        run.error_detail = "Internal error"
+        ):
+            return
         await capture_automation_event(
             "automation_run_failed",
             automation=run.automation,
