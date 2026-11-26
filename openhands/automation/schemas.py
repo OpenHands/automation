@@ -973,6 +973,9 @@ class WebhookConfig(BaseModel):
     event_id_expr: str | None = None
     admission_expr: str | None = None
     acknowledgement: str = DEFAULT_ACKNOWLEDGEMENT
+    # A custom webhook registered under a source name that is now built in.
+    # It keeps precedence for its org, so built-in deliveries are ignored.
+    shadows_builtin: bool = False
 
 
 class EventResponse(BaseModel):

@@ -21,7 +21,7 @@ from openhands.automation.draft_schemas import (
     FINAL_DRAFT_MODELS,
     normalize_draft_body,
 )
-from openhands.automation.event_schemas import parse_event
+from openhands.automation.event_schemas import parse_custom_event, parse_event
 from openhands.automation.event_schemas.catalog import (
     SOURCE_LABELS,
     pattern_can_match,
@@ -29,7 +29,7 @@ from openhands.automation.event_schemas.catalog import (
 )
 from openhands.automation.factory_router import authorize_factory_change
 from openhands.automation.filter_eval import FilterFunctions
-from openhands.automation.providers import builtin_sources
+from openhands.automation.providers import builtin_sources, get_provider
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
@@ -45,6 +45,7 @@ from openhands.automation.schemas import (
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
 from openhands.automation.utils.event_sources import (
+    EventSourceDelivery,
     configured_stream_sources,
     custom_event_sources,
     get_event_source_delivery,
@@ -121,9 +122,17 @@ async def get_capabilities(
             repo_providers=[],
         )
 
+    custom_sources = await custom_event_sources(user.org_id, session)
     webhook_sources = {
         *(builtin_sources() if config.service.webhook_secret else []),
-        *await custom_event_sources(user.org_id, session),
+        *custom_sources,
+    }
+    # An org's own webhook under a now built-in name keeps its own event keys,
+    # so the built-in catalog does not describe what it delivers.
+    own_keys = {
+        source
+        for source in custom_sources
+        if (provider := get_provider(source)) and provider.custom_webhook_precedence
     }
     event_sources = sorted({*webhook_sources, *configured_stream_sources(user.org_id)})
 
@@ -155,7 +164,8 @@ async def get_capabilities(
         event_types_by_source={
             source: patterns
             for source in event_sources
-            if (patterns := supported_event_patterns(source)) is not None
+            if source not in own_keys
+            and (patterns := supported_event_patterns(source)) is not None
         },
         triggers=TriggerCapabilities(
             cron=CronCapabilities(
@@ -260,10 +270,13 @@ async def validate_draft(
                 )
             )
         else:
-            errors.extend(_event_type_errors(trigger))
+            errors.extend(_event_type_errors(trigger, delivery))
+            parse = (
+                parse_custom_event if delivery.custom_shadows_builtin else parse_event
+            )
             if body.sample_event is not None:
                 try:
-                    event = parse_event(
+                    event = parse(
                         trigger.source,
                         body.sample_event,
                         event_key_expr=delivery.event_key_expr,
@@ -341,12 +354,17 @@ def _cron_errors(trigger: CronTrigger) -> list[DraftValidationError]:
     ]
 
 
-def _event_type_errors(trigger: EventTrigger) -> list[DraftValidationError]:
+def _event_type_errors(
+    trigger: EventTrigger, delivery: EventSourceDelivery
+) -> list[DraftValidationError]:
     """Reject event keys this deployment cannot parse.
 
     Only sources publishing a known catalog can be checked. A custom webhook's
-    event keys are whatever its own expression extracts, so anything matches.
+    event keys are whatever its own expression extracts, so anything matches,
+    including an org's own webhook under a now built-in source name.
     """
+    if delivery.custom_shadows_builtin:
+        return []
     label = SOURCE_LABELS.get(trigger.source, trigger.source)
     return [
         DraftValidationError(

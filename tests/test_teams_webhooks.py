@@ -1011,7 +1011,9 @@ async def test_unexpected_parse_rejection_has_sanitized_log(
     def fail_parse(*args, **kwargs):
         raise RuntimeError("payload-secret")
 
-    monkeypatch.setattr("openhands.automation.event_router.parse_event", fail_parse)
+    monkeypatch.setattr(
+        "openhands.automation.event_router.parse_custom_event", fail_parse
+    )
     response = await deliver(async_client, mock_authenticated_user.org_id)
     assert response.status_code == 400
     assert "payload-secret" not in response.text

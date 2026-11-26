@@ -26,6 +26,9 @@ class EventSourceDelivery:
     source: str
     event_key_expr: str | None = None
     transport: str = "webhook"
+    # An org's custom webhook under a source name that is now built in: its
+    # events keep the webhook's own event keys, not the built-in catalog's.
+    custom_shadows_builtin: bool = False
 
 
 async def get_event_source_delivery(
@@ -40,6 +43,7 @@ async def get_event_source_delivery(
             source=source,
             event_key_expr=webhook.event_key_expr,
             transport="webhook",
+            custom_shadows_builtin=webhook.shadows_builtin,
         )
 
     if source in configured_stream_sources(org_id):

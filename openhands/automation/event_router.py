@@ -63,7 +63,11 @@ from openhands.automation.acknowledgements import (
     get_acknowledgement,
 )
 from openhands.automation.db import get_session
-from openhands.automation.event_schemas import WebhookEvent, parse_event
+from openhands.automation.event_schemas import (
+    WebhookEvent,
+    parse_custom_event,
+    parse_event,
+)
 from openhands.automation.event_schemas.catalog import (
     event_detection_rules,
     supported_event_types,
@@ -92,6 +96,7 @@ from openhands.automation.schemas import (
     WebhookConfig,
 )
 from openhands.automation.utils.webhook import (
+    builtin_webhook_config,
     get_event_automation_org_ids,
     get_requested_event_types,
     get_webhook_config,
@@ -136,6 +141,19 @@ def _resolve_verifier(config: WebhookConfig, source: str) -> WebhookVerifier:
     return verifier
 
 
+def _verifies_as_builtin(source: str, body: bytes, request: Request) -> bool:
+    """Whether a delivery carries the OpenHands server's forwarding signature."""
+    config = builtin_webhook_config(source)
+    if config is None:
+        return False
+    return _resolve_verifier(config, source).verify(
+        body=body,
+        headers=request.headers,
+        secret=config.secret,
+        signature_header=config.signature_header,
+    )
+
+
 @router.get("/{source}/requested-types", response_model=RequestedEventTypesResponse)
 async def requested_event_types(
     source: str,
@@ -148,8 +166,8 @@ async def requested_event_types(
     authenticate with the same shared webhook secret used for event delivery.
     The signature is computed over the UTF-8 source string.
     """
-    config = await get_webhook_config(source, uuid.UUID(int=0), session)
-    if not config or not config.is_builtin:
+    config = builtin_webhook_config(source)
+    if not config:
         raise HTTPException(
             status_code=404,
             detail=f"Unknown builtin webhook source: {source}",
@@ -234,6 +252,17 @@ async def receive_event(
             status_code=404,
             detail=f"Unknown webhook source: {source}",
         )
+
+    if config.shadows_builtin and _verifies_as_builtin(source, body, request):
+        # The org's own custom webhook under this name delivers its events;
+        # taking the forwarded copy too would run each automation twice.
+        logger.info(
+            "Ignoring built-in %s event for org %s: its custom webhook "
+            "under the same source name takes precedence",
+            source,
+            org_id,
+        )
+        return EventResponse(received=True, matched=0, runs_created=[])
 
     profile = get_acknowledgement(config.acknowledgement)
     if profile is None:
@@ -360,7 +389,7 @@ async def receive_event(
         else:
             # Custom webhooks: extract event_key using JMESPath expression
             webhook_payload = payload
-            event = parse_event(
+            event = parse_custom_event(
                 source, webhook_payload, event_key_expr=config.event_key_expr
             )
     except HTTPException:

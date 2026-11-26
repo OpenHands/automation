@@ -402,7 +402,7 @@ async def _validate_draft_body(
                 )
             )
         else:
-            errors.extend(_event_type_errors(trigger))
+            errors.extend(_event_type_errors(trigger, delivery))
 
     return draft, run_as, errors
 
