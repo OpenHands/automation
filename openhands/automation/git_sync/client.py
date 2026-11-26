@@ -14,6 +14,8 @@ import hashlib
 import logging
 import os
 import re
+import shutil
+import signal
 from pathlib import Path
 from typing import Final
 
@@ -113,6 +115,16 @@ _AUTH_BASIC: Final = "basic"
 _AUTH_BEARER: Final = "bearer"
 _accepted_auth_scheme: dict[str, str] = {}
 
+# An HTTP(S) transfer that moves under 1 byte/s for this long is stalled, not
+# slow: abort it instead of letting it hold the cycle until the hard timeout.
+_STALL_SECONDS: Final[int] = 60
+_STALL_CONFIG_ARGS: Final[tuple[str, ...]] = (
+    "-c",
+    "http.lowSpeedLimit=1",
+    "-c",
+    f"http.lowSpeedTime={_STALL_SECONDS}",
+)
+
 
 def _token_key(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -167,6 +179,22 @@ async def _run_git(
     return out
 
 
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill git and the transport helpers it spawned (`git remote-https`, ssh).
+
+    The helpers inherit git's stdout/stderr, and asyncio's `wait()` resolves
+    only once every pipe is closed, so killing git alone leaves the wait
+    blocked on a stalled helper and the helper orphaned.
+    """
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+
+
 async def _run_git_once(
     args: list[str],
     *,
@@ -175,7 +203,7 @@ async def _run_git_once(
     token: str = "",
     scheme: str = _AUTH_BASIC,
 ) -> str:
-    full_args = ["git", *_auth_config_args(token, scheme), *args]
+    full_args = ["git", *_STALL_CONFIG_ARGS, *_auth_config_args(token, scheme), *args]
     # Excludes the auth header and redacts URL credentials: this string reaches
     # the user-visible error banner via `git_sync_last_error`.
     logged_args = ["git", *(redact_url_credentials(arg) for arg in args)]
@@ -188,6 +216,8 @@ async def _run_git_once(
             env=_non_interactive_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Its own process group, so a timeout can kill the helpers too.
+            start_new_session=True,
         )
     except FileNotFoundError as e:
         raise GitSyncError("git executable not found") from e
@@ -195,7 +225,7 @@ async def _run_git_once(
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
-        proc.kill()
+        _kill_process_tree(proc)
         await proc.wait()
         raise GitSyncError(
             f"git command timed out after {timeout}s: {' '.join(logged_args)}. "
@@ -310,6 +340,29 @@ async def _current_origin_url(workdir: Path, timeout: float) -> str | None:
     return out.strip() or None
 
 
+async def _is_interrupted_clone(workdir: Path, timeout: float) -> bool:
+    """Whether `workdir/.git` is what a clone killed mid-transfer leaves behind.
+
+    `git clone` points HEAD at the `.invalid` placeholder and writes origin's
+    fetch refspec only once the transfer is done; every later `pull()` fails
+    on such a checkout. Both markers are required so a real checkout is never
+    mistaken for one.
+    """
+    try:
+        head = (workdir / ".git" / "HEAD").read_text().strip()
+    except OSError:
+        return False
+    if head != "ref: refs/heads/.invalid":
+        return False
+    try:
+        await _run_git(
+            ["config", "--get", "remote.origin.fetch"], cwd=workdir, timeout=timeout
+        )
+    except GitSyncError:
+        return True
+    return False
+
+
 async def ensure_repo(
     workdir: Path, repo_url: str, branch: str, token: str, timeout: float
 ) -> None:
@@ -320,7 +373,14 @@ async def ensure_repo(
     `branch`, creating it locally if the remote doesn't have it. Callers should
     `pull()` afterward.
     """
-    if (workdir / ".git").is_dir():
+    git_dir = workdir / ".git"
+    if git_dir.is_dir() and await _is_interrupted_clone(workdir, timeout):
+        logger.warning(
+            "git-sync checkout at %s is an interrupted clone; cloning again", workdir
+        )
+        shutil.rmtree(git_dir)
+
+    if git_dir.is_dir():
         current_url = await _current_origin_url(workdir, timeout)
         if current_url != repo_url:
             logger.warning(
@@ -336,12 +396,16 @@ async def ensure_repo(
         return
 
     workdir.mkdir(parents=True, exist_ok=True)
-    await _run_git(
-        ["clone", "--origin", "origin", repo_url, "."],
-        cwd=workdir,
-        token=token,
-        timeout=timeout,
-    )
+    try:
+        await _run_git(
+            ["clone", "--origin", "origin", repo_url, "."],
+            cwd=workdir,
+            token=token,
+            timeout=timeout,
+        )
+    except GitSyncError:
+        shutil.rmtree(git_dir, ignore_errors=True)
+        raise
 
     if await _remote_branch_exists(workdir, branch, timeout):
         await _run_git(

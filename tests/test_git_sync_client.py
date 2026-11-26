@@ -459,7 +459,10 @@ class TestCheckRemoteAccess:
         await check_remote_access(_repo_url(origin), "main", token="", timeout=30)
 
         assert len(commands) == 1
-        assert commands[0][1] == "ls-remote"
+        args = commands[0][1:]
+        while args[0] == "-c":
+            args = args[2:]
+        assert args[0] == "ls-remote"
         assert list(tmp_path.iterdir()) == [origin]
 
 
