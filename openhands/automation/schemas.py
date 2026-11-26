@@ -35,6 +35,8 @@ from openhands.automation.outcome_parsers import (
 )
 from openhands.automation.outcome_values import (
     MAX_OUTCOME_KEYS,
+    OutcomeGrain,
+    OutcomeSemantics,
     OutcomeValueType,
     validate_outcome_key,
 )
@@ -1402,6 +1404,29 @@ class OutcomeKeyDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     value_type: OutcomeValueType = Field(alias="type")
+    semantics: OutcomeSemantics = Field(
+        default="increment",
+        description=(
+            "increment: every fact counts, which is how keys worked before "
+            "semantics existed. total: a fact is the total for one period, and "
+            "the latest report for a period replaces earlier ones."
+        ),
+    )
+    grain: OutcomeGrain | None = Field(
+        default=None,
+        description="The period size of a total. Required for a total, and only then.",
+    )
+
+    @model_validator(mode="after")
+    def check_semantics(self) -> "OutcomeKeyDefinition":
+        if self.semantics == "total":
+            if self.grain is None:
+                raise ValueError("A total needs a grain: hour, day, week or month")
+            if self.value_type != "number":
+                raise ValueError("A total must be a number")
+        elif self.grain is not None:
+            raise ValueError("grain applies only to a total")
+        return self
 
 
 class FactoryCreate(BaseModel):

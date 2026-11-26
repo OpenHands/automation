@@ -7,6 +7,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import ColumnElement, func, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
@@ -21,6 +22,7 @@ from openhands.automation.models import (
 )
 from openhands.automation.outcome_aggregation import aggregate_buckets, aggregate_total
 from openhands.automation.outcome_parsers import parse_outcome_payload
+from openhands.automation.outcome_periods import resolve_effective_at
 from openhands.automation.outcome_schemas import (
     OutcomeAggregateBucket,
     OutcomeAggregateResponse,
@@ -102,6 +104,7 @@ async def submit_outcome(
     source = "agent" if auth.auth_method == "kv_token" else "user"
     run_id = auth.run_id if source == "agent" else body.run_id
     run_id = await _validated_run_id(session, automation.id, run_id)
+    now = utcnow()
     try:
         if body.values is not None:
             columns_list = normalize_outcome_values(
@@ -122,6 +125,16 @@ async def submit_outcome(
                     f"Outcome key {columns['key']!r} is not registered "
                     f"with type {columns['value_type']!r}"
                 )
+            semantics, grain = factory.outcome_semantics(columns["key"])
+            columns["effective_at"] = resolve_effective_at(
+                columns["key"],
+                semantics,
+                grain,
+                period=body.period,
+                effective_at=body.effective_at,
+                dedupe_key=body.dedupe_key,
+                now=now,
+            )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -136,24 +149,43 @@ async def submit_outcome(
         if (existing or 0) + len(columns_list) > MAX_OUTCOME_ROWS_PER_RUN:
             raise HTTPException(422, "Run outcome row limit exceeded")
 
-    now = utcnow()
-    for columns in columns_list:
-        session.add(
-            AutomationOutcomeValue(
-                org_id=factory.org_id,
-                factory_id=factory.id,
-                automation_id=automation.id,
-                run_id=run_id,
-                source=source,
-                created_at=now,
-                **columns,
-            )
-        )
-    await session.flush()
-    logger.info(
-        "Stored %s outcome values for factory %s", len(columns_list), factory.id
+    insert = (
+        sqlite.insert
+        if session.get_bind().dialect.name == "sqlite"
+        else postgresql.insert
     )
-    return SubmitOutcomeResponse(stored=len(columns_list))
+    stored = 0
+    for columns in columns_list:
+        statement = insert(AutomationOutcomeValue).values(
+            org_id=factory.org_id,
+            factory_id=factory.id,
+            automation_id=automation.id,
+            run_id=run_id,
+            source=source,
+            created_at=now,
+            dedupe_key=body.dedupe_key,
+            dimensions=body.dimensions,
+            **columns,
+        )
+        if body.dedupe_key is not None:
+            statement = statement.on_conflict_do_nothing(
+                index_elements=[
+                    AutomationOutcomeValue.factory_id,
+                    AutomationOutcomeValue.key,
+                    AutomationOutcomeValue.dedupe_key,
+                ],
+                index_where=AutomationOutcomeValue.dedupe_key.is_not(None),
+            )
+        inserted = await session.scalar(statement.returning(AutomationOutcomeValue.id))
+        stored += inserted is not None
+    duplicates = len(columns_list) - stored
+    logger.info(
+        "Stored %s outcome values for factory %s (%s duplicates)",
+        stored,
+        factory.id,
+        duplicates,
+    )
+    return SubmitOutcomeResponse(stored=stored, duplicates=duplicates)
 
 
 def _fact_conditions(
@@ -180,9 +212,9 @@ def _fact_conditions(
     if source is not None:
         conditions.append(AutomationOutcomeValue.source == source)
     if since is not None:
-        conditions.append(AutomationOutcomeValue.created_at >= since)
+        conditions.append(AutomationOutcomeValue.effective_at >= since)
     if until is not None:
-        conditions.append(AutomationOutcomeValue.created_at < until)
+        conditions.append(AutomationOutcomeValue.effective_at < until)
     return conditions
 
 
@@ -194,12 +226,16 @@ async def list_factory_outcome_values(
     run_id: uuid.UUID | None = None,
     source: Literal["agent", "user", "platform"] | None = None,
     since: datetime | None = Query(
-        default=None, description="Inclusive lower bound on the submission time."
+        default=None,
+        description=(
+            "Inclusive lower bound on the time a fact counts at: the start of its "
+            "period, the time it happened, or the time it was received."
+        ),
     ),
     until: datetime | None = Query(
         default=None,
         description=(
-            "Exclusive upper bound on the submission time, so adjacent windows "
+            "Exclusive upper bound on the time a fact counts at, so adjacent windows "
             "never count the same row."
         ),
     ),
@@ -252,12 +288,16 @@ async def aggregate_factory_outcome_values(
     run_id: uuid.UUID | None = None,
     source: Literal["agent", "user", "platform"] | None = None,
     since: datetime | None = Query(
-        default=None, description="Inclusive lower bound on the submission time."
+        default=None,
+        description=(
+            "Inclusive lower bound on the time a fact counts at: the start of its "
+            "period, the time it happened, or the time it was received."
+        ),
     ),
     until: datetime | None = Query(
         default=None,
         description=(
-            "Exclusive upper bound on the submission time, so adjacent windows "
+            "Exclusive upper bound on the time a fact counts at, so adjacent windows "
             "never count the same row."
         ),
     ),
@@ -265,7 +305,8 @@ async def aggregate_factory_outcome_values(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> OutcomeAggregateResponse:
-    await get_org_factory(session, user.org_id, factory_id)
+    factory = await get_org_factory(session, user.org_id, factory_id)
+    semantics, _ = factory.outcome_semantics(key)
 
     conditions = _fact_conditions(
         user.org_id,
@@ -278,7 +319,7 @@ async def aggregate_factory_outcome_values(
         until=until,
     )
     if group_by == "none":
-        total = await aggregate_total(session, conditions, operation)
+        total = await aggregate_total(session, conditions, operation, semantics)
         return OutcomeAggregateResponse(
             key=key,
             operation=operation,
@@ -287,7 +328,9 @@ async def aggregate_factory_outcome_values(
             since=since,
             until=until,
         )
-    buckets = await aggregate_buckets(session, conditions, operation, group_by)
+    buckets = await aggregate_buckets(
+        session, conditions, operation, group_by, semantics
+    )
     return OutcomeAggregateResponse(
         key=key,
         operation=operation,

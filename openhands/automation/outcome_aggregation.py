@@ -4,11 +4,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import ColumnElement, Subquery, case, func, select
+from sqlalchemy import ColumnElement, Subquery, Text, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.models import AutomationOutcomeValue
-from openhands.automation.outcome_values import OutcomeAggregation
+from openhands.automation.outcome_values import OutcomeAggregation, OutcomeSemantics
 
 
 OutcomeBucketSize = Literal["day", "week", "month"]
@@ -25,16 +25,48 @@ class BucketAggregate(Aggregate):
     bucket: str
 
 
-def effective_facts(conditions: Sequence[ColumnElement[bool]]) -> Subquery:
-    """The facts an aggregation reads, with ``at`` as the time they count at."""
-    return (
+def effective_facts(
+    conditions: Sequence[ColumnElement[bool]],
+    semantics: OutcomeSemantics = "increment",
+) -> Subquery:
+    """The facts an aggregation reads, with ``at`` as the time they count at.
+
+    Every fact counts for an increment. For a total, only the latest report
+    counts for each automation, set of dimensions and period. The conditions
+    choose which reports compete, so a filter on the run picks that run's
+    latest report. Latest means received last, never the client's clock.
+    """
+    columns = (
+        AutomationOutcomeValue.effective_at.label("at"),
+        AutomationOutcomeValue.value_type,
+        AutomationOutcomeValue.numeric_value,
+        AutomationOutcomeValue.boolean_value,
+    )
+    if semantics == "increment":
+        return select(*columns).where(*conditions).subquery("facts")
+    ranked = (
         select(
-            AutomationOutcomeValue.created_at.label("at"),
-            AutomationOutcomeValue.value_type,
-            AutomationOutcomeValue.numeric_value,
-            AutomationOutcomeValue.boolean_value,
+            *columns,
+            func.row_number()
+            .over(
+                partition_by=(
+                    AutomationOutcomeValue.automation_id,
+                    func.coalesce(cast(AutomationOutcomeValue.dimensions, Text), ""),
+                    AutomationOutcomeValue.effective_at,
+                ),
+                order_by=(
+                    AutomationOutcomeValue.created_at.desc(),
+                    AutomationOutcomeValue.id.desc(),
+                ),
+            )
+            .label("report_rank"),
         )
         .where(*conditions)
+        .subquery("ranked")
+    )
+    return (
+        select(*(ranked.c[column.key] for column in columns))
+        .where(ranked.c.report_rank == 1)
         .subquery("facts")
     )
 
@@ -86,9 +118,10 @@ async def aggregate_total(
     session: AsyncSession,
     conditions: Sequence[ColumnElement[bool]],
     operation: OutcomeAggregation,
+    semantics: OutcomeSemantics = "increment",
 ) -> Aggregate:
     """Aggregate the facts matching ``conditions``. No facts gives a count of 0."""
-    facts = effective_facts(conditions)
+    facts = effective_facts(conditions, semantics)
     row = (
         await session.execute(
             select(_operation_value(facts, operation), func.count())
@@ -104,9 +137,10 @@ async def aggregate_buckets(
     conditions: Sequence[ColumnElement[bool]],
     operation: OutcomeAggregation,
     bucket_size: OutcomeBucketSize,
+    semantics: OutcomeSemantics = "increment",
 ) -> list[BucketAggregate]:
     """Aggregate by UTC bucket, oldest first. Buckets with no facts are left out."""
-    facts = effective_facts(conditions)
+    facts = effective_facts(conditions, semantics)
     bucket = _bucket(facts.c.at, bucket_size, session.get_bind().dialect.name)
     rows = await session.execute(
         select(bucket.label("bucket"), _operation_value(facts, operation), func.count())

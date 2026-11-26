@@ -19,6 +19,14 @@ OUTCOME_KEY_PATTERN = r"^[a-zA-Z0-9_.-]+$"
 RESERVED_OUTCOME_KEY_PREFIX = "platform."
 
 OutcomeValueType = Literal["number", "string", "boolean", "datetime", "json"]
+# How a key's facts combine. ``increment``: each fact is an amount that happened
+# and every fact counts. ``total``: a fact is the total for one period, and a
+# later report for the same period replaces the earlier one.
+OutcomeSemantics = Literal["increment", "total"]
+OutcomeGrain = Literal["hour", "day", "week", "month"]
+MAX_OUTCOME_DEDUPE_KEY_LENGTH = 200
+MAX_OUTCOME_DIMENSIONS = 8
+MAX_OUTCOME_DIMENSION_VALUE_LENGTH = 64
 OutcomeAggregation = Literal[
     "sum", "count", "avg", "min", "max", "count_true", "count_false"
 ]
@@ -45,6 +53,21 @@ def validate_outcome_key(key: str) -> str:
             f"reserved for the platform: {key!r}"
         )
     return key
+
+
+def normalize_outcome_dimensions(dimensions: dict[str, str]) -> dict[str, str]:
+    """Check dimensions and return them with sorted keys, one form per set."""
+    if len(dimensions) > MAX_OUTCOME_DIMENSIONS:
+        raise ValueError(f"At most {MAX_OUTCOME_DIMENSIONS} dimensions are allowed")
+    for name, value in dimensions.items():
+        if not re.fullmatch(OUTCOME_KEY_PATTERN, name) or len(name) > 40:
+            raise ValueError(f"Invalid dimension name: {name!r}")
+        if not 0 < len(value) <= MAX_OUTCOME_DIMENSION_VALUE_LENGTH:
+            raise ValueError(
+                f"Dimension {name!r} must be 1 to "
+                f"{MAX_OUTCOME_DIMENSION_VALUE_LENGTH} characters"
+            )
+    return dict(sorted(dimensions.items()))
 
 
 def _validate_string(value: str, key: str) -> str:

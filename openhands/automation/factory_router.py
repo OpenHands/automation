@@ -238,7 +238,7 @@ async def create_factory(
         org_id=user.org_id,
         name=data.name,
         outcome_keys={
-            key: definition.model_dump(by_alias=True)
+            key: definition.model_dump(by_alias=True, exclude_defaults=True)
             for key, definition in data.outcome_keys.items()
         },
     )
@@ -324,19 +324,18 @@ async def put_factory_outcome_key(
     _checked_outcome_key(key)
     factory = await get_org_factory(session, user.org_id, factory_id, lock="update")
     keys = _outcome_keys(factory)
-    current_type = keys.get(key, {}).get("type")
-    requested_type = data.value_type
+    current = OutcomeKeyDefinition.model_validate(keys[key]) if key in keys else None
     if (
-        current_type is not None
-        and current_type != requested_type
+        current is not None
+        and current != data
         and await factory_outcome_key_in_use(session, factory.id, key)
     ):
         raise _key_conflict(key)
-    if current_type is None and len(keys) >= MAX_OUTCOME_KEYS:
+    if current is None and len(keys) >= MAX_OUTCOME_KEYS:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "Too many outcome keys"
         )
-    keys[key] = data.model_dump(by_alias=True)
+    keys[key] = data.model_dump(by_alias=True, exclude_defaults=True)
     factory.outcome_keys = keys
     await session.flush()
     await session.refresh(factory)
