@@ -226,7 +226,7 @@ async def _try_resolve_user(
     FastAPI dependency (so it can be overridden in tests) while still trying
     the KV token path first.  Returns None on 401 (no/invalid credential) or
     on unexpected errors (e.g. no http_client available when KV token auth
-    is being used).  Other HTTP errors (429, 502) propagate so the client
+    is being used).  Other HTTP errors (403, 429, 502) propagate so the client
     sees them rather than silently falling through.
     """
     try:

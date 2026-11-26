@@ -217,6 +217,15 @@ def _extract_x_org_id(request: Request) -> str | None:
         ) from exc
 
 
+def _upstream_detail(response: httpx.Response) -> str | None:
+    """The string ``detail`` of an OpenHands API error response, if it has one."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    return detail if isinstance(detail, str) and detail else None
+
+
 def _is_rate_limited(response: httpx.Response) -> bool:
     """Check if response is a 429 rate limit response."""
     return response.status_code == 429
@@ -540,6 +549,13 @@ async def authenticate_request(
             else "Invalid or expired session cookie"
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+    if resp.status_code == 403:
+        # The credential is valid but not for this request, e.g. an X-Org-Id the
+        # key may not act in: the caller's error, not a gateway failure.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_upstream_detail(resp) or "Access denied by OpenHands API",
+        )
     if resp.status_code == 429:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -550,9 +566,16 @@ async def authenticate_request(
             "Unexpected status from OpenHands /api/v1/users/me: %s",
             resp.status_code,
         )
+        # Any other 4xx stays a 502: /users/me takes nothing from the caller but
+        # the credential and X-Org-Id, so e.g. a 404 means a misconfigured
+        # openhands_api_base_url, not a bad request.
+        problem = "unavailable" if resp.status_code >= 500 else "unexpected response"
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Unexpected response from OpenHands API",
+            detail=(
+                f"OpenHands API {problem} during authentication "
+                f"(HTTP {resp.status_code})"
+            ),
         )
 
     # --- Build user and cache ---
