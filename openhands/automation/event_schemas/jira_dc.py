@@ -18,6 +18,17 @@ JIRA_DC_EVENT_TYPES: tuple[str, ...] = (
     "jira:issue_updated",
 )
 
+# Human-readable names a setup UI can show for each event key, keyed the same
+# way as the tuple above.
+JIRA_DC_EVENT_TYPE_LABELS: dict[str, str] = {
+    "comment_created": "Comment created",
+    "comment_deleted": "Comment deleted",
+    "comment_updated": "Comment updated",
+    "jira:issue_created": "Issue created",
+    "jira:issue_deleted": "Issue deleted",
+    "jira:issue_updated": "Issue updated",
+}
+
 
 class JiraDcEvent(WebhookEvent):
     """Jira Data Center webhook event.
