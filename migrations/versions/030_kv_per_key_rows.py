@@ -70,7 +70,11 @@ def _migrate_legacy_documents() -> None:
     # migration module stays importable without the application config, and so
     # an empty database (fresh install) never requires the secret.
     from openhands.automation.config import get_config
-    from openhands.automation.utils.kv import decrypt_value, encrypt_value
+    from openhands.automation.utils.kv import (
+        KVEncryptionError,
+        decrypt_value,
+        encrypt_value,
+    )
 
     secret = get_config().kv.kv_secret
     if not secret:
@@ -83,7 +87,15 @@ def _migrate_legacy_documents() -> None:
     key_rows: list[dict[str, object]] = []
     meta_rows: list[dict[str, object]] = []
     for automation_id, state_encrypted in rows:
-        state = decrypt_value(secret, state_encrypted)
+        try:
+            state = decrypt_value(secret, state_encrypted)
+        except KVEncryptionError as e:
+            raise RuntimeError(
+                f"Cannot read the automation_kv state of automation {automation_id} "
+                f"({e}). AUTOMATION_KV_SECRET must be the secret this state was "
+                "written with; set it to that value and re-run the migration. "
+                "The stored state has not been modified."
+            ) from e
         if not isinstance(state, dict):
             raise RuntimeError(
                 f"automation_kv state for {automation_id} is not a JSON object; "
@@ -115,7 +127,42 @@ def _migrate_legacy_documents() -> None:
         connection.execute(kv.insert(), key_rows)
 
 
+def _undo_partial_upgrade() -> None:
+    """Restore the 029 KV table that an earlier failed run left renamed.
+
+    Before SQLite migrations ran in one transaction, a failure in this
+    migration (typically a wrong or missing AUTOMATION_KV_SECRET) kept the
+    rename below and the new tables while the revision stayed at 029, so every
+    retry failed on the rename (OpenHands/OpenHands#18299). The original
+    ciphertext is intact in ``automation_kv_legacy``, and the new tables are
+    empty: their rows were written in the same transaction as the revision
+    bump, so the failure rolled them back. Any other shape is left untouched
+    for a person to inspect.
+    """
+    connection = op.get_bind()
+    tables = set(sa.inspect(connection).get_table_names())
+    if "automation_kv_legacy" not in tables:
+        return
+
+    partial = [t for t in ("automation_kv", "automation_kv_meta") if t in tables]
+    for table in partial:
+        count = connection.execute(
+            sa.select(sa.func.count()).select_from(sa.table(table))
+        ).scalar_one()
+        if count:
+            raise RuntimeError(
+                f"automation_kv_legacy exists next to a non-empty {table}, which "
+                "a failed run of this migration does not leave behind. Back up "
+                "the database and inspect both tables; nothing was changed."
+            )
+    for table in partial:
+        op.drop_table(table)
+    op.rename_table("automation_kv_legacy", "automation_kv")
+
+
 def upgrade() -> None:
+    _undo_partial_upgrade()
+
     # Preserve the released single-document table under a temporary name while
     # the new per-key schema is built and populated.
     op.rename_table("automation_kv", "automation_kv_legacy")
