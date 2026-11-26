@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from openhands.automation.models import Factory
+from openhands.automation.models import AutomationRun, AutomationRunStatus, Factory
 from tests.test_outcome_api import make_automation, outcome_auth  # noqa: F401
 
 
@@ -125,6 +125,51 @@ async def test_totals_replace_only_within_the_same_automation_and_dimensions(
     # first: 5 + api 6 + web 4 + db 2; second: 7
     result = await aggregate(async_client, factory, "merged")
     assert (result["value"], result["count"]) == (24, 5)
+
+
+async def test_the_run_filter_picks_the_latest_total_each_run_reported(
+    async_client, async_session, world
+):
+    factory, automation, _ = world
+    runs = [
+        AutomationRun(automation_id=automation.id, status=AutomationRunStatus.RUNNING)
+        for _ in range(2)
+    ]
+    async_session.add_all(runs)
+    await async_session.commit()
+    first_run, second_run = (str(run.id) for run in runs)
+
+    for period, value, run_id in [
+        ("2025-W48", 5, first_run),
+        ("2025-W48", 9, first_run),
+        ("2025-W47", 3, first_run),
+        ("2025-W48", 8, second_run),
+    ]:
+        response = await submit(
+            async_client,
+            automation,
+            payload={"merged": value},
+            period=period,
+            run_id=run_id,
+        )
+        assert response.status_code == 201, response.text
+
+    async def counted(**params):
+        result = await aggregate(async_client, factory, "merged", **params)
+        return result["value"], result["count"]
+
+    assert await counted(run_id=first_run) == (12, 2)
+    assert await counted(run_id=second_run) == (8, 1)
+    # Without the filter the runs compete: the report received last wins.
+    assert await counted() == (11, 2)
+
+    response = await submit(
+        async_client, automation, payload={"merged": 4}, period="2025-W48"
+    )
+    assert response.status_code == 201, response.text
+    assert await counted() == (7, 2)
+    assert await counted(run_id=first_run) == (12, 2)
+    assert await counted(run_id=second_run) == (8, 1)
 
 
 async def test_a_total_must_carry_a_period_that_fits_its_grain(async_client, world):
